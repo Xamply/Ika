@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+dist/
+dist-ssr/
+
+# Tauri & Rust build artifacts
+src-tauri/target/
+src-tauri/WixTools/
+*.exe
+*.msi
+
+# Temporary & debug files
+*.log
+err.log
+out.log
+run_debug.log
+log.txt
+tmp_edge/
+tmp_edge_cdp/
+scratch/
+test_dl_*/
+__pycache__/
+
+# Screenshots and visual bug captures
+*.png
+*.jpg
+*.jpeg
+*.mp4
+app_dist_screenshot.png
+bug visual1.png
+cdp_screenshot.png
+curr.png
+goal*.png
+orig_*.png
+prev_*.png
+ref_*.png
+rendered_*.png
+test_*.png
+test_*.html
+extracted_stops.txt
