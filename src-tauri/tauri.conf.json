@@ -53,5 +53,13 @@
     "android": {
       "debugApplicationIdSuffix": ".debug"
     }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQwRUMwOUU4OTgzNzREOUYKUldTZlRUZVk2QW5zMElkNW9mSXg0dFVKanBLcmJna04vRGR5bEI4aDVndjdHNGQ0T2pOREFXTXgK",
+      "endpoints": [
+        "https://github.com/Xamply/Ika/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

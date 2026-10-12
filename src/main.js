@@ -26176,3 +26176,59 @@ window.ikaShare = ikaShare;
   });
 })();
 
+// =========================================================
+// AUTO-UPDATER (Checks GitHub Releases for new launcher versions)
+// =========================================================
+(async () => {
+  const btn = document.getElementById("titlebar-btn-update");
+  const label = document.getElementById("titlebar-update-label");
+  if (!btn) return;
+
+  try {
+    const { check } = await import("@tauri-apps/plugin-updater");
+    const update = await check();
+    if (!update) return;
+
+    btn.classList.remove("hidden");
+    if (label) label.textContent = `Actualizar (v${update.version})`;
+
+    btn.addEventListener("click", async () => {
+      btn.classList.add("is-downloading");
+      if (label) label.textContent = "Descargando...";
+
+      let downloaded = 0;
+      let contentLength = 0;
+
+      try {
+        await update.downloadAndInstall((event) => {
+          switch (event.event) {
+            case "Started":
+              contentLength = event.data.contentLength || 0;
+              break;
+            case "Progress":
+              downloaded += event.data.chunkLength;
+              if (contentLength > 0 && label) {
+                const pct = Math.round((downloaded / contentLength) * 100);
+                label.textContent = `Descargando ${pct}%`;
+              }
+              break;
+            case "Finished":
+              if (label) label.textContent = "Instalando...";
+              break;
+          }
+        });
+
+        if (label) label.textContent = "Reiniciando...";
+        const { relaunch } = await import("@tauri-apps/plugin-process");
+        await relaunch();
+      } catch (err) {
+        console.error("Error al actualizar launcher:", err);
+        btn.classList.remove("is-downloading");
+        if (label) label.textContent = "Error al actualizar";
+      }
+    });
+  } catch (e) {
+    // Silently ignore if updater endpoint is unreachable or offline
+    console.debug("Updater check skipped:", e);
+  }
+})();
