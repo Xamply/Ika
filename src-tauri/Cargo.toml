@@ -1,0 +1,73 @@
+[package]
+name = "app"
+version = "0.1.0"
+description = "A Tauri App"
+authors = ["you"]
+license = ""
+repository = ""
+edition = "2021"
+rust-version = "1.77.2"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+tauri = { version = "2.11.3", features = ["protocol-asset"] }
+tauri-plugin-log = "2"
+rayon = "1.10"
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+walkdir = "2.5"
+regex = "1.11"
+rfd = "0.15"
+open = "5.3"
+sha1 = { version = "0.10", features = ["oid"] }
+tauri-plugin-single-instance = "2"
+# Minecraft downloader (src/mc.rs): blocking HTTP for the parallel rayon downloads, and
+# MD5 for the offline-account UUID (same as Prism/Pinecone).
+ureq = "2"
+md-5 = "0.10"
+# Local skin server for offline accounts (src/skin_server.rs): profile signatures
+# (SHA1withRSA), base64 payloads, authlib-injector checksum.
+rsa = "0.9"
+rand = "0.8"
+base64 = "0.22"
+sha2 = "0.10"
+# Device key for the Ika skins service (src/device_key.rs): Ed25519 signatures.
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+# Old Minecraft logs (*.log.gz) in the console section.
+flate2 = "1"
+
+# Direct WebView2 access (memory target level / visibility while minimized).
+# Same versions tauri/wry already use, so nothing new is downloaded.
+[target.'cfg(windows)'.dependencies]
+# DPAPI (CryptProtectData) keeps the device key usable only on this PC.
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Threading", "Win32_System_ProcessStatus"] }
+webview2-com = "0.38"
+windows-core = "0.61"
+
+# The development build is the one used day to day: unoptimized, hashing and unzipping every
+# mod of an instance took seconds and kept every core busy. The dependencies (sha1, zip, regex,
+# serde...) are compiled once with full optimization; this crate with enough of it to be fast
+# and still rebuild quickly.
+[profile.dev]
+opt-level = 2
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+# Smaller, faster binary: whole-program optimization and no debug symbols.
+lto = true
+codegen-units = 1
+strip = true
+
+
