@@ -869,10 +869,11 @@ function makeDraggable(element, handle, options = {}) {
       const bottomBarHeight = 168; // Minimum margin to avoid bottom cyber play dock (150px + margin)
 
       const isCyberWin = element.classList.contains("home-cyber-window") || element.classList.contains("home-console-preview-dock");
-      const maxLeft = isCyberWin ? (cWidth - 60) : Math.max(10, cWidth - eWidth - 10);
-      const minLeft = isCyberWin ? (-eWidth + 60) : 10;
-      const minTop = topBarHeight;
-      const maxTop = Math.max(minTop, cHeight - eHeight - bottomBarHeight);
+      const isModal = element.classList.contains("modal-box");
+      const maxLeft = (isCyberWin || isModal) ? (cWidth - 80) : Math.max(10, cWidth - eWidth - 10);
+      const minLeft = (isCyberWin || isModal) ? (-eWidth + 80) : 10;
+      const minTop = isModal ? 6 : topBarHeight;
+      const maxTop = isModal ? Math.max(minTop, cHeight - 56) : Math.max(minTop, cHeight - eHeight - bottomBarHeight);
 
       newLeft = Math.max(minLeft, Math.min(newLeft, maxLeft));
       newTop = Math.max(minTop, Math.min(newTop, maxTop));
@@ -905,7 +906,7 @@ function makeDraggable(element, handle, options = {}) {
       if (dragMoved) {
         element.dataset.justDragged = "true";
         setTimeout(() => { element.dataset.justDragged = "false"; }, 250);
-        saveWindowsLayout();
+        if (isCyberWin) saveWindowsLayout();
       }
       try {
         captureTarget.releasePointerCapture(ev.pointerId);
@@ -934,10 +935,11 @@ function makeResizable(element, options = {}) {
   if (!element) return;
   if (element.querySelector(".cyber-resize-handle")) return; // Prevent duplicate setup
 
+  const isModal = element.classList.contains("modal-box");
   const minWidth = options.minWidth || 220;
   const minHeight = options.minHeight || 160;
-  const topBarHeight = 60; // Titlebar clearance (52px + 8px margin)
-  const bottomBarHeight = 168; // Bottom dock clearance (150px + 18px margin)
+  const topBarHeight = options.topMargin ?? (isModal ? 6 : 60); // Titlebar clearance
+  const bottomBarHeight = options.bottomMargin ?? (isModal ? 6 : 168); // Bottom dock clearance
 
   const directions = [
     { dir: "se", cursor: "nwse-resize", className: "cyber-resize-se" },
@@ -962,7 +964,7 @@ function makeResizable(element, options = {}) {
     const onPointerDown = (e) => {
       if (e.button !== 0) return;
       if (element.classList.contains("is-minimized")) return;
-      bringCyberWindowToFront(element);
+      if (!isModal) bringCyberWindowToFront(element);
       e.preventDefault();
       e.stopPropagation();
 
@@ -1120,6 +1122,15 @@ function makeResizable(element, options = {}) {
       const startWidth = elemRect.width;
       const startHeight = elemRect.height;
 
+      // Anchor position so resizing from any edge keeps the opposite edge fixed
+      element.style.position = "absolute";
+      element.style.right = "auto";
+      element.style.bottom = "auto";
+      element.style.transform = "none";
+      element.style.margin = "0";
+      element.style.left = `${startLeft}px`;
+      element.style.top = `${startTop}px`;
+
       const cWidth = container.clientWidth || window.innerWidth;
       const cHeight = container.clientHeight || window.innerHeight;
       const maxBottom = cHeight - bottomBarHeight;
@@ -1143,10 +1154,10 @@ function makeResizable(element, options = {}) {
 
         // Horizontal resizing
         if (dir.includes("e")) {
-          newWidth = Math.max(minWidth, Math.min(startWidth + dx, cWidth - startLeft - 10));
+          newWidth = Math.max(minWidth, Math.min(startWidth + dx, cWidth - startLeft - 6));
         } else if (dir.includes("w")) {
           const rawW = startWidth - dx;
-          newWidth = Math.max(minWidth, Math.min(rawW, startLeft + startWidth - 10));
+          newWidth = Math.max(minWidth, Math.min(rawW, startLeft + startWidth - 6));
           newLeft = startLeft + (startWidth - newWidth);
         }
 
@@ -1178,17 +1189,21 @@ function makeResizable(element, options = {}) {
         element.classList.remove("is-resizing");
         document.body.classList.remove("cyber-resizing-active");
         document.body.style.cursor = "";
+        element.dataset.justDragged = "true";
+        setTimeout(() => { element.dataset.justDragged = "false"; }, 250);
         window.removeEventListener("pointermove", onPointerMove);
         window.removeEventListener("pointerup", onPointerUp);
         window.removeEventListener("pointercancel", onPointerUp);
-        saveWindowsLayout();
-        if (element.dataset.customFloatingWidth) {
-          try {
-            localStorage.setItem(`modcomparer_float_size_${element.id}`, JSON.stringify({
-              width: element.dataset.customFloatingWidth,
-              height: element.dataset.customFloatingHeight
-            }));
-          } catch (_) {}
+        if (!isModal) {
+          saveWindowsLayout();
+          if (element.dataset.customFloatingWidth && element.id) {
+            try {
+              localStorage.setItem(`modcomparer_float_size_${element.id}`, JSON.stringify({
+                width: element.dataset.customFloatingWidth,
+                height: element.dataset.customFloatingHeight
+              }));
+            } catch (_) {}
+          }
         }
       };
 
@@ -3320,11 +3335,14 @@ function init() {
     }
   }
 
-  // Initialize draggable modal windows
+  // Initialize draggable and resizable modal windows
   document.querySelectorAll(".modal-box").forEach((modalBox) => {
-    const header = modalBox.querySelector(".modal-header");
+    const header = modalBox.querySelector(".modal-header, .create-inst-header");
     if (header) {
       makeDraggable(modalBox, header);
+    }
+    if (modalBox.classList.contains("modal-create-inst-modern")) {
+      makeResizable(modalBox, { minWidth: 780, minHeight: 500 });
     }
   });
 
@@ -3556,7 +3574,16 @@ function init() {
 
   if (el.btnSearchModrinth) el.btnSearchModrinth.addEventListener("click", handleSearchModrinth);
   if (el.btnSearchCurseforge) el.btnSearchCurseforge.addEventListener("click", handleSearchCurseForge);
-  if (el.btnPlayGame) el.btnPlayGame.addEventListener("click", handlePlayGame);
+  if (el.btnPlayGame) {
+    const triggerPlayShockwave = () => {
+      if (el.btnPlayGame.classList.contains("is-locked")) return;
+      el.btnPlayGame.classList.remove("is-shockwave");
+      void el.btnPlayGame.getBoundingClientRect();
+      el.btnPlayGame.classList.add("is-shockwave");
+    };
+    el.btnPlayGame.addEventListener("pointerdown", triggerPlayShockwave);
+    el.btnPlayGame.addEventListener("click", handlePlayGame);
+  }
   if (el.btnPlayDefault) el.btnPlayDefault.addEventListener("click", handlePlayGame);
 
   // Cyber Play Dock Controls (Reference: media_1789991315435)
@@ -4389,14 +4416,26 @@ function closeLauncherSettingsModal() {
     }
 
     modal.classList.add("hidden");
+    modal.classList.remove("preview-appearance");
     const accountDropdown = document.getElementById("profile-account-dropdown");
     if (accountDropdown) accountDropdown.classList.add("hidden");
   }
 }
 
+let isClosingInstanceSettingsModal = false;
+
 function openInstanceSettingsModal() {
   const modal = document.getElementById("modal-instance-settings");
   if (!modal) return;
+  isClosingInstanceSettingsModal = false;
+  const box = modal.querySelector(".modal-settings-box");
+  if (box) {
+    box.style.left = "";
+    box.style.top = "";
+    box.style.transform = "";
+    box.style.position = "";
+    box.classList.remove("has-saved-success");
+  }
 
   const activeInst = (homeInstancesList && homeInstancesList[homeCurrentInstanceIndex]) || (homeInstancesAll && homeInstancesAll[0]) || {
     name: "Keo Optimized 2.0.0",
@@ -4428,12 +4467,45 @@ function openInstanceSettingsModal() {
     ramVal.textContent = `${savedRam} MB (${(savedRam / 1024).toFixed(0)} GB)`;
   }
 
-  modal.classList.remove("hidden");
+  modal.classList.remove("hidden", "is-closing", "has-saved-success");
+  modal.classList.add("is-opening");
+  void modal.offsetWidth;
 }
 
-function closeInstanceSettingsModal() {
+function closeInstanceSettingsModal(immediate = false) {
   const modal = document.getElementById("modal-instance-settings");
-  if (modal) modal.classList.add("hidden");
+  if (!modal || modal.classList.contains("hidden")) return;
+  if (immediate) {
+    modal.classList.add("hidden");
+    modal.classList.remove("is-closing", "is-opening", "has-saved-success");
+    const box = modal.querySelector(".modal-settings-box");
+    if (box) {
+      box.style.left = "";
+      box.style.top = "";
+      box.style.transform = "";
+      box.style.position = "";
+      box.classList.remove("has-saved-success");
+    }
+    isClosingInstanceSettingsModal = false;
+    return;
+  }
+  if (isClosingInstanceSettingsModal) return;
+  isClosingInstanceSettingsModal = true;
+  modal.classList.add("is-closing");
+  modal.classList.remove("is-opening");
+  setTimeout(() => {
+    modal.classList.add("hidden");
+    modal.classList.remove("is-closing", "has-saved-success");
+    const box = modal.querySelector(".modal-settings-box");
+    if (box) {
+      box.style.left = "";
+      box.style.top = "";
+      box.style.transform = "";
+      box.style.position = "";
+      box.classList.remove("has-saved-success");
+    }
+    isClosingInstanceSettingsModal = false;
+  }, 260);
 }
 
 function initSettingsModals() {
@@ -4500,6 +4572,75 @@ function initSettingsModals() {
     update: "Actualizar",
   };
 
+  const modalBoxEl = modalLauncher ? (document.getElementById("modal-settings-box") || modalLauncher.querySelector(".modal-settings-box")) : null;
+  let modalCurrentX = 0;
+  let modalCurrentY = 0;
+  let modalHasBeenDragged = false;
+
+  function setModalBoxPosition(x, y, animate = false) {
+    if (!modalBoxEl) return;
+    modalCurrentX = x;
+    modalCurrentY = y;
+    if (animate) {
+      modalBoxEl.style.transition = "transform 0.35s cubic-bezier(0.16, 1, 0.3, 1)";
+      setTimeout(() => { if (modalBoxEl) modalBoxEl.style.transition = ""; }, 350);
+    }
+    modalBoxEl.style.transform = `translate(${x}px, ${y}px)`;
+  }
+
+  // Draggable settings modal window
+  if (modalBoxEl) {
+    let isDragging = false;
+    let startMouseX = 0;
+    let startMouseY = 0;
+    let startBoxX = 0;
+    let startBoxY = 0;
+
+    const isDraggableTarget = (e) => {
+      if (e.target.closest("button, input, select, textarea, a, .profile-avatar-overlay, .profile-avatar-ring, .profile-cover-edit-btn, .theme-card, .profile-account-dropdown")) {
+        return false;
+      }
+      return !!e.target.closest(".modal-drag-grip, .profile-settings-header, .profile-settings-topbar, .settings-subview-nav-bar, .profile-settings-subhero");
+    };
+
+    modalBoxEl.addEventListener("mousedown", (e) => {
+      if (e.button !== 0) return;
+      if (!isDraggableTarget(e)) return;
+      isDragging = true;
+      modalHasBeenDragged = true;
+      modalBoxEl.classList.add("is-dragging");
+      startMouseX = e.clientX;
+      startMouseY = e.clientY;
+      startBoxX = modalCurrentX;
+      startBoxY = modalCurrentY;
+      document.body.style.userSelect = "none";
+    });
+
+    window.addEventListener("mousemove", (e) => {
+      if (!isDragging) return;
+      const dx = e.clientX - startMouseX;
+      const dy = e.clientY - startMouseY;
+      let newX = startBoxX + dx;
+      let newY = startBoxY + dy;
+
+      const maxOffX = Math.max(100, (window.innerWidth / 2) - 100);
+      const maxOffY = Math.max(80, (window.innerHeight / 2) - 60);
+      newX = Math.max(-maxOffX, Math.min(maxOffX, newX));
+      newY = Math.max(-maxOffY, Math.min(maxOffY, newY));
+
+      setModalBoxPosition(newX, newY, false);
+    });
+
+    const stopDragging = () => {
+      if (isDragging) {
+        isDragging = false;
+        if (modalBoxEl) modalBoxEl.classList.remove("is-dragging");
+        document.body.style.userSelect = "";
+      }
+    };
+    window.addEventListener("mouseup", stopDragging);
+  }
+
   function showDetailPanel(targetKey) {
     if (!listView || !detailView) return;
     listView.classList.add("hidden");
@@ -4515,12 +4656,26 @@ function initSettingsModals() {
     if (subviewHeading) {
       subviewHeading.textContent = panelTitles[targetKey] || "Configuración";
     }
+
+    if (targetKey === "appearance" && modalLauncher) {
+      modalLauncher.classList.add("preview-appearance");
+      // If user hasn't manually moved the modal yet, auto-shift it slightly to the right so center is visible
+      if (!modalHasBeenDragged && window.innerWidth >= 1000) {
+        const autoShift = Math.min(260, Math.floor((window.innerWidth - 640) / 2));
+        setModalBoxPosition(autoShift, 0, true);
+      }
+    } else if (modalLauncher) {
+      modalLauncher.classList.remove("preview-appearance");
+    }
   }
 
   function showListView() {
     if (!listView || !detailView) return;
     detailView.classList.add("hidden");
     listView.classList.remove("hidden");
+    if (modalLauncher) {
+      modalLauncher.classList.remove("preview-appearance");
+    }
   }
 
   if (modalLauncher) {
@@ -5167,13 +5322,39 @@ function initSettingsModals() {
   }
 
   if (btnSaveInst) {
-    btnSaveInst.addEventListener("click", () => {
+    btnSaveInst.addEventListener("click", async () => {
       const activeInst = (homeInstancesList && homeInstancesList[homeCurrentInstanceIndex]) || (homeInstancesAll && homeInstancesAll[0]);
       if (activeInst && ramInputInst) {
         localStorage.setItem(`ika_inst_ram_${activeInst.name || 'default'}`, ramInputInst.value);
       }
+      triggerModalSaveShockwave(btnSaveInst);
+      btnSaveInst.classList.add("is-saving-active");
+      await triggerModalVictorySweep(modalInst);
+      btnSaveInst.classList.remove("is-saving-active");
       closeInstanceSettingsModal();
       showToast("Ajustes de la instancia guardados.");
+    });
+  }
+
+  if (modalInst) {
+    modalInst.addEventListener("input", (e) => {
+      const input = e.target;
+      if (!input || !input.matches("input[type='text'], input:not([type]), textarea")) return;
+      const grp = input.closest(".form-group");
+      if (grp) {
+        grp.classList.remove("typing-pulse");
+        void grp.offsetWidth;
+        grp.classList.add("typing-pulse");
+        setTimeout(() => grp.classList.remove("typing-pulse"), 350);
+      }
+    });
+
+    modalInst.addEventListener("pointermove", (e) => {
+      const target = e.target.closest(".btn, .settings-tab-btn, .inst-shortcut-btn, .modal-close");
+      if (!target) return;
+      const rect = target.getBoundingClientRect();
+      target.style.setProperty("--mouse-x", `${e.clientX - rect.left}px`);
+      target.style.setProperty("--mouse-y", `${e.clientY - rect.top}px`);
     });
   }
 
@@ -7098,13 +7279,14 @@ async function initHomeInstanceSwitcher() {
   const CURATED_CURSEFORGE_MODPACKS = [
     {
       id: "all-the-mods-9",
+      cfId: 715572,
       slug: "all-the-mods-9",
       title: "All the Mods 9",
       author: "ATM Team",
       version: "1.0.8",
       downloads: 3870000,
-      banner: "https://i.imgur.com/cn0OGDE.png",
-      icon: "https://i.imgur.com/cn0OGDE.png",
+      banner: "https://media.forgecdn.net/avatars/thumbnails/902/338/256/256/638350403793040080.png",
+      icon: "https://media.forgecdn.net/avatars/thumbnails/902/338/256/256/638350403793040080.png",
       description: "All the Mods 9 contiene más de 400 mods que incluyen tecnología moderna, magia, exploración espacial y la legendaria línea de misiones para forjar la ATM Star. El modpack de referencia para Minecraft 1.20.1.",
       platform: "curseforge",
       webUrl: "https://www.curseforge.com/minecraft/modpacks/all-the-mods-9",
@@ -7112,9 +7294,7 @@ async function initHomeInstanceSwitcher() {
       defaultLoader: "Forge",
       defaultJava: "Java 17",
       gallery: [
-        "https://i.imgur.com/cn0OGDE.png",
-        "./instance_covers/thumbs/shader_complementary_reimagined_1.jpg",
-        "./instance_covers/thumbs/shader_photon_shader_45.jpg"
+        "https://media.forgecdn.net/avatars/thumbnails/902/338/256/256/638350403793040080.png"
       ],
       versions: [
         { id: "atm9-1.0.8", version_number: "v1.0.8 (Recomendada)", game_versions: ["1.20.1"], loaders: ["Forge"] },
@@ -7123,6 +7303,7 @@ async function initHomeInstanceSwitcher() {
     },
     {
       id: "skyfactory-4",
+      cfId: 296062,
       slug: "skyfactory-4",
       title: "SkyFactory 4",
       author: "Team Rekindled",
@@ -7137,8 +7318,7 @@ async function initHomeInstanceSwitcher() {
       defaultLoader: "Forge",
       defaultJava: "Java 8",
       gallery: [
-        "https://media.forgecdn.net/avatars/thumbnails/199/573/256/256/636907930795697123.png",
-        "./instance_covers/thumbs/shader_complementary_unbound_33.jpg"
+        "https://media.forgecdn.net/avatars/thumbnails/199/573/256/256/636907930795697123.png"
       ],
       versions: [
         { id: "sf4-4.2.8", version_number: "v4.2.8 (Recomendada)", game_versions: ["1.12.2"], loaders: ["Forge"] }
@@ -7146,6 +7326,7 @@ async function initHomeInstanceSwitcher() {
     },
     {
       id: "better-minecraft",
+      cfId: 876781,
       slug: "better-mc-forge-bmc4",
       title: "Better Minecraft",
       author: "SHXRKIE",
@@ -7160,8 +7341,7 @@ async function initHomeInstanceSwitcher() {
       defaultLoader: "Forge",
       defaultJava: "Java 17",
       gallery: [
-        "https://media.forgecdn.net/avatars/thumbnails/1095/963/256/256/638641361377079410.png",
-        "./instance_covers/thumbs/shader_photon_shader_51.jpg"
+        "https://media.forgecdn.net/avatars/thumbnails/1095/963/256/256/638641361377079410.png"
       ],
       versions: [
         { id: "bmc4-30.5", version_number: "v30.5 (Recomendada)", game_versions: ["1.20.1"], loaders: ["Forge"] }
@@ -7169,13 +7349,14 @@ async function initHomeInstanceSwitcher() {
     },
     {
       id: "stoneblock-3",
-      slug: "stoneblock-3",
+      cfId: 1091305,
+      slug: "ftb-stoneblock-3",
       title: "Stoneblock 3",
       author: "Feed The Beast",
       version: "1.8.2",
       downloads: 2950000,
-      banner: "https://cdn.feed-the-beast.com/packs/100-ftb-stoneblock-3/sb3-logo.webp",
-      icon: "https://cdn.feed-the-beast.com/packs/100-ftb-stoneblock-3/sb3-logo.webp",
+      banner: "https://media.forgecdn.net/avatars/thumbnails/1068/330/256/256/638602808165369077.png",
+      icon: "https://media.forgecdn.net/avatars/thumbnails/1068/330/256/256/638602808165369077.png",
       description: "FTB Stoneblock 3 te sumerge en un mundo subterráneo rodeado de piedra sólida. Automatiza con Create y Applied Energistics, explora dimensiones y construye tu fortaleza subterránea definitiva.",
       platform: "curseforge",
       webUrl: "https://www.curseforge.com/minecraft/modpacks/ftb-stoneblock-3",
@@ -7183,8 +7364,7 @@ async function initHomeInstanceSwitcher() {
       defaultLoader: "Forge",
       defaultJava: "Java 17",
       gallery: [
-        "https://cdn.feed-the-beast.com/packs/100-ftb-stoneblock-3/sb3-logo.webp",
-        "./instance_covers/thumbs/shader_rethinking_voxels_101.jpg"
+        "https://media.forgecdn.net/avatars/thumbnails/1068/330/256/256/638602808165369077.png"
       ],
       versions: [
         { id: "sb3-1.8.2", version_number: "v1.8.2 (Recomendada)", game_versions: ["1.18.2"], loaders: ["Forge"] }
@@ -7192,22 +7372,22 @@ async function initHomeInstanceSwitcher() {
     },
     {
       id: "medieval-mc",
-      slug: "medieval-mc-forge",
+      cfId: 876851,
+      slug: "medieval-mc-mmc4",
       title: "Medieval MC",
       author: "SHXRKIE",
       version: "1.20.1",
       downloads: 2890000,
-      banner: "https://cdn.modrinth.com/data/cad6ZNtm/58091d927baf593d482cd7ee738875c78fadf69e_96.webp",
-      icon: "https://cdn.modrinth.com/data/cad6ZNtm/58091d927baf593d482cd7ee738875c78fadf69e_96.webp",
+      banner: "https://media.forgecdn.net/avatars/thumbnails/835/747/256/256/638227677956298580.png",
+      icon: "https://media.forgecdn.net/avatars/thumbnails/835/747/256/256/638227677956298580.png",
       description: "Un mundo medieval de fantasía y rol con castillos imponentes, dragones feroces, hechizos mágicos, libro de misiones y una atmósfera sonora inmersiva.",
       platform: "curseforge",
-      webUrl: "https://www.curseforge.com/minecraft/modpacks/medieval-mc-forge",
+      webUrl: "https://www.curseforge.com/minecraft/modpacks/medieval-mc-mmc4",
       defaultMc: "1.20.1",
       defaultLoader: "Forge",
       defaultJava: "Java 17",
       gallery: [
-        "https://cdn.modrinth.com/data/cad6ZNtm/58091d927baf593d482cd7ee738875c78fadf69e_96.webp",
-        "./instance_covers/thumbs/shader_bsl_shaders_40.jpg"
+        "https://media.forgecdn.net/avatars/thumbnails/835/747/256/256/638227677956298580.png"
       ],
       versions: [
         { id: "mmc-1.20.1", version_number: "v24.0 (Recomendada)", game_versions: ["1.20.1"], loaders: ["Forge"] }
@@ -7215,6 +7395,7 @@ async function initHomeInstanceSwitcher() {
     },
     {
       id: "rlcraft",
+      cfId: 285109,
       slug: "rlcraft",
       title: "RLCraft",
       author: "Shivaxi",
@@ -7229,8 +7410,7 @@ async function initHomeInstanceSwitcher() {
       defaultLoader: "Forge",
       defaultJava: "Java 8",
       gallery: [
-        "https://media.forgecdn.net/avatars/thumbnails/468/243/256/256/637751369169569212.png",
-        "./instance_covers/thumbs/shader_sildurs_vibrant_shaders_82.jpg"
+        "https://media.forgecdn.net/avatars/thumbnails/468/243/256/256/637751369169569212.png"
       ],
       versions: [
         { id: "rlc-2.9.3", version_number: "v2.9.3 (Recomendada)", game_versions: ["1.12.2"], loaders: ["Forge"] }
@@ -7238,21 +7418,22 @@ async function initHomeInstanceSwitcher() {
     },
     {
       id: "dawncraft",
-      slug: "dawncraft",
+      cfId: 829758,
+      slug: "dawn-craft",
       title: "DawnCraft",
       author: "bstylia14",
       version: "2.0.12",
       downloads: 2750000,
-      banner: "https://media.forgecdn.net/avatars/thumbnails/1420/307/256/256/638920180884992266.jpg",
-      icon: "https://media.forgecdn.net/avatars/thumbnails/1420/307/256/256/638920180884992266.jpg",
+      banner: "https://media.forgecdn.net/avatars/thumbnails/961/81/256/256/638457067445019871_animated.gif",
+      icon: "https://media.forgecdn.net/avatars/thumbnails/961/81/256/256/638457067445019871_animated.gif",
       description: "Una experiencia ARPG soulslike con combate de animaciones fluidas, esquives, misiones de historia y decenas de jefes legendarios.",
       platform: "curseforge",
-      webUrl: "https://www.curseforge.com/minecraft/modpacks/dawncraft",
+      webUrl: "https://www.curseforge.com/minecraft/modpacks/dawn-craft",
       defaultMc: "1.18.2",
       defaultLoader: "Forge",
       defaultJava: "Java 17",
       gallery: [
-        "https://media.forgecdn.net/avatars/thumbnails/1420/307/256/256/638920180884992266.jpg"
+        "https://media.forgecdn.net/avatars/thumbnails/961/81/256/256/638457067445019871_animated.gif"
       ],
       versions: [
         { id: "dc-2.0.12", version_number: "v2.0.12 (Recomendada)", game_versions: ["1.18.2"], loaders: ["Forge"] }
@@ -7260,13 +7441,14 @@ async function initHomeInstanceSwitcher() {
     },
     {
       id: "sevtech-ages",
+      cfId: 268208,
       slug: "sevtech-ages",
       title: "SevTech: Ages",
       author: "Darkosto",
       version: "3.2.3",
       downloads: 3410000,
-      banner: "https://media.forgecdn.net/avatars/thumbnails/2039/189/256/256/639246741965886596.png",
-      icon: "https://media.forgecdn.net/avatars/thumbnails/2039/189/256/256/639246741965886596.png",
+      banner: "https://media.forgecdn.net/avatars/thumbnails/147/67/256/256/636574428512291945.png",
+      icon: "https://media.forgecdn.net/avatars/thumbnails/147/67/256/256/636574428512291945.png",
       description: "Un modpack de progresión masivo que te lleva desde la Edad de Piedra hasta la era espacial con mods bloqueados por épocas evolutivas.",
       platform: "curseforge",
       webUrl: "https://www.curseforge.com/minecraft/modpacks/sevtech-ages",
@@ -7274,7 +7456,7 @@ async function initHomeInstanceSwitcher() {
       defaultLoader: "Forge",
       defaultJava: "Java 8",
       gallery: [
-        "https://media.forgecdn.net/avatars/thumbnails/2039/189/256/256/639246741965886596.png"
+        "https://media.forgecdn.net/avatars/thumbnails/147/67/256/256/636574428512291945.png"
       ],
       versions: [
         { id: "sev-3.2.3", version_number: "v3.2.3 (Recomendada)", game_versions: ["1.12.2"], loaders: ["Forge"] }
@@ -7282,13 +7464,14 @@ async function initHomeInstanceSwitcher() {
     },
     {
       id: "vault-hunters-1-18-2",
+      cfId: 711537,
       slug: "vault-hunters-1-18-2",
       title: "Vault Hunters 3rd",
       author: "Iskallia",
       version: "3.15.2",
       downloads: 2190000,
-      banner: "https://media.forgecdn.net/avatars/thumbnails/1547/241/256/256/639004102749696981.png",
-      icon: "https://media.forgecdn.net/avatars/thumbnails/1547/241/256/256/639004102749696981.png",
+      banner: "https://media.forgecdn.net/avatars/thumbnails/1741/803/256/256/639108923672277191.png",
+      icon: "https://media.forgecdn.net/avatars/thumbnails/1741/803/256/256/639108923672277191.png",
       description: "Adéntrate en bóvedas misteriosas generadas procedimentalmente, consigue botín épico, sube de nivel habilidades y desbloquea mods.",
       platform: "curseforge",
       webUrl: "https://www.curseforge.com/minecraft/modpacks/vault-hunters-1-18-2",
@@ -7296,7 +7479,7 @@ async function initHomeInstanceSwitcher() {
       defaultLoader: "Forge",
       defaultJava: "Java 17",
       gallery: [
-        "https://media.forgecdn.net/avatars/thumbnails/1547/241/256/256/639004102749696981.png"
+        "https://media.forgecdn.net/avatars/thumbnails/1741/803/256/256/639108923672277191.png"
       ],
       versions: [
         { id: "vh-3.15.2", version_number: "v3.15.2 (Recomendada)", game_versions: ["1.18.2"], loaders: ["Forge"] }
@@ -7304,13 +7487,14 @@ async function initHomeInstanceSwitcher() {
     },
     {
       id: "rad-2",
+      cfId: 572778,
       slug: "roguelike-adventures-and-dungeons-2",
       title: "RAD 2 Roguelike",
       author: "dreams01",
       version: "1.11",
       downloads: 1840000,
-      banner: "https://media.forgecdn.net/avatars/thumbnails/419/263/256/256/637646026320511526.png",
-      icon: "https://media.forgecdn.net/avatars/thumbnails/419/263/256/256/637646026320511526.png",
+      banner: "https://media.forgecdn.net/avatars/thumbnails/485/618/256/256/637786105420601729.png",
+      icon: "https://media.forgecdn.net/avatars/thumbnails/485/618/256/256/637786105420601729.png",
       description: "Exploración de mazmorras, botines mágicos, hechizos y dimensiones hostiles sin aburrirse en un solo lugar.",
       platform: "curseforge",
       webUrl: "https://www.curseforge.com/minecraft/modpacks/roguelike-adventures-and-dungeons-2",
@@ -7318,7 +7502,7 @@ async function initHomeInstanceSwitcher() {
       defaultLoader: "Forge",
       defaultJava: "Java 8",
       gallery: [
-        "https://media.forgecdn.net/avatars/thumbnails/419/263/256/256/637646026320511526.png"
+        "https://media.forgecdn.net/avatars/thumbnails/485/618/256/256/637786105420601729.png"
       ],
       versions: [
         { id: "rad-1.11", version_number: "v1.11 (Recomendada)", game_versions: ["1.16.5"], loaders: ["Forge"] }
@@ -7326,13 +7510,14 @@ async function initHomeInstanceSwitcher() {
     },
     {
       id: "pixelmon-cf",
-      slug: "the-pixelmon-modpack-cf",
+      cfId: 389615,
+      slug: "the-pixelmon-modpack",
       title: "Pixelmon Modpack",
       author: "PixelmonMod",
       version: "9.2.8",
       downloads: 3120000,
-      banner: "https://media.forgecdn.net/avatars/thumbnails/455/738/256/256/637725000241450936.png",
-      icon: "https://media.forgecdn.net/avatars/thumbnails/455/738/256/256/637725000241450936.png",
+      banner: "https://media.forgecdn.net/avatars/thumbnails/279/234/256/256/637276853291457748.png",
+      icon: "https://media.forgecdn.net/avatars/thumbnails/279/234/256/256/637276853291457748.png",
       description: "La experiencia oficial de Pixelmon con gimnasios, misiones, entrenadores y banda sonora Pokémon en Minecraft.",
       platform: "curseforge",
       webUrl: "https://www.curseforge.com/minecraft/modpacks/the-pixelmon-modpack",
@@ -7340,7 +7525,7 @@ async function initHomeInstanceSwitcher() {
       defaultLoader: "Forge",
       defaultJava: "Java 17",
       gallery: [
-        "https://media.forgecdn.net/avatars/thumbnails/455/738/256/256/637725000241450936.png"
+        "https://media.forgecdn.net/avatars/thumbnails/279/234/256/256/637276853291457748.png"
       ],
       versions: [
         { id: "pxm-9.2.8", version_number: "v9.2.8 (Recomendada)", game_versions: ["1.20.1"], loaders: ["Forge"] }
@@ -7348,13 +7533,14 @@ async function initHomeInstanceSwitcher() {
     },
     {
       id: "ddss",
+      cfId: 301717,
       slug: "dungeons-dragons-and-space-shuttles",
       title: "DDSS Shuttles",
       author: "Freebi85",
       version: "8.0_HF",
       downloads: 1450000,
-      banner: "https://media.forgecdn.net/avatars/thumbnails/1944/15/256/256/639206596566716523.png",
-      icon: "https://media.forgecdn.net/avatars/thumbnails/1944/15/256/256/639206596566716523.png",
+      banner: "https://media.forgecdn.net/avatars/thumbnails/172/175/256/256/636734768210805980.jpeg",
+      icon: "https://media.forgecdn.net/avatars/thumbnails/172/175/256/256/636734768210805980.jpeg",
       description: "Hardcore questing modpack con cientos de misiones interconectadas que abarcan tecnología, magia y viajes espaciales.",
       platform: "curseforge",
       webUrl: "https://www.curseforge.com/minecraft/modpacks/dungeons-dragons-and-space-shuttles",
@@ -7362,7 +7548,7 @@ async function initHomeInstanceSwitcher() {
       defaultLoader: "Forge",
       defaultJava: "Java 8",
       gallery: [
-        "https://media.forgecdn.net/avatars/thumbnails/1944/15/256/256/639206596566716523.png"
+        "https://media.forgecdn.net/avatars/thumbnails/172/175/256/256/636734768210805980.jpeg"
       ],
       versions: [
         { id: "ddss-8.0", version_number: "v8.0 (Recomendada)", game_versions: ["1.12.2"], loaders: ["Forge"] }
@@ -7370,13 +7556,14 @@ async function initHomeInstanceSwitcher() {
     },
     {
       id: "enigmatica9",
+      cfId: 632239,
       slug: "enigmatica9",
       title: "Enigmatica 9",
       author: "Enigmatica",
       version: "1.22.0",
       downloads: 1250000,
-      banner: "https://media.forgecdn.net/avatars/thumbnails/1667/587/256/256/639061236036931930.jpg",
-      icon: "https://media.forgecdn.net/avatars/thumbnails/1667/587/256/256/639061236036931930.jpg",
+      banner: "https://media.forgecdn.net/avatars/thumbnails/557/558/256/256/637904430386629931.jpeg",
+      icon: "https://media.forgecdn.net/avatars/thumbnails/557/558/256/256/637904430386629931.jpeg",
       description: "Modpack equilibrado de tecnología y magia con misiones detalladas para aprender paso a paso cada mod.",
       platform: "curseforge",
       webUrl: "https://www.curseforge.com/minecraft/modpacks/enigmatica9",
@@ -7384,7 +7571,7 @@ async function initHomeInstanceSwitcher() {
       defaultLoader: "Forge",
       defaultJava: "Java 17",
       gallery: [
-        "https://media.forgecdn.net/avatars/thumbnails/1667/587/256/256/639061236036931930.jpg"
+        "https://media.forgecdn.net/avatars/thumbnails/557/558/256/256/637904430386629931.jpeg"
       ],
       versions: [
         { id: "e9-1.22.0", version_number: "v1.22.0 (Recomendada)", game_versions: ["1.19.2"], loaders: ["Forge"] }
@@ -7392,21 +7579,22 @@ async function initHomeInstanceSwitcher() {
     },
     {
       id: "ciscos-rpg",
-      slug: "ciscos-adventure-rpg-forge",
+      cfId: 957753,
+      slug: "ciscos-adventure-rpg-ultimate",
       title: "Cisco's RPG",
       author: "Cisco",
       version: "v11c",
       downloads: 1100000,
-      banner: "https://media.forgecdn.net/avatars/thumbnails/1080/911/256/256/638620325058222117.png",
-      icon: "https://media.forgecdn.net/avatars/thumbnails/1080/911/256/256/638620325058222117.png",
+      banner: "https://media.forgecdn.net/avatars/thumbnails/1347/122/256/256/638875340907659040.png",
+      icon: "https://media.forgecdn.net/avatars/thumbnails/1347/122/256/256/638875340907659040.png",
       description: "Progresión de combate épica con árbol de habilidades pasivas, armas míticas y calabozos laberínticos.",
       platform: "curseforge",
-      webUrl: "https://www.curseforge.com/minecraft/modpacks/ciscos-adventure-rpg-forge",
+      webUrl: "https://www.curseforge.com/minecraft/modpacks/ciscos-adventure-rpg-ultimate",
       defaultMc: "1.20.1",
       defaultLoader: "Forge",
       defaultJava: "Java 17",
       gallery: [
-        "https://media.forgecdn.net/avatars/thumbnails/1080/911/256/256/638620325058222117.png"
+        "https://media.forgecdn.net/avatars/thumbnails/1347/122/256/256/638875340907659040.png"
       ],
       versions: [
         { id: "crpg-v11", version_number: "v11c (Recomendada)", game_versions: ["1.20.1"], loaders: ["Forge"] }
@@ -7414,13 +7602,14 @@ async function initHomeInstanceSwitcher() {
     },
     {
       id: "ftb-revelation",
+      cfId: 283861,
       slug: "ftb-revelation",
       title: "FTB Revelation",
       author: "Feed The Beast",
       version: "3.4.0",
       downloads: 4890000,
-      banner: "https://media.forgecdn.net/avatars/thumbnails/215/254/256/256/636996423166888395.png",
-      icon: "https://media.forgecdn.net/avatars/thumbnails/215/254/256/256/636996423166888395.png",
+      banner: "https://media.forgecdn.net/avatars/thumbnails/134/670/256/256/636493650464216291.png",
+      icon: "https://media.forgecdn.net/avatars/thumbnails/134/670/256/256/636493650464216291.png",
       description: "El modpack generalista más popular de FTB. Tecnología, automatización, magia y construcción con máxima estabilidad.",
       platform: "curseforge",
       webUrl: "https://www.curseforge.com/minecraft/modpacks/ftb-revelation",
@@ -7428,7 +7617,7 @@ async function initHomeInstanceSwitcher() {
       defaultLoader: "Forge",
       defaultJava: "Java 8",
       gallery: [
-        "https://media.forgecdn.net/avatars/thumbnails/215/254/256/256/636996423166888395.png"
+        "https://media.forgecdn.net/avatars/thumbnails/134/670/256/256/636493650464216291.png"
       ],
       versions: [
         { id: "ftbr-3.4.0", version_number: "v3.4.0 (Recomendada)", game_versions: ["1.12.2"], loaders: ["Forge"] }
@@ -7913,8 +8102,21 @@ async function initHomeInstanceSwitcher() {
   if (btnTypeModpack) btnTypeModpack.addEventListener("click", () => setInstanceType("modpack"));
   if (btnTypeCustom) btnTypeCustom.addEventListener("click", () => setInstanceType("custom"));
 
-  // Platform switch (CurseForge vs Modrinth)
-  let currentDisplayedModpacks = [...CURATED_CURSEFORGE_MODPACKS];
+  // Platform switch (CurseForge vs Modrinth) & Pagination (5 cols x 3 rows = 15 per page)
+  const MODPACKS_PER_PAGE = 15;
+  const MAX_MODPACK_PAGES = 6;
+  let currentModpackPage = 0;
+  let modpackSearchSeq = 0;
+  const defaultModpackCache = { curseforge: null, modrinth: null };
+  const modpackPageTabsEl = document.getElementById("modpack-page-tabs");
+
+  const sortByDownloadsDesc = (list) => [...list].sort((a, b) => (b.downloads || 0) - (a.downloads || 0));
+  let currentDisplayedModpacks = sortByDownloadsDesc(CURATED_CURSEFORGE_MODPACKS);
+
+  const imgPlatformCurseforge = document.getElementById("img-platform-curseforge");
+  const imgPlatformModrinth = document.getElementById("img-platform-modrinth");
+  if (imgPlatformCurseforge) imgPlatformCurseforge.src = curseforgeLogo;
+  if (imgPlatformModrinth) imgPlatformModrinth.src = modrinthLogo;
 
   if (btnPlatformCurseforge && btnPlatformModrinth) {
     btnPlatformCurseforge.addEventListener("click", () => {
@@ -7942,43 +8144,70 @@ async function initHomeInstanceSwitcher() {
     return Array.isArray(mp.versions) && mp.versions.some((v) => (v.game_versions || []).includes(mc));
   };
 
-  // Modpack Search & Rendering (Max 5 columns x 3 rows = 15 modpacks)
+  // Modpack Search & Rendering (5 columns x 4 rows = 20 modpacks per page, up to 5 pages = 100 modpacks)
   async function searchModpacks(query) {
-    const defaultList = currentModpackPlatform === "modrinth" ? CURATED_MODRINTH_MODPACKS : CURATED_CURSEFORGE_MODPACKS;
+    const reqSeq = ++modpackSearchSeq;
+    const platform = currentModpackPlatform;
     const mcFilter = modpackMcFilter;
-    const matchesQuery = (m) => !query ||
-      m.title.toLowerCase().includes(query.toLowerCase()) ||
-      (m.author && m.author.toLowerCase().includes(query.toLowerCase())) ||
-      (m.description && m.description.toLowerCase().includes(query.toLowerCase()));
-    const filterCurated = () => defaultList.filter((m) => matchesQuery(m) && modpackSupportsMc(m, mcFilter)).slice(0, 15);
+    const cleanQuery = (query || "").trim();
+    const isDefaultQuery = !cleanQuery && mcFilter === "all";
+    const defaultList = platform === "modrinth" ? CURATED_MODRINTH_MODPACKS : CURATED_CURSEFORGE_MODPACKS;
 
-    // Without query or version filter show the curated picks; otherwise ask the platform's API
-    const useApi = !!query || mcFilter !== "all";
-    if (!useApi) {
+    const matchesQuery = (m) => !cleanQuery ||
+      m.title.toLowerCase().includes(cleanQuery.toLowerCase()) ||
+      (m.author && m.author.toLowerCase().includes(cleanQuery.toLowerCase())) ||
+      (m.description && m.description.toLowerCase().includes(cleanQuery.toLowerCase()));
+    const filterCurated = () => sortByDownloadsDesc(
+      defaultList.filter((m) => matchesQuery(m) && modpackSupportsMc(m, mcFilter))
+    );
+
+    currentModpackPage = 0;
+
+    // If default list for this platform is already cached from live API, display immediately
+    if (isDefaultQuery && Array.isArray(defaultModpackCache[platform]) && defaultModpackCache[platform].length > 0) {
+      currentDisplayedModpacks = defaultModpackCache[platform];
+      renderModpackResultsList();
+      selectModpack(currentDisplayedModpacks[0]);
+      return;
+    }
+
+    // Show sorted curated fallback immediately while live API loads so UI is responsive
+    if (isDefaultQuery) {
       currentDisplayedModpacks = filterCurated();
-    } else if (currentModpackPlatform === "curseforge") {
+      renderModpackResultsList();
+      if (currentDisplayedModpacks.length > 0 && (!selectedModpackData || selectedModpackData.platform !== platform)) {
+        selectModpack(currentDisplayedModpacks[0]);
+      }
+    }
+
+    if (platform === "curseforge") {
       try {
-        const results = await searchCurseForgeModpacks(query, mcFilter);
-        if (mcFilter !== modpackMcFilter) return;
-        currentDisplayedModpacks = results;
+        const results = await searchCurseForgeModpacks(cleanQuery, mcFilter);
+        if (reqSeq !== modpackSearchSeq || mcFilter !== modpackMcFilter || platform !== currentModpackPlatform) return;
+        if (results.length > 0) {
+          currentDisplayedModpacks = results;
+          if (isDefaultQuery) defaultModpackCache.curseforge = results;
+        } else {
+          currentDisplayedModpacks = filterCurated();
+        }
       } catch (err) {
         console.warn("CurseForge modpack search failed:", err);
+        if (reqSeq !== modpackSearchSeq) return;
         currentDisplayedModpacks = filterCurated();
       }
     } else {
       try {
-        const q = encodeURIComponent(query);
+        const q = encodeURIComponent(cleanQuery);
         const facets = [["project_type:modpack"]];
         if (mcFilter !== "all") facets.push([`versions:${mcFilter}`]);
-        const resp = await fetch(`https://api.modrinth.com/v2/search?query=${q}&facets=${encodeURIComponent(JSON.stringify(facets))}&limit=15`, {
+        const limit = MODPACKS_PER_PAGE * MAX_MODPACK_PAGES;
+        const resp = await fetch(`https://api.modrinth.com/v2/search?query=${q}&facets=${encodeURIComponent(JSON.stringify(facets))}&index=downloads&limit=${limit}`, {
           headers: { "User-Agent": "ModComparer/2.0" }
         });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
-        // Ignore stale responses if the filter changed while the request was in flight
-        if (mcFilter !== modpackMcFilter) return;
-        currentDisplayedModpacks = (data.hits || []).slice(0, 15).map((h) => {
-          // Modrinth lists game versions oldest → newest
+        if (reqSeq !== modpackSearchSeq || mcFilter !== modpackMcFilter || platform !== currentModpackPlatform) return;
+        const mapped = (data.hits || []).map((h) => {
           const latestMc = h.versions?.[h.versions.length - 1] || "1.20.1";
           const mc = mcFilter !== "all" ? mcFilter : latestMc;
           return {
@@ -7987,11 +8216,11 @@ async function initHomeInstanceSwitcher() {
             title: h.title,
             author: h.author,
             version: mc,
-            downloads: h.downloads,
+            downloads: h.downloads || 0,
             banner: h.icon_url || "/instance_covers/thumbs/shader_complementary_reimagined_1.jpg",
             icon: h.icon_url || "/minecraft_block_textures/grass_block_side.png",
             description: h.description,
-            platform: currentModpackPlatform,
+            platform: "modrinth",
             webUrl: `https://modrinth.com/modpack/${h.slug}`,
             gameVersions: h.versions || [],
             defaultMc: mc,
@@ -7999,12 +8228,17 @@ async function initHomeInstanceSwitcher() {
             defaultJava: "Java 21",
           };
         });
+        const sorted = sortByDownloadsDesc(mapped).slice(0, MODPACKS_PER_PAGE * MAX_MODPACK_PAGES);
+        currentDisplayedModpacks = sorted.length > 0 ? sorted : filterCurated();
+        if (isDefaultQuery && sorted.length > 0) defaultModpackCache.modrinth = sorted;
       } catch {
+        if (reqSeq !== modpackSearchSeq) return;
         currentDisplayedModpacks = filterCurated();
       }
     }
 
-    currentDisplayedModpacks = currentDisplayedModpacks.slice(0, 15);
+    currentDisplayedModpacks = currentDisplayedModpacks.slice(0, MODPACKS_PER_PAGE * MAX_MODPACK_PAGES);
+    currentModpackPage = 0;
     renderModpackResultsList();
     if (currentDisplayedModpacks.length > 0) {
       selectModpack(currentDisplayedModpacks[0]);
@@ -8018,23 +8252,39 @@ async function initHomeInstanceSwitcher() {
   const CF_MODLOADER_NAMES = { 1: "Forge", 4: "Fabric", 5: "Quilt", 6: "NeoForge" };
   const CF_LOADER_LABELS = ["Forge", "Fabric", "Quilt", "NeoForge"];
 
-  // CurseForge modpacks (classId 4471), sorted by popularity
+  // CurseForge modpacks (classId 4471), sorted by Total Downloads (sortField = 6)
   async function searchCurseForgeModpacks(query, mcFilter) {
-    const params = new URLSearchParams({
-      gameId: "432",
-      classId: "4471",
-      sortField: "2",
-      sortOrder: "desc",
-      pageSize: "15",
+    const buildParams = (indexOffset) => {
+      const params = new URLSearchParams({
+        gameId: "432",
+        classId: "4471",
+        sortField: "6", // 6 = TotalDownloads
+        sortOrder: "desc",
+        pageSize: "50",
+        index: String(indexOffset),
+      });
+      if (query) params.set("searchFilter", query);
+      if (mcFilter !== "all") params.set("gameVersion", mcFilter);
+      return params;
+    };
+
+    const headers = { "x-api-key": CF_API_KEY, Accept: "application/json" };
+    const [respPage1, respPage2] = await Promise.all([
+      fetch(`https://api.curseforge.com/v1/mods/search?${buildParams(0)}`, { headers }),
+      fetch(`https://api.curseforge.com/v1/mods/search?${buildParams(50)}`, { headers }).catch(() => null),
+    ]);
+    if (!respPage1.ok) throw new Error(`HTTP ${respPage1.status}`);
+    const data1 = await respPage1.json();
+    const data2 = respPage2 && respPage2.ok ? await respPage2.json() : { data: [] };
+
+    const seenIds = new Set();
+    const combinedRaw = [...(data1.data || []), ...(data2.data || [])].filter((h) => {
+      if (!h || seenIds.has(h.id)) return false;
+      seenIds.add(h.id);
+      return true;
     });
-    if (query) params.set("searchFilter", query);
-    if (mcFilter !== "all") params.set("gameVersion", mcFilter);
-    const resp = await fetch(`https://api.curseforge.com/v1/mods/search?${params}`, {
-      headers: { "x-api-key": CF_API_KEY, Accept: "application/json" },
-    });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const data = await resp.json();
-    return (data.data || []).map((h) => {
+
+    const mapped = combinedRaw.map((h) => {
       const indexes = h.latestFilesIndexes || [];
       const gameVersions = [...new Set(indexes.map((i) => i.gameVersion).filter(Boolean))];
       const mc = mcFilter !== "all" ? mcFilter : (gameVersions[0] || "1.20.1");
@@ -8048,19 +8298,22 @@ async function initHomeInstanceSwitcher() {
         title: h.name,
         author: h.authors?.[0]?.name || "Comunidad",
         version: mc,
-        downloads: h.downloadCount,
+        downloads: h.downloadCount || 0,
         banner: logo,
         icon: logo,
         description: h.summary,
         platform: "curseforge",
         webUrl: h.links?.websiteUrl || `https://www.curseforge.com/minecraft/modpacks/${h.slug}`,
         gallery: shots.length > 0 ? shots : [h.logo?.url || logo],
+        _cfScreenshotsLoaded: true,
         gameVersions,
         defaultMc: mc,
         defaultLoader: (idx && CF_MODLOADER_NAMES[idx.modLoader]) || "Forge",
         defaultJava: "Java 17",
       };
     });
+
+    return sortByDownloadsDesc(mapped).slice(0, MODPACKS_PER_PAGE * MAX_MODPACK_PAGES);
   }
 
   // MC version filter dropdown (same row as the modpack search)
@@ -8108,18 +8361,75 @@ async function initHomeInstanceSwitcher() {
     });
   }
 
+  function renderModpackPageTabs(totalPages) {
+    if (!modpackPageTabsEl) return;
+    if (totalPages <= 1) {
+      modpackPageTabsEl.innerHTML = `
+        <button type="button" class="modpack-page-tab is-active" data-page="0">1</button>
+      `;
+      return;
+    }
+
+    const canPrev = currentModpackPage > 0;
+    const canNext = currentModpackPage < totalPages - 1;
+    let html = `
+      <button type="button" class="modpack-page-nav" data-nav="prev" ${canPrev ? "" : "disabled"} title="Página anterior">‹</button>
+    `;
+    for (let p = 0; p < totalPages; p++) {
+      html += `
+        <button type="button" class="modpack-page-tab ${p === currentModpackPage ? "is-active" : ""}" data-page="${p}" title="Página ${p + 1} (${p * MODPACKS_PER_PAGE + 1}–${Math.min((p + 1) * MODPACKS_PER_PAGE, currentDisplayedModpacks.length)})">${p + 1}</button>
+      `;
+    }
+    html += `
+      <button type="button" class="modpack-page-nav" data-nav="next" ${canNext ? "" : "disabled"} title="Página siguiente">›</button>
+    `;
+    modpackPageTabsEl.innerHTML = html;
+
+    modpackPageTabsEl.querySelectorAll(".modpack-page-tab").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const targetPage = parseInt(btn.dataset.page, 10);
+        if (Number.isNaN(targetPage) || targetPage === currentModpackPage) return;
+        currentModpackPage = targetPage;
+        renderModpackResultsList();
+        const firstOnPage = currentDisplayedModpacks[currentModpackPage * MODPACKS_PER_PAGE];
+        if (firstOnPage) selectModpack(firstOnPage);
+      });
+    });
+
+    modpackPageTabsEl.querySelectorAll(".modpack-page-nav").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        if (btn.disabled) return;
+        const dir = btn.dataset.nav === "prev" ? -1 : 1;
+        const nextPage = Math.max(0, Math.min(totalPages - 1, currentModpackPage + dir));
+        if (nextPage === currentModpackPage) return;
+        currentModpackPage = nextPage;
+        renderModpackResultsList();
+        const firstOnPage = currentDisplayedModpacks[currentModpackPage * MODPACKS_PER_PAGE];
+        if (firstOnPage) selectModpack(firstOnPage);
+      });
+    });
+  }
+
   function renderModpackResultsList() {
     if (!createInstModpackResults) return;
 
-    const displayPacks = currentDisplayedModpacks.slice(0, 15);
+    const totalItems = currentDisplayedModpacks.length;
+    const totalPages = Math.max(1, Math.min(MAX_MODPACK_PAGES, Math.ceil(totalItems / MODPACKS_PER_PAGE)));
+    if (currentModpackPage >= totalPages) currentModpackPage = totalPages - 1;
+    if (currentModpackPage < 0) currentModpackPage = 0;
+
+    const startIdx = currentModpackPage * MODPACKS_PER_PAGE;
+    const displayPacks = currentDisplayedModpacks.slice(startIdx, startIdx + MODPACKS_PER_PAGE);
 
     const resultsCountEl = document.getElementById("create-inst-results-count");
     if (resultsCountEl) {
-      resultsCountEl.textContent = `${displayPacks.length} modpack${displayPacks.length === 1 ? '' : 's'}`;
+      resultsCountEl.textContent = `${totalItems} modpack${totalItems === 1 ? "" : "s"}`;
     }
 
+    renderModpackPageTabs(totalPages);
+
     if (displayPacks.length === 0) {
-      createInstModpackResults.innerHTML = `<div style="grid-column: 1 / -1; text-align:center;padding:24px;color:#64748b;font-size:12px;">No se encontraron modpacks coincidentes</div>`;
+      createInstModpackResults.innerHTML = `<div style="grid-column: 1 / -1; grid-row: 1 / -1; display:flex; align-items:center; justify-content:center; text-align:center; padding:24px; color:#64748b; font-size:12px;">No se encontraron modpacks coincidentes</div>`;
       return;
     }
 
@@ -8142,13 +8452,15 @@ async function initHomeInstanceSwitcher() {
     ];
 
     createInstModpackResults.innerHTML = displayPacks.map((mp, idx) => {
+      const globalIdx = startIdx + idx;
       const isActive = selectedModpackData && (selectedModpackData.id === mp.id || selectedModpackData.slug === mp.slug);
-      const fallbackUrl = MODPACK_FALLBACK_ICONS[idx % MODPACK_FALLBACK_ICONS.length];
+      const fallbackUrl = MODPACK_FALLBACK_ICONS[globalIdx % MODPACK_FALLBACK_ICONS.length];
       const thumbUrl = mp.banner || mp.icon || fallbackUrl;
+      const dlText = mp.downloads ? `${formatCompactNum(mp.downloads)} descargas` : "";
       return `
-        <div class="modpack-carousel-card ${isActive ? "is-active" : ""}" data-slug="${mp.slug || mp.id}" title="${mp.title}">
+        <div class="modpack-carousel-card ${isActive ? "is-active" : ""}" data-slug="${mp.slug || mp.id}" title="#${globalIdx + 1} ${mp.title}${dlText ? ` • ${dlText}` : ""}">
           <div class="modpack-card-thumb-wrap">
-            <img src="${thumbUrl}" class="modpack-card-thumb" alt="${mp.title}" onerror="this.onerror=null;this.src='${fallbackUrl}'" />
+            <img src="${thumbUrl}" class="modpack-card-thumb" alt="${mp.title}" referrerpolicy="no-referrer" onerror="this.onerror=null;this.src='${fallbackUrl}'" />
           </div>
           <div class="modpack-card-content">
             <span class="modpack-card-title">${mp.title}</span>
@@ -8165,6 +8477,7 @@ async function initHomeInstanceSwitcher() {
       });
     });
 
+    createInstModpackResults.scrollTop = 0;
     updateCarouselButtons();
   }
 
@@ -8214,6 +8527,608 @@ async function initHomeInstanceSwitcher() {
     });
   }
 
+  const MODPACK_PURIFY = {
+    ADD_TAGS: ["iframe", "video", "source", "center"],
+    ADD_ATTR: [
+      "allow",
+      "allowfullscreen",
+      "frameborder",
+      "scrolling",
+      "referrerpolicy",
+      "target",
+      "controls",
+      "autoplay",
+      "loop",
+      "muted",
+      "playsinline",
+      "poster",
+      "align",
+      "width",
+      "height",
+    ],
+    FORBID_TAGS: ["style", "script", "form", "input", "button", "object", "embed"],
+    FORBID_ATTR: ["onerror", "onload"],
+  };
+
+  function prepareModpackOfficialHtml(rawHtml) {
+    if (!rawHtml || typeof rawHtml !== "string") return "";
+    const sanitized = DOMPurify.sanitize(rawHtml, MODPACK_PURIFY);
+    const doc = new DOMParser().parseFromString(sanitized, "text/html");
+
+    // 1. Unwrap any <iframe> or <video> nested inside inline wrappers (<a>, <span>, <strong>, <em>, etc.) preserving order
+    Array.from(doc.body.querySelectorAll("iframe, video")).reverse().forEach((mediaEl) => {
+      let topInline = null;
+      let p = mediaEl.parentElement;
+      while (p && p !== doc.body && /^(A|SPAN|STRONG|B|EM|I|U|FONT|SMALL)$/i.test(p.tagName)) {
+        topInline = p;
+        p = p.parentElement;
+      }
+      if (topInline && topInline.parentNode) {
+        topInline.parentNode.insertBefore(mediaEl, topInline.nextSibling);
+      }
+    });
+
+    // 2. Ensure all images have referrerpolicy="no-referrer" BEFORE entering the live DOM so Imgur/CDNs never return 403
+    doc.body.querySelectorAll("img").forEach((img) => {
+      let src = (img.getAttribute("src") || "").trim();
+      if (src.startsWith("//")) {
+        src = "https:" + src;
+        img.setAttribute("src", src);
+      }
+      img.setAttribute("referrerpolicy", "no-referrer");
+      img.setAttribute("loading", "lazy");
+    });
+
+    // 3. Decode CurseForge /linkout?remoteUrl=... links and strip white inline backgrounds
+    doc.body.querySelectorAll("a").forEach((a) => {
+      let href = (a.getAttribute("href") || "").trim();
+      if (href.includes("remoteUrl=")) {
+        try {
+          const qIdx = href.indexOf("?");
+          const params = new URLSearchParams(qIdx >= 0 ? href.slice(qIdx) : href);
+          let remote = params.get("remoteUrl");
+          if (remote) {
+            while (remote.includes("%")) {
+              const next = decodeURIComponent(remote);
+              if (next === remote) break;
+              remote = next;
+            }
+            if (/^https?:\/\//i.test(remote)) {
+              href = remote;
+              a.setAttribute("href", href);
+            }
+          }
+        } catch {}
+      } else if (href.startsWith("/")) {
+        a.setAttribute("href", `https://www.curseforge.com${href}`);
+      }
+      const inlineStyle = a.getAttribute("style") || "";
+      if (/background(-color)?\s*:\s*(#fff|#ffffff|white|rgb\(255,\s*255,\s*255\))/i.test(inlineStyle)) {
+        a.style.backgroundColor = "transparent";
+      }
+    });
+
+    // 4. Transform <iframe> embeds (YouTube, Vimeo, etc.) into responsive video containers
+    doc.body.querySelectorAll("iframe").forEach((iframe) => {
+      let src = (iframe.getAttribute("src") || "").trim();
+      if (src.startsWith("//")) src = "https:" + src;
+      const isSafeVideo = /^https:\/\/(www\.)?(youtube\.com|youtube-nocookie\.com|player\.vimeo\.com|streamable\.com|clips\.twitch\.tv|player\.twitch\.tv)\//i.test(src);
+      if (!isSafeVideo) {
+        iframe.remove();
+        return;
+      }
+
+      const ytMatch = src.match(/(?:youtube\.com|youtube-nocookie\.com)\/embed\/([a-zA-Z0-9_-]{11})/i);
+      const wrapper = doc.createElement("div");
+      wrapper.className = "modpack-video-embed";
+      iframe.parentNode.insertBefore(wrapper, iframe);
+
+      if (ytMatch) {
+        const ytId = ytMatch[1];
+        const watchUrl = `https://www.youtube.com/watch?v=${ytId}`;
+        const rawTitle = (iframe.getAttribute("title") || "").trim();
+        const initialTitle = rawTitle && !/^youtube video player$/i.test(rawTitle) ? rawTitle : "Reproducir video en YouTube";
+
+        iframe.remove();
+
+        const card = doc.createElement("a");
+        card.className = "modpack-yt-card";
+        card.setAttribute("href", watchUrl);
+        card.setAttribute("data-yt-id", ytId);
+        card.setAttribute("title", initialTitle);
+        card.innerHTML = `
+          <img class="modpack-yt-thumb" src="https://i.ytimg.com/vi/${ytId}/hqdefault.jpg" alt="${escapeHtml(initialTitle)}" loading="lazy" referrerpolicy="no-referrer" />
+          <div class="modpack-yt-topbar">
+            <span class="modpack-yt-title">${escapeHtml(initialTitle)}</span>
+          </div>
+          <div class="modpack-yt-play-btn" aria-hidden="true">
+            <svg viewBox="0 0 68 48" width="64" height="45">
+              <path class="modpack-yt-play-bg" d="M66.52 7.74c-.78-2.93-2.49-5.41-5.42-6.19C55.79.13 34 0 34 0S12.21.13 6.9 1.55c-2.93.78-4.63 3.26-5.42 6.19C.06 13.05 0 24 0 24s.06 10.95 1.48 16.26c.78 2.93 2.49 5.41 5.42 6.19C12.21 47.87 34 48 34 48s21.79-.13 27.1-1.55c2.93-.78 4.64-3.26 5.42-6.19C67.94 34.95 68 24 68 24s-.06-10.95-1.48-16.26z" fill="#ff0000"></path>
+              <path d="M 45,24 27,14 27,34" fill="#ffffff"></path>
+            </svg>
+          </div>
+          <div class="modpack-yt-badge">Mirar en <strong>YouTube</strong></div>
+        `;
+        wrapper.appendChild(card);
+
+        const caption = doc.createElement("a");
+        caption.className = "modpack-video-ext-link";
+        caption.setAttribute("href", watchUrl);
+        caption.textContent = "▶ Abrir video en YouTube";
+        wrapper.appendChild(caption);
+      } else {
+        iframe.removeAttribute("style");
+        iframe.removeAttribute("width");
+        iframe.removeAttribute("height");
+        iframe.setAttribute("src", src);
+        iframe.setAttribute("referrerpolicy", "strict-origin-when-cross-origin");
+        iframe.setAttribute("allow", "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share");
+        iframe.setAttribute("allowfullscreen", "true");
+        wrapper.appendChild(iframe);
+      }
+    });
+
+    // 5. Remove empty spacer elements (<p>&nbsp;</p>, empty <span>, etc.) bottom-up
+    const isWhitespaceOnly = (str) => !str || str.replace(/[\s\u00a0\u200b]+/g, "").length === 0;
+    const VOID_OR_MEDIA = new Set(["IMG", "IFRAME", "VIDEO", "HR", "SVG", "TABLE", "INPUT"]);
+    Array.from(doc.body.querySelectorAll("*")).reverse().forEach((el) => {
+      if (VOID_OR_MEDIA.has(el.tagName) || el.classList.contains("modpack-video-embed") || el.closest(".modpack-video-embed")) return;
+      const hasMediaDescendant = el.querySelector("img, iframe, video, hr, svg, table, .modpack-video-embed");
+      if (!hasMediaDescendant && isWhitespaceOnly(el.textContent)) {
+        el.remove();
+      }
+    });
+
+    // 6. Strip redundant <br> tags (leading/trailing inside containers, adjacent to images/videos/blocks, or repeated <br><br>)
+    const isVisualBlockOrMedia = (node) => {
+      if (!node || node.nodeType !== 1) return false;
+      if (node.classList.contains("modpack-video-embed")) return true;
+      if (/^(IMG|IFRAME|VIDEO|P|DIV|H[1-6]|UL|OL|LI|TABLE|BLOCKQUOTE|HR|PRE)$/i.test(node.tagName)) return true;
+      if (node.tagName === "A" && node.querySelector("img") && isWhitespaceOnly(node.textContent)) return true;
+      return false;
+    };
+
+    const nextMeaningfulSibling = (node, dir) => {
+      let cur = dir > 0 ? node.nextSibling : node.previousSibling;
+      while (cur) {
+        if (cur.nodeType === 3) {
+          if (!isWhitespaceOnly(cur.nodeValue)) return cur;
+        } else if (cur.nodeType === 1) {
+          return cur;
+        }
+        cur = dir > 0 ? cur.nextSibling : cur.previousSibling;
+      }
+      return null;
+    };
+
+    doc.body.querySelectorAll("br").forEach((br) => {
+      const prev = nextMeaningfulSibling(br, -1);
+      const next = nextMeaningfulSibling(br, 1);
+      if (
+        !prev ||
+        !next ||
+        prev.tagName === "BR" ||
+        next.tagName === "BR" ||
+        isVisualBlockOrMedia(prev) ||
+        isVisualBlockOrMedia(next)
+      ) {
+        br.remove();
+      }
+    });
+
+    return doc.body.innerHTML;
+  }
+
+  async function ensureCurseForgeModId(mp) {
+    if (mp.cfId) return mp.cfId;
+    if (mp._cfIdPromise) return mp._cfIdPromise;
+    mp._cfIdPromise = (async () => {
+      try {
+        const searchParams = new URLSearchParams({
+          gameId: "432",
+          classId: "4471",
+          pageSize: "10",
+        });
+        if (mp.slug) searchParams.set("slug", mp.slug);
+        else searchParams.set("searchFilter", mp.title || "");
+        let sResp = await fetch(`https://api.curseforge.com/v1/mods/search?${searchParams}`, {
+          headers: { "x-api-key": CF_API_KEY, Accept: "application/json" },
+        });
+        let sData = sResp.ok ? (await sResp.json()).data || [] : [];
+        if (sData.length === 0 && mp.title) {
+          const fbParams = new URLSearchParams({
+            gameId: "432",
+            classId: "4471",
+            searchFilter: mp.title,
+            sortField: "2",
+            sortOrder: "desc",
+            pageSize: "10",
+          });
+          sResp = await fetch(`https://api.curseforge.com/v1/mods/search?${fbParams}`, {
+            headers: { "x-api-key": CF_API_KEY, Accept: "application/json" },
+          });
+          sData = sResp.ok ? (await sResp.json()).data || [] : [];
+        }
+        if (sData.length > 0) {
+          const hit = sData[0];
+          mp.cfId = hit.id;
+          const liveLogo = hit.logo?.thumbnailUrl || hit.logo?.url;
+          if (liveLogo) {
+            mp.icon = liveLogo;
+            mp.banner = liveLogo;
+          }
+          const shots = (hit.screenshots || []).map((s) => s.url).filter(Boolean);
+          if (shots.length > 0) {
+            mp.gallery = shots;
+            mp._cfScreenshotsLoaded = true;
+          }
+        }
+      } catch (err) {
+        console.warn("Could not resolve CurseForge modpack ID:", err);
+      }
+      return mp.cfId || null;
+    })();
+    return mp._cfIdPromise;
+  }
+
+  // Ctrl + Mouse Wheel: Text scaling ONLY inside the Create Instance window (#modal-create-instance)
+  localStorage.removeItem("ika_app_text_scale");
+  const CREATE_INST_TEXT_SCALE_KEY = "ika_create_inst_text_scale";
+  const TEXT_SCALE_MIN = 0.75;
+  const TEXT_SCALE_MAX = 2.0;
+  const TEXT_SCALE_STEP = 0.08;
+  let createInstTextScale = Math.min(
+    TEXT_SCALE_MAX,
+    Math.max(TEXT_SCALE_MIN, parseFloat(localStorage.getItem(CREATE_INST_TEXT_SCALE_KEY) || "1") || 1)
+  );
+  let cachedCreateInstFontRules = null;
+  let textZoomHudEl = null;
+  let textZoomHudTimer = null;
+
+  const CREATE_INST_SELECTOR_RE = /(#modal-create-instance|\.modal-create-inst|\.create-inst-|\.modpack-|\.type-hero-|\.platform-dot-|\.mc-filter-|\.mc-version-drum|\.inst-loader-|\.java-|#modpack-|#create-inst-)/;
+
+  function collectCreateInstFontSizeRules() {
+    if (cachedCreateInstFontRules) return cachedCreateInstFontRules;
+    cachedCreateInstFontRules = [];
+    const visitRules = (ruleList) => {
+      if (!ruleList) return;
+      for (let i = 0; i < ruleList.length; i++) {
+        const rule = ruleList[i];
+        if (rule.style && rule.style.fontSize && rule.selectorText) {
+          if (rule.selectorText.includes("app-text-zoom-hud")) continue;
+          if (!CREATE_INST_SELECTOR_RE.test(rule.selectorText)) continue;
+          const m = String(rule.style.fontSize).trim().match(/^([0-9.]+)px$/i);
+          if (m) {
+            cachedCreateInstFontRules.push({
+              style: rule.style,
+              basePx: parseFloat(m[1]),
+              priority: rule.style.getPropertyPriority("font-size") || "",
+            });
+          }
+        }
+        if (rule.cssRules) {
+          try { visitRules(rule.cssRules); } catch {}
+        }
+      }
+    };
+    for (let s = 0; s < document.styleSheets.length; s++) {
+      try {
+        visitRules(document.styleSheets[s].cssRules);
+      } catch {}
+    }
+    return cachedCreateInstFontRules;
+  }
+
+  function scaleModpackDescInlineFonts() {
+    if (!modpackDescText) return;
+    modpackDescText.querySelectorAll("[style]").forEach((node) => {
+      if (!node.dataset.baseFontPx && node.style.fontSize) {
+        const m = String(node.style.fontSize).trim().match(/^([0-9.]+)px$/i);
+        if (m) node.dataset.baseFontPx = m[1];
+      }
+      if (node.dataset.baseFontPx) {
+        const base = parseFloat(node.dataset.baseFontPx);
+        if (base > 0) {
+          node.style.fontSize = `${(base * createInstTextScale).toFixed(2)}px`;
+        }
+      }
+    });
+  }
+
+  function showTextZoomHud() {
+    if (!textZoomHudEl) {
+      textZoomHudEl = document.createElement("div");
+      textZoomHudEl.className = "app-text-zoom-hud";
+      document.body.appendChild(textZoomHudEl);
+    }
+    const pct = Math.round(createInstTextScale * 100);
+    textZoomHudEl.innerHTML = `Tamaño de texto: <span>${pct}%</span>`;
+    textZoomHudEl.classList.add("is-visible");
+    if (textZoomHudTimer) clearTimeout(textZoomHudTimer);
+    textZoomHudTimer = setTimeout(() => {
+      textZoomHudEl?.classList.remove("is-visible");
+    }, 1300);
+  }
+
+  function applyCreateInstTextScale(nextScale, showHud = true) {
+    createInstTextScale = Math.min(TEXT_SCALE_MAX, Math.max(TEXT_SCALE_MIN, Math.round(nextScale * 100) / 100));
+    localStorage.setItem(CREATE_INST_TEXT_SCALE_KEY, String(createInstTextScale));
+
+    const rules = collectCreateInstFontSizeRules();
+    for (let i = 0; i < rules.length; i++) {
+      const r = rules[i];
+      r.style.setProperty("font-size", `${(r.basePx * createInstTextScale).toFixed(2)}px`, r.priority);
+    }
+    scaleModpackDescInlineFonts();
+    if (showHud) showTextZoomHud();
+  }
+
+  if (createInstTextScale !== 1) {
+    requestAnimationFrame(() => applyCreateInstTextScale(createInstTextScale, false));
+  }
+
+  const isCreateInstModalOpen = () =>
+    Boolean(el.modalCreateInstance && !el.modalCreateInstance.classList.contains("hidden"));
+
+  window.addEventListener("wheel", (e) => {
+    if (!e.ctrlKey || !isCreateInstModalOpen()) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const delta = e.deltaY < 0 ? TEXT_SCALE_STEP : -TEXT_SCALE_STEP;
+    applyCreateInstTextScale(createInstTextScale + delta, true);
+  }, { passive: false, capture: true });
+
+  window.addEventListener("keydown", (e) => {
+    if (!e.ctrlKey || !isCreateInstModalOpen()) return;
+    if (e.key === "0" || e.code === "Digit0" || e.code === "Numpad0") {
+      e.preventDefault();
+      applyCreateInstTextScale(1, true);
+    } else if (e.key === "+" || e.key === "=" || e.code === "NumpadAdd") {
+      e.preventDefault();
+      applyCreateInstTextScale(createInstTextScale + TEXT_SCALE_STEP, true);
+    } else if (e.key === "-" || e.code === "NumpadSubtract") {
+      e.preventDefault();
+      applyCreateInstTextScale(createInstTextScale - TEXT_SCALE_STEP, true);
+    }
+  });
+
+  const ytOembedCache = new Map();
+
+  function hydrateModpackYoutubeCards(container) {
+    if (!container) return;
+    container.querySelectorAll(".modpack-yt-card[data-yt-id]").forEach((card) => {
+      const ytId = card.getAttribute("data-yt-id");
+      if (!ytId) return;
+      const wrapper = card.closest(".modpack-video-embed") || card;
+      const thumb = card.querySelector(".modpack-yt-thumb");
+      const titleEl = card.querySelector(".modpack-yt-title");
+
+      if (thumb) {
+        const checkThumb = () => {
+          if (thumb.naturalWidth > 0 && thumb.naturalWidth <= 120) {
+            wrapper.remove();
+            return;
+          }
+          const maxImg = new Image();
+          maxImg.referrerPolicy = "no-referrer";
+          maxImg.onload = () => {
+            if (maxImg.naturalWidth > 120 && thumb.isConnected) {
+              thumb.src = maxImg.src;
+            }
+          };
+          maxImg.src = `https://i.ytimg.com/vi/${ytId}/maxresdefault.jpg`;
+        };
+        if (thumb.complete && thumb.naturalWidth > 0) {
+          checkThumb();
+        } else {
+          thumb.addEventListener("load", checkThumb, { once: true });
+        }
+        thumb.addEventListener("error", () => {
+          wrapper.remove();
+        }, { once: true });
+      }
+
+      const applyMeta = (meta) => {
+        if (!card.isConnected) return;
+        if (meta && meta.unavailable) {
+          wrapper.remove();
+          return;
+        }
+        if (meta && meta.title && titleEl) {
+          titleEl.textContent = meta.title;
+          card.setAttribute("title", meta.title);
+          if (thumb) thumb.setAttribute("alt", meta.title);
+        }
+      };
+
+      if (ytOembedCache.has(ytId)) {
+        applyMeta(ytOembedCache.get(ytId));
+        return;
+      }
+
+      fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${encodeURIComponent(ytId)}&format=json`)
+        .then(async (res) => {
+          if (res.status === 401 || res.status === 403 || res.status === 404) {
+            const meta = { unavailable: true };
+            ytOembedCache.set(ytId, meta);
+            applyMeta(meta);
+            return;
+          }
+          if (!res.ok) return;
+          const data = await res.json();
+          const meta = {
+            title: (data && data.title ? String(data.title).trim() : ""),
+            author: (data && data.author_name ? String(data.author_name).trim() : "")
+          };
+          ytOembedCache.set(ytId, meta);
+          applyMeta(meta);
+        })
+        .catch(() => {});
+    });
+  }
+
+  function renderModpackDescriptionHtml(mp, fullHtml, isLoading = false) {
+    if (!modpackDescText) return;
+    const summary = (mp.description || "").trim();
+    const hasFullHtml = typeof fullHtml === "string" && fullHtml.trim().length > 0;
+
+    if (hasFullHtml) {
+      modpackDescText.innerHTML = `<div class="modpack-desc-body">${fullHtml}</div>`;
+      modpackDescText.querySelectorAll("img:not(.modpack-yt-thumb)").forEach((img) => {
+        img.referrerPolicy = "no-referrer";
+        img.loading = "lazy";
+        img.addEventListener("error", () => {
+          img.style.display = "none";
+        }, { once: true });
+      });
+      hydrateModpackYoutubeCards(modpackDescText);
+      scaleModpackDescInlineFonts();
+    } else if (isLoading) {
+      modpackDescText.innerHTML = `<div class="modpack-desc-loading"><span class="mgr-spin"></span><span>Cargando contenido de la página oficial...</span></div>`;
+    } else {
+      modpackDescText.innerHTML = `<p class="modpack-desc-summary">${escapeHtml(summary || "Sin descripción disponible.")}</p>`;
+    }
+    modpackDescText.scrollTop = 0;
+  }
+
+  if (modpackDescText) {
+    modpackDescText.addEventListener("click", async (e) => {
+      const link = e.target.closest("a[href]");
+      if (!link) return;
+      e.preventDefault();
+      const url = link.getAttribute("href");
+      if (!url || url.startsWith("#") || url.startsWith("javascript:")) return;
+      try {
+        await invoke("open_browser", { url });
+      } catch {
+        window.open(url, "_blank");
+      }
+    });
+  }
+
+  const GALLERY_AUTOPLAY_MS = 2000;
+  let gallerySlideshowTimer = null;
+  let currentGalleryImages = [];
+  let currentGalleryIdx = 0;
+
+  function stopGallerySlideshow() {
+    if (gallerySlideshowTimer) {
+      clearInterval(gallerySlideshowTimer);
+      gallerySlideshowTimer = null;
+    }
+  }
+
+  function triggerGalleryProgressBar(active) {
+    const wrap = modpackHeroImg?.parentElement;
+    if (!wrap) return;
+    let bar = wrap.querySelector(".modpack-gallery-progress");
+    if (!bar) {
+      bar = document.createElement("div");
+      bar.className = "modpack-gallery-progress";
+      bar.innerHTML = `<div class="modpack-gallery-progress-fill"></div>`;
+      wrap.appendChild(bar);
+    }
+    bar.classList.toggle("hidden", !active);
+    const fill = bar.querySelector(".modpack-gallery-progress-fill");
+    if (fill) {
+      fill.classList.remove("is-running");
+      void fill.offsetWidth;
+      if (active) {
+        fill.style.setProperty("--gallery-ms", `${GALLERY_AUTOPLAY_MS}ms`);
+        fill.classList.add("is-running");
+      }
+    }
+  }
+
+  function transitionToGalleryIndex(targetIdx) {
+    if (!currentGalleryImages.length || !modpackHeroImg) return;
+    const total = currentGalleryImages.length;
+    const nextIdx = ((targetIdx % total) + total) % total;
+    if (nextIdx === currentGalleryIdx && modpackHeroImg.getAttribute("src") === currentGalleryImages[nextIdx]) {
+      return;
+    }
+
+    const isWrapForward = currentGalleryIdx === total - 1 && nextIdx === 0;
+    const isWrapBackward = currentGalleryIdx === 0 && nextIdx === total - 1;
+    const dir = isWrapForward ? 1 : isWrapBackward ? -1 : nextIdx > currentGalleryIdx ? 1 : -1;
+    const prevSrc = modpackHeroImg.currentSrc || modpackHeroImg.src;
+    const nextSrc = currentGalleryImages[nextIdx];
+    currentGalleryIdx = nextIdx;
+
+    const wrap = modpackHeroImg.parentElement;
+    if (wrap && prevSrc && prevSrc !== nextSrc) {
+      wrap.querySelectorAll(".modpack-hero-img-outgoing").forEach((el) => el.remove());
+      const outgoing = document.createElement("img");
+      outgoing.src = prevSrc;
+      outgoing.alt = "";
+      outgoing.referrerPolicy = "no-referrer";
+      outgoing.className = "modpack-hero-img modpack-hero-img-outgoing";
+      outgoing.style.setProperty("--slide-dir", String(dir));
+      wrap.insertBefore(outgoing, modpackHeroImg);
+      outgoing.addEventListener("animationend", () => outgoing.remove(), { once: true });
+      setTimeout(() => outgoing.remove(), 750);
+    }
+
+    modpackHeroImg.classList.remove("is-sliding-in");
+    modpackHeroImg.style.setProperty("--slide-dir", String(dir));
+    modpackHeroImg.src = nextSrc;
+    void modpackHeroImg.offsetWidth;
+    modpackHeroImg.classList.add("is-sliding-in");
+
+    if (modpackGalleryCount) {
+      modpackGalleryCount.textContent = `Captura ${nextIdx + 1}/${total}`;
+    }
+
+    if (modpackGalleryStrip) {
+      const thumbs = modpackGalleryStrip.querySelectorAll(".modpack-gallery-thumb");
+      thumbs.forEach((t, i) => t.classList.toggle("is-active", i === nextIdx));
+      const activeThumb = thumbs[nextIdx];
+      if (activeThumb) {
+        const targetScroll = activeThumb.offsetLeft - (modpackGalleryStrip.clientWidth - activeThumb.clientWidth) / 2;
+        modpackGalleryStrip.scrollTo({ left: Math.max(0, targetScroll), behavior: "smooth" });
+      }
+    }
+
+    // Preload the following image so the next automatic transition is instant
+    if (total > 1) {
+      const preloadImg = new Image();
+      preloadImg.referrerPolicy = "no-referrer";
+      preloadImg.src = currentGalleryImages[(nextIdx + 1) % total];
+    }
+  }
+
+  function startGallerySlideshow() {
+    stopGallerySlideshow();
+    if (currentGalleryImages.length <= 1) {
+      triggerGalleryProgressBar(false);
+      return;
+    }
+    triggerGalleryProgressBar(true);
+    gallerySlideshowTimer = setInterval(() => {
+      if (el.modalCreateInstance && el.modalCreateInstance.classList.contains("hidden")) return;
+      if (currentInstType !== "modpack" || currentGalleryImages.length <= 1) return;
+      transitionToGalleryIndex(currentGalleryIdx + 1);
+      triggerGalleryProgressBar(true);
+    }, GALLERY_AUTOPLAY_MS);
+  }
+
+  function syncModpackIconElements(mp, newIconUrl) {
+    if (!newIconUrl || mp.icon === newIconUrl) return;
+    mp.icon = newIconUrl;
+    mp.banner = newIconUrl;
+    if (selectedModpackData === mp) {
+      if (modpackMetaIcon) modpackMetaIcon.src = newIconUrl;
+      if (createInstIconPreview) {
+        createInstIconPreview.src = newIconUrl;
+        currentInstIcon = newIconUrl;
+      }
+    }
+    if (createInstModpackResults) {
+      const cardImg = createInstModpackResults.querySelector(`.modpack-carousel-card[data-slug="${CSS.escape(mp.slug || mp.id)}"] .modpack-card-thumb`);
+      if (cardImg) cardImg.src = newIconUrl;
+    }
+  }
+
   // Select Modpack & Populate Inspector (Right Pane)
   async function selectModpack(mp) {
     selectedModpackData = mp;
@@ -8232,7 +9147,12 @@ async function initHomeInstanceSwitcher() {
       modpackMetaPlatform.className = `modpack-platform-badge ${mp.platform === "curseforge" ? "badge-cf" : "badge-mr"}`;
     }
     if (modpackMetaIcon) modpackMetaIcon.src = mp.icon || "/minecraft_block_textures/grass_block_side.png";
-    if (modpackDescText) modpackDescText.textContent = mp.description || "Sin descripción disponible.";
+
+    if (mp.fullDescriptionHtml) {
+      renderModpackDescriptionHtml(mp, mp.fullDescriptionHtml, false);
+    } else {
+      renderModpackDescriptionHtml(mp, null, true);
+    }
 
     // Sync instance name with modpack title
     if (inputNewInstName) {
@@ -8249,6 +9169,8 @@ async function initHomeInstanceSwitcher() {
     // Default Hero Image
     const initialHero = (mp.cfId && mp.gallery?.[0]) || mp.banner || mp.icon || "/instance_covers/thumbs/shader_complementary_reimagined_1.jpg";
     if (modpackHeroImg) {
+      modpackHeroImg.parentElement?.querySelectorAll(".modpack-hero-img-outgoing").forEach((el) => el.remove());
+      modpackHeroImg.classList.remove("is-sliding-in");
       modpackHeroImg.src = initialHero;
     }
 
@@ -8259,48 +9181,124 @@ async function initHomeInstanceSwitcher() {
 
     const renderGalleryStrip = (imgs) => {
       if (!modpackGalleryStrip) return;
-      if (modpackGalleryCount) modpackGalleryCount.textContent = `Captura 1/${imgs.length}`;
-      modpackGalleryStrip.innerHTML = imgs.slice(0, 8).map((imgUrl, idx) => `
-        <img src="${imgUrl}" class="modpack-gallery-thumb ${idx === 0 ? "is-active" : ""}" data-idx="${idx}" alt="Captura ${idx + 1}" onerror="this.style.display='none'" />
+      currentGalleryImages = imgs.filter(Boolean);
+      currentGalleryIdx = 0;
+      if (modpackGalleryCount) modpackGalleryCount.textContent = `Captura 1/${currentGalleryImages.length}`;
+      modpackGalleryStrip.innerHTML = currentGalleryImages.map((imgUrl, idx) => `
+        <img src="${imgUrl}" class="modpack-gallery-thumb ${idx === 0 ? "is-active" : ""}" data-idx="${idx}" alt="Captura ${idx + 1}" referrerpolicy="no-referrer" onerror="this.style.display='none'" />
       `).join("");
+      modpackGalleryStrip.scrollLeft = 0;
 
       modpackGalleryStrip.querySelectorAll(".modpack-gallery-thumb").forEach((thumb) => {
         thumb.addEventListener("click", () => {
-          modpackGalleryStrip.querySelectorAll(".modpack-gallery-thumb").forEach((t) => t.classList.remove("is-active"));
-          thumb.classList.add("is-active");
-          if (modpackHeroImg) modpackHeroImg.src = thumb.src;
-          const idx = parseInt(thumb.dataset.idx, 10) + 1;
-          if (modpackGalleryCount) modpackGalleryCount.textContent = `Captura ${idx}/${imgs.length}`;
+          const idx = parseInt(thumb.dataset.idx, 10);
+          if (!Number.isNaN(idx)) {
+            transitionToGalleryIndex(idx);
+            startGallerySlideshow();
+          }
         });
       });
+
+      if (currentGalleryImages.length > 1) {
+        const preloadImg = new Image();
+        preloadImg.referrerPolicy = "no-referrer";
+        preloadImg.src = currentGalleryImages[1];
+      }
+      startGallerySlideshow();
     };
 
     renderGalleryStrip(galleryImages);
 
-    // If Modrinth project, query API for live screenshots and official description
-    if (mp.slug && mp.platform === "modrinth") {
+    // Populate versions list & badges concurrently
+    populateModpackVersions(mp);
+
+    // Fetch live screenshots and full official page content (CurseForge or Modrinth)
+    if (mp.platform === "curseforge" || mp.cfId) {
       try {
-        const pResp = await fetch(`https://api.modrinth.com/v2/project/${mp.slug}`, {
-          headers: { "User-Agent": "ModComparer/2.0" }
-        });
-        if (pResp.ok) {
-          const pData = await pResp.json();
-          if (pData.gallery && pData.gallery.length > 0) {
-            const apiGallery = pData.gallery.map((g) => g.url);
-            renderGalleryStrip(apiGallery);
-            if (modpackHeroImg && apiGallery[0]) modpackHeroImg.src = apiGallery[0];
+        const cfId = await ensureCurseForgeModId(mp);
+        if (selectedModpackData !== mp) return;
+        if (cfId) {
+          // Update gallery if ensureCurseForgeModId discovered screenshots
+          if (mp._cfScreenshotsLoaded && Array.isArray(mp.gallery) && mp.gallery.length > 0) {
+            if (modpackHeroImg && mp.gallery[0]) modpackHeroImg.src = mp.gallery[0];
+            renderGalleryStrip(mp.gallery);
           }
-          if (pData.description && modpackDescText) {
-            modpackDescText.textContent = pData.description;
+
+          const needDetails = !mp._cfScreenshotsLoaded;
+          const needDesc = !mp.fullDescriptionHtml;
+
+          if (needDetails || needDesc) {
+            const cfHeaders = { "x-api-key": CF_API_KEY, Accept: "application/json" };
+            const [modResp, descResp] = await Promise.all([
+              needDetails ? fetch(`https://api.curseforge.com/v1/mods/${cfId}`, { headers: cfHeaders }).catch(() => null) : Promise.resolve(null),
+              needDesc ? fetch(`https://api.curseforge.com/v1/mods/${cfId}/description`, { headers: cfHeaders }).catch(() => null) : Promise.resolve(null),
+            ]);
+            if (selectedModpackData !== mp) return;
+
+            if (modResp && modResp.ok) {
+              const modData = (await modResp.json()).data;
+              const liveLogo = modData?.logo?.thumbnailUrl || modData?.logo?.url;
+              if (liveLogo) syncModpackIconElements(mp, liveLogo);
+              const shots = (modData?.screenshots || []).map((s) => s.url).filter(Boolean);
+              mp._cfScreenshotsLoaded = true;
+              if (shots.length > 0) {
+                mp.gallery = shots;
+                if (modpackHeroImg && shots[0]) modpackHeroImg.src = shots[0];
+                renderGalleryStrip(shots);
+              }
+            }
+
+            if (descResp && descResp.ok) {
+              const rawHtml = (await descResp.json()).data || "";
+              const cleanHtml = prepareModpackOfficialHtml(rawHtml);
+              mp.fullDescriptionHtml = cleanHtml;
+              renderModpackDescriptionHtml(mp, cleanHtml, false);
+            } else if (!mp.fullDescriptionHtml) {
+              renderModpackDescriptionHtml(mp, null, false);
+            }
           }
+        } else {
+          renderModpackDescriptionHtml(mp, null, false);
         }
       } catch (err) {
-        console.warn("Could not fetch project details:", err);
+        console.warn("Could not fetch CurseForge project details:", err);
+        if (selectedModpackData === mp) renderModpackDescriptionHtml(mp, mp.fullDescriptionHtml || null, false);
       }
+    } else if ((mp.slug || mp.id) && mp.platform === "modrinth") {
+      try {
+        const pResp = await fetch(`https://api.modrinth.com/v2/project/${mp.slug || mp.id}`, {
+          headers: { "User-Agent": "ModComparer/2.0" }
+        });
+        if (selectedModpackData !== mp) return;
+        if (pResp.ok) {
+          const pData = await pResp.json();
+          if (selectedModpackData !== mp) return;
+          if (pData.icon_url) syncModpackIconElements(mp, pData.icon_url);
+          if (pData.gallery && pData.gallery.length > 0) {
+            const apiGallery = pData.gallery.map((g) => g.url);
+            mp.gallery = apiGallery;
+            if (modpackHeroImg && apiGallery[0]) modpackHeroImg.src = apiGallery[0];
+            renderGalleryStrip(apiGallery);
+          }
+          if (pData.description) {
+            mp.description = pData.description;
+          }
+          const rawMarkdown = pData.body || pData.description || "";
+          const cleanHtml = rawMarkdown
+            ? prepareModpackOfficialHtml(marked.parse(rawMarkdown, { gfm: true, breaks: false }))
+            : "";
+          mp.fullDescriptionHtml = cleanHtml;
+          renderModpackDescriptionHtml(mp, cleanHtml, false);
+        } else {
+          renderModpackDescriptionHtml(mp, mp.fullDescriptionHtml || null, false);
+        }
+      } catch (err) {
+        console.warn("Could not fetch Modrinth project details:", err);
+        if (selectedModpackData === mp) renderModpackDescriptionHtml(mp, mp.fullDescriptionHtml || null, false);
+      }
+    } else {
+      renderModpackDescriptionHtml(mp, mp.fullDescriptionHtml || null, false);
     }
-
-    // Populate versions list & badges
-    populateModpackVersions(mp);
   }
 
   // Official Web URL button
@@ -8336,36 +9334,8 @@ async function initHomeInstanceSwitcher() {
     // CurseForge: files of the project (gameVersions mixes MC versions and loader names)
     if (mp.platform === "curseforge" || mp.cfId) {
       try {
-        if (!mp.cfId) {
-          const searchParams = new URLSearchParams({
-            gameId: "432",
-            classId: "4471",
-            pageSize: "10",
-          });
-          if (mp.slug) searchParams.set("slug", mp.slug);
-          else searchParams.set("searchFilter", mp.title || "");
-          let sResp = await fetch(`https://api.curseforge.com/v1/mods/search?${searchParams}`, {
-            headers: { "x-api-key": CF_API_KEY, Accept: "application/json" },
-          });
-          let sData = sResp.ok ? (await sResp.json()).data || [] : [];
-          if (sData.length === 0 && mp.title) {
-            const fbParams = new URLSearchParams({
-              gameId: "432",
-              classId: "4471",
-              searchFilter: mp.title,
-              sortField: "2",
-              sortOrder: "desc",
-              pageSize: "10",
-            });
-            sResp = await fetch(`https://api.curseforge.com/v1/mods/search?${fbParams}`, {
-              headers: { "x-api-key": CF_API_KEY, Accept: "application/json" },
-            });
-            sData = sResp.ok ? (await sResp.json()).data || [] : [];
-          }
-          if (sData.length > 0) {
-            mp.cfId = sData[0].id;
-          }
-        }
+        await ensureCurseForgeModId(mp);
+        if (selectedModpackData !== mp) return;
         if (mp.cfId) {
           const params = new URLSearchParams({ pageSize: "30" });
           if (mcFilter !== "all") params.set("gameVersion", mcFilter);
@@ -8654,6 +9624,14 @@ async function initHomeInstanceSwitcher() {
 
   // Eventos de rueda (Scroll con mouse wheel) y teclado
   if (mcVersionDrumContainer) {
+    if (typeof ResizeObserver !== "undefined") {
+      new ResizeObserver(() => {
+        if (mcVersionDrumContainer.clientHeight > 0) {
+          renderCreateInstVersionList();
+        }
+      }).observe(mcVersionDrumContainer);
+    }
+
     let wheelThrottle = 0;
     mcVersionDrumContainer.addEventListener("wheel", (e) => {
       e.preventDefault();
@@ -8958,7 +9936,7 @@ async function initHomeInstanceSwitcher() {
     if (scrollEl) {
       scrollEl.innerHTML = `
         <div class="inst-loader-loading-state">
-          <div class="cyber-spinner" style="width:20px; height:20px; border:2px solid rgba(56,189,248,0.25); border-top-color:#38bdf8; border-radius:50%; animation:spin 0.8s linear infinite;"></div>
+          <div class="cyber-spinner" style="width:20px; height:20px; border:2px solid rgba(168,85,247,0.25); border-top-color:#a855f7; border-radius:50%; animation:spin 0.8s linear infinite;"></div>
           <span>Buscando loaders disponibles para ${mcVersion}...</span>
         </div>
       `;
@@ -9087,7 +10065,7 @@ async function initHomeInstanceSwitcher() {
             ${tagHtml}
           </div>
           <div class="inst-loader-ver-check">
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#38bdf8" stroke-width="2.5">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#c4b5fd" stroke-width="2.5">
               <polyline points="20 6 9 17 4 12"></polyline>
             </svg>
           </div>
@@ -9216,6 +10194,8 @@ async function initHomeInstanceSwitcher() {
     return clean || `ika-${vendor}-${major}`;
   };
 
+  const normJavaExePath = (p) => normInstancePath(p).replace(/javaw?\.exe$/i, "javaw.exe");
+
   const getDynamicJavaBuilds = async (vendorId, major) => {
     const key = `${vendorId}:${major}`;
     if (javaCatalogCache.has(key)) return javaCatalogCache.get(key);
@@ -9311,6 +10291,7 @@ async function initHomeInstanceSwitcher() {
 
       javaVendorsList.querySelectorAll(".java-vendor-row").forEach((row) => {
         row.addEventListener("click", () => {
+          if (row.dataset.vendor === selectedJavaVendor) return;
           if (instEditMode) instEditMode.javaTouched = true;
           selectedJavaVendor = row.dataset.vendor;
           // Forget the previous vendor's build too: it stayed selected while the new list
@@ -9338,8 +10319,10 @@ async function initHomeInstanceSwitcher() {
 
       javaMajorsList.querySelectorAll(".java-major-row").forEach((row) => {
         row.addEventListener("click", () => {
+          const m = parseInt(row.dataset.major, 10);
+          if (m === selectedJavaMajor) return;
           if (instEditMode) instEditMode.javaTouched = true;
-          selectedJavaMajor = parseInt(row.dataset.major, 10);
+          selectedJavaMajor = m;
           selectedJavaBuildId = null;
           selectedJava = null;
           renderJavaSelector();
@@ -9356,7 +10339,7 @@ async function initHomeInstanceSwitcher() {
         if (javaBuildsCount) javaBuildsCount.textContent = "Buscando...";
         javaBuildsList.innerHTML = `
           <div class="java-loading-state" style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:36px 16px; gap:12px; color:rgba(255,255,255,0.7); font-size:13px;">
-            <div class="cyber-spinner" style="width:22px; height:22px; border:2px solid rgba(56,189,248,0.25); border-top-color:#38bdf8; border-radius:50%; animation:spin 0.8s linear infinite;"></div>
+            <div class="cyber-spinner" style="width:22px; height:22px; border:2px solid rgba(168,85,247,0.25); border-top-color:#a855f7; border-radius:50%; animation:spin 0.8s linear infinite;"></div>
             <span>Buscando versiones de ${escapeHtml(providerName)}...</span>
           </div>
         `;
@@ -9432,10 +10415,14 @@ async function initHomeInstanceSwitcher() {
 
     // Edit window: the instance's current Java (until the player picks another one).
     const editJava = instEditMode && instEditMode.original;
-    const isCurrentJava = (b) =>
-      !!editJava &&
-      ((!!editJava.javaRuntime && b.runtimeName === editJava.javaRuntime) ||
-        (!!editJava.javaPath && !!b.path && normInstancePath(b.path) === normInstancePath(editJava.javaPath)));
+    const isCurrentJava = (b) => {
+      if (!editJava) return false;
+      if (editJava.javaRuntime && b.runtimeName === editJava.javaRuntime) return true;
+      if (editJava.javaPath && b.path && normJavaExePath(b.path) === normJavaExePath(editJava.javaPath)) return true;
+      const bName = `${PRISM_JAVA_VENDORS.find((p) => p.id === vendor)?.name || vendor} ${b.version}`.trim();
+      if (b.installed && editJava.javaLabel && bName === editJava.javaLabel.trim()) return true;
+      return false;
+    };
 
     // Sin selección (o la anterior ya no está): la más reciente del proveedor, como Pinecone.
     // A Java picked with "Examinar" (local:...) is kept.
@@ -9465,7 +10452,7 @@ async function initHomeInstanceSwitcher() {
           <div class="java-build-right">
             ${isCurrentJava(b) ? `<span class="java-build-badge current">Actual</span>` : ""}<span class="java-build-badge ${b.installed ? "installed" : "download"}">${b.installed ? "Instalado" : "Descargar"}</span>
             <div class="java-build-check">
-              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="#38bdf8" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="#c4b5fd" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
             </div>
           </div>
         </div>
@@ -9477,8 +10464,11 @@ async function initHomeInstanceSwitcher() {
 
     javaBuildsList.querySelectorAll(".java-build-row").forEach((row) => {
       row.addEventListener("click", () => {
-        if (instEditMode) instEditMode.javaTouched = true;
+        if (row.dataset.id === selectedJavaBuildId) return;
         const target = allBuilds.find((it) => it.id === row.dataset.id);
+        if (instEditMode) {
+          instEditMode.javaTouched = !target || !isCurrentJava(target);
+        }
         if (target) selectBuild(target);
         renderJavaBuildsList(catalog, vendor, major);
       });
@@ -9514,7 +10504,6 @@ async function initHomeInstanceSwitcher() {
   // Toggle Recomendado listener
   if (checkboxJavaRecommended) {
     checkboxJavaRecommended.addEventListener("change", () => {
-      if (instEditMode) instEditMode.javaTouched = true;
       javaOnlyRecommended = checkboxJavaRecommended.checked;
       renderJavaSelector();
     });
@@ -9641,19 +10630,149 @@ async function initHomeInstanceSwitcher() {
     });
   }
 
-  const closeCreateInstModal = () => {
-    if (el.modalCreateInstance) el.modalCreateInstance.classList.add("hidden");
-    exitInstEditMode();
+  // ==========================================================================
+  // MOTION GRAPHICS SUITE: CREAR & EDITAR INSTANCIA
+  // ==========================================================================
+  let isClosingCreateInstModal = false;
+
+  function triggerModalSaveShockwave(buttonEl) {
+    if (!buttonEl) return;
+    const footer = buttonEl.closest(".create-inst-footer, .modal-footer");
+    if (!footer) return;
+    const rect = buttonEl.getBoundingClientRect();
+    const footerRect = footer.getBoundingClientRect();
+    const shockwave = document.createElement("div");
+    shockwave.className = "save-shockwave-pulse";
+    const x = rect.left + rect.width / 2 - footerRect.left;
+    const y = rect.top + rect.height / 2 - footerRect.top;
+    shockwave.style.left = `${x}px`;
+    shockwave.style.top = `${y}px`;
+    shockwave.style.width = `${rect.width}px`;
+    shockwave.style.height = `${rect.height}px`;
+    footer.style.position = "relative";
+    footer.appendChild(shockwave);
+    setTimeout(() => shockwave.remove(), 700);
+  }
+
+  async function triggerModalVictorySweep(modalEl) {
+    if (!modalEl) return;
+    const box = modalEl.querySelector(".modal-create-inst-modern, .modal-settings-box");
+    if (!box) return;
+    box.classList.add("has-saved-success");
+    const scanline = document.createElement("div");
+    scanline.className = "save-victory-scanline";
+    box.appendChild(scanline);
+    await new Promise((r) => setTimeout(r, 340));
+    scanline.remove();
+  }
+
+  const closeCreateInstModal = (immediate = false) => {
+    if (!el.modalCreateInstance) return;
+    if (el.modalCreateInstance.classList.contains("hidden")) return;
+    if (immediate) {
+      el.modalCreateInstance.classList.add("hidden");
+      el.modalCreateInstance.classList.remove("is-closing", "is-opening", "has-saved-success");
+      const box = el.modalCreateInstance.querySelector(".modal-create-inst-modern");
+      if (box) {
+        box.style.left = "";
+        box.style.top = "";
+        box.style.transform = "";
+        box.style.position = "";
+        box.classList.remove("has-saved-success");
+      }
+      exitInstEditMode();
+      isClosingCreateInstModal = false;
+      return;
+    }
+    if (isClosingCreateInstModal) return;
+    isClosingCreateInstModal = true;
+    el.modalCreateInstance.classList.add("is-closing");
+    el.modalCreateInstance.classList.remove("is-opening");
+
+    setTimeout(() => {
+      el.modalCreateInstance.classList.add("hidden");
+      el.modalCreateInstance.classList.remove("is-closing", "has-saved-success");
+      const box = el.modalCreateInstance.querySelector(".modal-create-inst-modern");
+      if (box) {
+        box.style.left = "";
+        box.style.top = "";
+        box.style.transform = "";
+        box.style.position = "";
+        box.classList.remove("has-saved-success");
+      }
+      exitInstEditMode();
+      isClosingCreateInstModal = false;
+    }, 260);
   };
 
-  if (el.btnCloseModalCreateInst) el.btnCloseModalCreateInst.addEventListener("click", closeCreateInstModal);
-  if (el.btnCancelCreateInst) el.btnCancelCreateInst.addEventListener("click", closeCreateInstModal);
+  const openCreateInstModalWithMotion = () => {
+    if (!el.modalCreateInstance) return;
+    isClosingCreateInstModal = false;
+    const box = el.modalCreateInstance.querySelector(".modal-create-inst-modern");
+    if (box) {
+      box.style.left = "";
+      box.style.top = "";
+      box.style.transform = "";
+      box.style.position = "";
+      box.classList.remove("has-saved-success");
+    }
+    el.modalCreateInstance.classList.remove("hidden", "is-closing", "has-saved-success");
+    el.modalCreateInstance.classList.add("is-opening");
+    void el.modalCreateInstance.offsetWidth;
+  };
+
+  if (el.btnCloseModalCreateInst) el.btnCloseModalCreateInst.addEventListener("click", () => closeCreateInstModal());
+  if (el.btnCancelCreateInst) el.btnCancelCreateInst.addEventListener("click", () => closeCreateInstModal());
 
   if (el.modalCreateInstance) {
     el.modalCreateInstance.addEventListener("click", (e) => {
       if (e.target === el.modalCreateInstance) {
+        const box = el.modalCreateInstance.querySelector(".modal-create-inst-modern");
+        if (box?.dataset.justDragged === "true") return;
         closeCreateInstModal();
       }
+    });
+
+    // Live Typing & Keystroke Pulse Feedback
+    let typingDebounceTimer = null;
+    el.modalCreateInstance.addEventListener("input", (e) => {
+      const input = e.target;
+      if (!input || !input.matches("input[type='text'], input:not([type]), textarea")) return;
+      const wrapper = input.closest(".create-inst-input-wrapper, .search-box, .create-inst-card");
+      if (wrapper) {
+        wrapper.classList.remove("typing-pulse");
+        void wrapper.offsetWidth;
+        wrapper.classList.add("typing-pulse");
+        clearTimeout(typingDebounceTimer);
+        typingDebounceTimer = setTimeout(() => {
+          wrapper.classList.remove("typing-pulse");
+        }, 350);
+      }
+      if (input.id === "input-create-inst-name" && createInstCharLimit) {
+        createInstCharLimit.classList.remove("char-limit-tick");
+        void createInstCharLimit.offsetWidth;
+        createInstCharLimit.classList.add("char-limit-tick");
+        const len = input.value.length;
+        if (len >= 48) {
+          createInstCharLimit.style.color = "#f43f5e";
+          createInstCharLimit.style.textShadow = "0 0 10px rgba(244, 63, 94, 0.7)";
+        } else if (len >= 38) {
+          createInstCharLimit.style.color = "#f59e0b";
+          createInstCharLimit.style.textShadow = "0 0 10px rgba(245, 158, 11, 0.6)";
+        } else {
+          createInstCharLimit.style.color = "";
+          createInstCharLimit.style.textShadow = "";
+        }
+      }
+    });
+
+    // Pointer spotlight motion tracking
+    el.modalCreateInstance.addEventListener("pointermove", (e) => {
+      const target = e.target.closest(".btn-create-inst-submit, .create-inst-type-hero-card, .btn-create-inst-cancel, .create-inst-back-btn, .inst-loader-pill, .inst-pill, .create-inst-square-icon-picker, .btn-change-inst-cover");
+      if (!target) return;
+      const rect = target.getBoundingClientRect();
+      target.style.setProperty("--mouse-x", `${e.clientX - rect.left}px`);
+      target.style.setProperty("--mouse-y", `${e.clientY - rect.top}px`);
     });
   }
 
@@ -9669,7 +10788,7 @@ async function initHomeInstanceSwitcher() {
       e.stopPropagation();
       if (!el.modalCreateInstance) return;
       exitInstEditMode();
-      el.modalCreateInstance.classList.remove("hidden");
+      openCreateInstModalWithMotion();
 
       if (inputNewInstName) {
         inputNewInstName.value = "Mi nueva instancia";
@@ -9690,20 +10809,15 @@ async function initHomeInstanceSwitcher() {
       currentInstIcon = randomBlock;
       if (createInstIconPreview) createInstIconPreview.src = randomBlock;
 
-      // Default to Modpack type with CurseForge platform
+      // Default to Modpack type with CurseForge platform sorted by Total Downloads
       currentModpackPlatform = "curseforge";
       if (btnPlatformCurseforge) btnPlatformCurseforge.classList.add("is-active");
       if (btnPlatformModrinth) btnPlatformModrinth.classList.remove("is-active");
-      currentDisplayedModpacks = [...CURATED_CURSEFORGE_MODPACKS];
       if (inputSearchModpack) inputSearchModpack.value = "";
       setModpackMcFilter("all");
       resetCustomJavaSettings();
       setInstanceType("modpack");
-
-      // Auto-select first modpack so right column is immediately populated
-      if (CURATED_CURSEFORGE_MODPACKS.length > 0) {
-        selectModpack(CURATED_CURSEFORGE_MODPACKS[0]);
-      }
+      searchModpacks("");
     });
   }
 
@@ -9730,7 +10844,12 @@ async function initHomeInstanceSwitcher() {
 
   function editJavaDiffers(o) {
     if (!selectedJava) return false;
-    if (selectedJava.path) return !o.javaPath || normInstancePath(selectedJava.path) !== normInstancePath(o.javaPath);
+    const toLabel = (selectedJava.buildName || "Java").trim();
+    if (o.javaLabel && toLabel && o.javaLabel.trim() === toLabel) return false;
+    if (selectedJava.path) {
+      if (o.javaPath) return normJavaExePath(selectedJava.path) !== normJavaExePath(o.javaPath);
+      return true;
+    }
     return selectedJava.runtimeName !== o.javaRuntime;
   }
 
@@ -9743,7 +10862,10 @@ async function initHomeInstanceSwitcher() {
     if (c.mc !== o.mc) out.push({ key: "mc", label: "Versión", from: o.mc, to: c.mc });
     const loaderChanged = c.loader !== o.loader || (c.loader !== "Vanilla" && !!c.loaderVersion && c.loaderVersion !== o.loaderVersion);
     if (loaderChanged) out.push({ key: "loader", label: "Loader", from: editLoaderLabel(o.loader, o.loaderVersion), to: editLoaderLabel(c.loader, c.loaderVersion) });
-    if (instEditMode.javaTouched && editJavaDiffers(o)) out.push({ key: "java", label: "Java", from: o.javaLabel, to: selectedJava.buildName || "Java" });
+    const javaTo = selectedJava ? (selectedJava.buildName || "Java") : "Java";
+    if (instEditMode.javaTouched && editJavaDiffers(o) && o.javaLabel !== javaTo) {
+      out.push({ key: "java", label: "Java", from: o.javaLabel, to: javaTo });
+    }
     if (c.ram !== o.ram) out.push({ key: "ram", label: "RAM", from: formatRamMb(o.ram), to: formatRamMb(c.ram) });
     if (c.jvm !== o.jvm) out.push({ key: "jvm", label: "Argumentos", from: o.jvm || "(ninguno)", to: c.jvm || "(ninguno)" });
     return out;
@@ -9932,7 +11054,7 @@ async function initHomeInstanceSwitcher() {
 
     const modal = el.modalCreateInstance;
     modal.classList.add("is-edit-mode");
-    modal.classList.remove("hidden");
+    openCreateInstModalWithMotion();
     const title = modal.querySelector(".create-inst-title");
     const sub = modal.querySelector(".create-inst-sub");
     if (title) title.textContent = `Editar ${d.name}`;
@@ -9995,7 +11117,11 @@ async function initHomeInstanceSwitcher() {
       showToast(`Elige la versión de ${changes.loader} para Minecraft ${c.mc}`);
       return;
     }
-    if (btnSubmitCreateInst) btnSubmitCreateInst.disabled = true;
+    if (btnSubmitCreateInst) {
+      btnSubmitCreateInst.disabled = true;
+      btnSubmitCreateInst.classList.add("is-saving-active");
+    }
+    triggerModalSaveShockwave(btnSubmitCreateInst);
     try {
       await invoke("update_instance", { instancePath: instEditMode.details.path, changes });
       // Cover and icon are stored by name: follow a rename.
@@ -10003,11 +11129,14 @@ async function initHomeInstanceSwitcher() {
       if (currentInstCover) saveCustomInstanceCover(newName, currentInstCover);
       if (currentInstIcon) saveCustomInstanceIcon(newName, currentInstIcon);
       showToast(`"${newName}" actualizada: ${edits.map((e) => e.label.toLowerCase()).join(", ")}`);
+      await triggerModalVictorySweep(el.modalCreateInstance);
       closeCreateInstModal();
       await reloadAllHomeInstances(newName);
     } catch (err) {
       showToast(`No se pudo guardar: ${err}`);
       if (btnSubmitCreateInst) btnSubmitCreateInst.disabled = false;
+    } finally {
+      btnSubmitCreateInst?.classList.remove("is-saving-active");
     }
   }
 
@@ -10050,7 +11179,11 @@ async function initHomeInstanceSwitcher() {
 
       const submitSpan = btnSubmitCreateInst?.querySelector("span");
       const originalBtnLabel = submitSpan ? submitSpan.textContent : "";
-      if (btnSubmitCreateInst) btnSubmitCreateInst.disabled = true;
+      if (btnSubmitCreateInst) {
+        btnSubmitCreateInst.disabled = true;
+        btnSubmitCreateInst.classList.add("is-saving-active");
+      }
+      triggerModalSaveShockwave(btnSubmitCreateInst);
       let unlistenModpackProgress = null;
       try {
         // Installed Java -> its path. A Java that isn't on the PC yet is only remembered:
@@ -10112,6 +11245,7 @@ async function initHomeInstanceSwitcher() {
           saveCustomInstanceIcon(name, currentInstIcon);
         }
 
+        await triggerModalVictorySweep(el.modalCreateInstance);
         closeCreateInstModal();
         if (modpack && createdInst && typeof createdInst.mod_count === "number") {
           showToast(`¡Modpack "${name}" instalado (${createdInst.mod_count} mods)! ⭐`);
@@ -10127,7 +11261,10 @@ async function initHomeInstanceSwitcher() {
         if (typeof unlistenModpackProgress === "function") {
           unlistenModpackProgress();
         }
-        if (btnSubmitCreateInst) btnSubmitCreateInst.disabled = false;
+        if (btnSubmitCreateInst) {
+          btnSubmitCreateInst.disabled = false;
+          btnSubmitCreateInst.classList.remove("is-saving-active");
+        }
         if (submitSpan && originalBtnLabel) submitSpan.textContent = originalBtnLabel;
         updateSubmitButtonText();
       }
@@ -11132,11 +12269,11 @@ const HCP_STATE_TEXT = {
   idle: "Listo para jugar",
   preparing: "Preparando",
   running: "Cargando Minecraft",
-  menu: "Listo · menú principal",
+  menu: "Listo",
   world: "Cargando el mundo",
   connecting: "Conectando",
   ingame: "Jugando",
-  closed: "Juego cerrado",
+  closed: "Cierre correcto",
   crashed: "Crasheó",
   failed: "No se pudo iniciar",
 };
@@ -11192,36 +12329,94 @@ function isInstanceGameActive(instancePath) {
   return GAME_ACTIVE_STATES.has(gameStates.get(normInstancePath(instancePath))?.state);
 }
 
-// The play button follows the instance selected in Inicio.
+// The play button follows the instance selected in Inicio with choreographed state transitions.
+let playBtnMorphTimer = null;
+
 function syncPlayButtonLock() {
   const btn = el.btnPlayGame;
   if (!btn) return;
   const inst = currentHomeInstance();
   const st = inst ? gameStates.get(normInstancePath(inst.path))?.state : null;
   const locked = GAME_ACTIVE_STATES.has(st);
+  const visualState = !locked ? "idle" : st === "preparing" ? "preparing" : "running";
+  const prevState = btn.dataset.playState || "idle";
+
   btn.classList.toggle("is-locked", locked);
+  btn.classList.toggle("is-state-idle", visualState === "idle");
+  btn.classList.toggle("is-state-preparing", visualState === "preparing");
+  btn.classList.toggle("is-state-running", visualState === "running");
+  btn.dataset.playState = visualState;
   btn.setAttribute("aria-disabled", locked ? "true" : "false");
-  const label = btn.querySelector("text");
-  if (label) label.textContent = !locked ? "Comenzar" : st === "preparing" ? "Iniciando…" : "En juego";
+
+  if (prevState !== visualState) {
+    btn.classList.remove("is-shockwave", "is-state-morph");
+    void btn.getBoundingClientRect();
+    btn.classList.add("is-shockwave", "is-state-morph");
+    if (playBtnMorphTimer) clearTimeout(playBtnMorphTimer);
+    playBtnMorphTimer = setTimeout(() => {
+      btn.classList.remove("is-state-morph");
+    }, 680);
+  }
 }
 
 function renderHcpState(fileState) {
   const box = document.getElementById("hcp-state");
-  if (!box) return;
   const inst = currentHomeInstance();
   const st = inst ? gameStates.get(normInstancePath(inst.path)) : null;
-  const state = st?.state || (fileState === "running" ? "running" : "idle");
-  const text = st?.detail ? `${HCP_STATE_TEXT[state]} · ${st.detail}` : HCP_STATE_TEXT[state];
-  box.dataset.state = state;
-  box.title = text;
-  const label = box.querySelector(".hcp-state-text");
-  if (label) label.textContent = text;
+  const state = st?.state || (fileState === "running" ? "running" : (fileState === "closed" ? "closed" : "idle"));
+  const text = st?.detail ? `${HCP_STATE_TEXT[state]} · ${st.detail}` : (HCP_STATE_TEXT[state] || "Cierre correcto");
+  if (box) {
+    box.dataset.state = state;
+    box.title = text;
+    const label = box.querySelector(".hcp-state-text");
+    if (label) label.textContent = text;
+  }
+
+  // Update new cyber footer status and runtime (Ref: media_1791969222409)
+  const footerStatus = document.getElementById("hcp-footer-status");
+  const footerText = document.getElementById("hcp-footer-text");
+  const footerIcon = document.getElementById("hcp-footer-icon");
+  const footerRuntime = document.getElementById("hcp-footer-runtime");
+  
+  if (footerStatus) {
+    footerStatus.dataset.state = state;
+  }
+  if (footerText) {
+    footerText.textContent = text;
+  }
+  if (footerIcon) {
+    if (state === "closed" || state === "idle") {
+      footerIcon.innerHTML = `<svg viewBox="0 0 24 24" width="22" height="22" fill="none">
+        <circle cx="12" cy="12" r="10" stroke="#34d399" stroke-width="2.2" />
+        <polyline points="7.5 12 10.5 15 16.5 9" stroke="#34d399" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
+      </svg>`;
+    } else if (state === "crashed" || state === "failed") {
+      footerIcon.innerHTML = `<svg viewBox="0 0 24 24" width="22" height="22" fill="none">
+        <circle cx="12" cy="12" r="10" stroke="#ef4444" stroke-width="2.2" />
+        <line x1="12" y1="8" x2="12" y2="13" stroke="#ef4444" stroke-width="2.2" stroke-linecap="round"/>
+        <circle cx="12" cy="16.5" r="1" fill="#ef4444" />
+      </svg>`;
+    } else if (state === "running" || state === "world" || state === "connecting" || state === "menu" || state === "ingame") {
+      footerIcon.innerHTML = `<svg viewBox="0 0 24 24" width="22" height="22" fill="none">
+        <circle cx="12" cy="12" r="10" stroke="#38bdf8" stroke-width="2.2" stroke-dasharray="16 8" class="hcp-spin" />
+        <polygon points="10 8 16 12 10 16" fill="#38bdf8" />
+      </svg>`;
+    } else {
+      footerIcon.innerHTML = `<svg viewBox="0 0 24 24" width="22" height="22" fill="none">
+        <circle cx="12" cy="12" r="10" stroke="#34d399" stroke-width="2.2" />
+        <polyline points="7.5 12 10.5 15 16.5 9" stroke="#34d399" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
+      </svg>`;
+    }
+  }
+  if (footerRuntime) {
+    footerRuntime.textContent = `Runtime: ${inst?.version || "1.20.1"}`;
+  }
 }
 
-// Console window terminal: up to HCP_MAX_LINES lines, new ones appended (no full
+// Console window terminal: up to HCP_MAX_LINES lines (exactly 4 lines requested for clean preview), new ones appended (no full
 // re-render), auto-scroll only while the view is at the bottom, so it can be scrolled
 // and its text selected while the game writes.
-const HCP_MAX_LINES = 200;
+const HCP_MAX_LINES = 4;
 let hcpRenderedKey = "";
 let hcpRenderedTotal = 0;
 let hcpRenderedFileSig = "";
@@ -11375,7 +12570,7 @@ function renderHcpTerminal(inst, fileLines) {
       return;
     }
     const frag = document.createDocumentFragment();
-    for (const l of lines) frag.appendChild(hcpLineElement(l, "", 0));
+    for (const l of lines.slice(-HCP_MAX_LINES)) frag.appendChild(hcpLineElement(l, "", 0));
     box.appendChild(frag);
   }
   if (atBottom) box.scrollTop = box.scrollHeight;
@@ -11794,6 +12989,146 @@ let bgPlaylistIndex = 0;
 let bgPlaylistTimer = null;
 let currentActiveVideoSlot = "primary"; // 'primary' (homeBgVideo) or 'secondary' (homeBgVideoNext)
 
+// Seamless Crossfade Video Loop Engine State
+let seamlessLoopInProgress = false;
+let seamlessLoopTimeout = null;
+const SEAMLESS_LOOP_CROSSFADE_SEC = 1.2; // Opacity transition duration (seconds)
+const SEAMLESS_LOOP_TRIGGER_SEC = 1.4;   // Overlap threshold before video end (seconds)
+
+function cancelSeamlessLoop() {
+  if (seamlessLoopTimeout) {
+    clearTimeout(seamlessLoopTimeout);
+    seamlessLoopTimeout = null;
+  }
+  seamlessLoopInProgress = false;
+  if (el.homeBgVideo) {
+    el.homeBgVideo.style.zIndex = "";
+  }
+  if (el.homeBgVideoNext) {
+    el.homeBgVideoNext.style.zIndex = "";
+  }
+}
+
+function preloadInactivePlayer(activeEl) {
+  if (!activeEl || !activeEl.src) return;
+  const primaryVid = el.homeBgVideo;
+  const secondaryVid = el.homeBgVideoNext;
+  if (!primaryVid || !secondaryVid) return;
+
+  const inactiveEl = activeEl === primaryVid ? secondaryVid : primaryVid;
+  if (!inactiveEl) return;
+
+  // Pre-seed inactive player with same source so it decodes and buffers ahead of time
+  if (inactiveEl.src !== activeEl.src && !seamlessLoopInProgress) {
+    inactiveEl.src = activeEl.src;
+    inactiveEl.preload = "auto";
+    inactiveEl.currentTime = 0;
+    inactiveEl.pause();
+  }
+}
+
+function triggerSeamlessVideoLoop(customFadeSec = null) {
+  if (seamlessLoopInProgress) return;
+
+  const primaryVid = el.homeBgVideo;
+  const secondaryVid = el.homeBgVideoNext;
+  if (!primaryVid || !secondaryVid) return;
+
+  // Don't run loop if Wallpaper Engine or another scene is active
+  if (document.body.classList.contains("has-we-active")) return;
+
+  const currentVid = currentActiveVideoSlot === "primary" ? primaryVid : secondaryVid;
+  const nextVid = currentActiveVideoSlot === "primary" ? secondaryVid : primaryVid;
+
+  if (!currentVid.src || currentVid.paused) return;
+
+  seamlessLoopInProgress = true;
+
+  const fadeSec = customFadeSec || (currentVid.duration ? Math.min(SEAMLESS_LOOP_CROSSFADE_SEC, currentVid.duration * 0.3) : SEAMLESS_LOOP_CROSSFADE_SEC);
+  const fadeMs = Math.round(fadeSec * 1000);
+
+  // 1. Ensure nextVid has identical source and starts at the beginning
+  if (nextVid.src !== currentVid.src) {
+    nextVid.src = currentVid.src;
+  }
+  nextVid.currentTime = 0;
+
+  // 2. Layering: nextVid is elevated above currentVid (zIndex: 3 vs 2).
+  // CurrentVid remains at full opacity (1.0) underneath while nextVid fades in.
+  // This produces a pure crossfade with zero darkening / dip to black.
+  nextVid.style.zIndex = "3";
+  currentVid.style.zIndex = "2";
+
+  // 3. Play nextVid
+  nextVid.play().catch((err) => {
+    console.warn("Seamless loop next player play error:", err);
+  });
+
+  // 4. Fade in nextVid
+  nextVid.classList.add("is-active");
+
+  // 5. Update active slot immediately so any activity/toggle updates apply to incoming video
+  currentActiveVideoSlot = currentActiveVideoSlot === "primary" ? "secondary" : "primary";
+
+  // 6. Complete transition after crossfade finishes
+  if (seamlessLoopTimeout) clearTimeout(seamlessLoopTimeout);
+  seamlessLoopTimeout = setTimeout(() => {
+    // Current video is now 100% obscured behind nextVid
+    currentVid.classList.remove("is-active");
+    currentVid.style.zIndex = "";
+    nextVid.style.zIndex = "";
+    currentVid.pause();
+    currentVid.currentTime = 0;
+    seamlessLoopInProgress = false;
+  }, fadeMs + 60);
+}
+
+function handleBgVideoTimeUpdate(vid) {
+  if (seamlessLoopInProgress) return;
+  if (!vid || !vid.classList.contains("is-active")) return;
+  if (document.body.classList.contains("has-we-active")) return;
+  if (!vid.duration || isNaN(vid.duration) || !isFinite(vid.duration) || vid.duration <= 1.5) return;
+
+  const fadeSec = Math.min(SEAMLESS_LOOP_CROSSFADE_SEC, vid.duration * 0.3);
+  const triggerSec = Math.min(SEAMLESS_LOOP_TRIGGER_SEC, vid.duration * 0.35);
+  const remaining = vid.duration - vid.currentTime;
+
+  if (remaining <= triggerSec && remaining > 0 && !vid.paused) {
+    triggerSeamlessVideoLoop(fadeSec);
+  }
+}
+
+function handleBgVideoEnded(vid) {
+  if (document.body.classList.contains("has-we-active")) return;
+  if (!vid || !vid.classList.contains("is-active")) return;
+  // Safety net: in case timeupdate missed the threshold before end
+  if (!seamlessLoopInProgress) {
+    triggerSeamlessVideoLoop(0.4);
+  }
+}
+
+function setupSeamlessLoopEngine() {
+  const v1 = el.homeBgVideo;
+  const v2 = el.homeBgVideoNext;
+  if (!v1 || !v2) return;
+
+  // Disable native hard-seek loop on both players so the seamless crossfade engine takes over
+  v1.loop = false;
+  v2.loop = false;
+
+  v1.addEventListener("timeupdate", () => handleBgVideoTimeUpdate(v1));
+  v2.addEventListener("timeupdate", () => handleBgVideoTimeUpdate(v2));
+
+  v1.addEventListener("ended", () => handleBgVideoEnded(v1));
+  v2.addEventListener("ended", () => handleBgVideoEnded(v2));
+
+  v1.addEventListener("play", () => preloadInactivePlayer(v1));
+  v2.addEventListener("play", () => preloadInactivePlayer(v2));
+
+  v1.addEventListener("loadedmetadata", () => preloadInactivePlayer(v1));
+  v2.addEventListener("loadedmetadata", () => preloadInactivePlayer(v2));
+}
+
 // Bottom Bar Mini Wallpaper Preview & Hover Cycling State
 let downloadedMp4CycleList = [];
 let downloadedMp4CycleIndex = 0;
@@ -12056,6 +13391,7 @@ function updateButtonWallpaperPreview(videoUrl) {
 }
 
 async function initWallpaperEngine() {
+  setupSeamlessLoopEngine();
   loadPlaylistSettings();
   // Apply saved wallpaper in background without blocking initial UI interactivity
   loadAndApplySavedWallpaper().catch((err) => console.error("Error loading wallpaper on startup:", err));
@@ -12319,14 +13655,17 @@ async function initWallpaperEngine() {
   if (el.btnToggleBgVideo) {
     el.btnToggleBgVideo.addEventListener("click", () => {
       const activeVid = currentActiveVideoSlot === "primary" ? el.homeBgVideo : el.homeBgVideoNext;
+      const otherVid = currentActiveVideoSlot === "primary" ? el.homeBgVideoNext : el.homeBgVideo;
       if (!activeVid) return;
       if (activeVid.paused) {
         activeVid.play().catch(() => {});
+        if (seamlessLoopInProgress && otherVid) otherVid.play().catch(() => {});
         if (el.iconBgPause) el.iconBgPause.classList.remove("hidden");
         if (el.iconBgPlay) el.iconBgPlay.classList.add("hidden");
         showToast("Fondo animado reanudado.");
       } else {
         activeVid.pause();
+        if (otherVid) otherVid.pause();
         if (el.iconBgPause) el.iconBgPause.classList.add("hidden");
         if (el.iconBgPlay) el.iconBgPlay.classList.remove("hidden");
         showToast("Fondo animado pausado.");
@@ -14033,6 +15372,7 @@ let sceneSwitchCounter = 0;
 let lastSceneArgs = null;
 
 async function playSceneWallpaper(pkgPath, title, projectPath = null, item = null) {
+  cancelSeamlessLoop();
   const switchId = ++sceneSwitchCounter;
   lastSceneArgs = { pkgPath, title, projectPath, item };
   weSceneSuspended = false;
@@ -14140,6 +15480,7 @@ async function playSceneWallpaper(pkgPath, title, projectPath = null, item = nul
 // Dual Video Smooth Transition Engine with Freeze-Frame Snapshot
 async function transitionBackground(targetUrl, targetTitle, transitionType = null, wallpaperType = null) {
   if (!targetUrl) return;
+  cancelSeamlessLoop();
   // Cancel a pending scene fade-out: this transition manages the snapshot now.
   sceneSwitchCounter++;
 
@@ -14273,6 +15614,7 @@ async function transitionBackground(targetUrl, targetTitle, transitionType = nul
     currentVid.pause();
     currentVid.classList.remove("slide-in");
     currentActiveVideoSlot = currentActiveVideoSlot === "primary" ? "secondary" : "primary";
+    preloadInactivePlayer(nextVid);
   }, 1200);
 
   updateActiveCatalogCards();
@@ -18560,6 +19902,7 @@ function saveNotifications() {
 
 function notify({ type = "info", title, text = "", shareId = null }) {
   if (!title) return;
+  if (shareId && notifications.some((n) => n.shareId === shareId)) return;
   notifications.unshift({ id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, type, title, text, shareId, ts: Date.now(), read: false });
   notifications = notifications.slice(0, NOTIFY_MAX);
   saveNotifications();
@@ -18607,7 +19950,14 @@ function renderNotifications() {
             <div class="notify-text">
               <span class="notify-item-title">${escapeHtml(n.title)}</span>
               ${n.text ? `<span class="notify-item-body">${escapeHtml(n.text)}</span>` : ""}
-              ${n.shareId ? `<button type="button" class="notify-action" data-share="${escapeHtml(n.shareId)}">Ver invitación</button>` : ""}
+              ${
+                n.shareId
+                  ? `<div class="notify-actions-row">
+                      <button type="button" class="notify-action notify-action-accept" data-share-accept="${escapeHtml(n.shareId)}">Aceptar</button>
+                      <button type="button" class="notify-action notify-action-decline" data-share-decline="${escapeHtml(n.shareId)}">Rechazar</button>
+                    </div>`
+                  : ""
+              }
               <span class="notify-time">${formatNotifyTime(n.ts)}</span>
             </div>
             <button type="button" class="notify-dismiss" data-dismiss="${n.id}" aria-label="Quitar notificación">✕</button>
@@ -18625,6 +19975,7 @@ function setNotifyPanelOpen(open) {
   btn.classList.toggle("is-open", open);
   btn.setAttribute("aria-expanded", open ? "true" : "false");
   if (open) {
+    window.ikaShare?.checkNow?.();
     renderNotifications();
   } else if (notifications.some((n) => !n.read)) {
     // what was on screen counts as seen once the panel closes
@@ -18645,6 +19996,17 @@ function initNotificationCenter() {
   });
   panel.addEventListener("click", (e) => {
     e.stopPropagation();
+    const acceptBtn = e.target.closest("[data-share-accept]");
+    if (acceptBtn) {
+      setNotifyPanelOpen(false);
+      window.ikaShare?.accept(acceptBtn.dataset.shareAccept);
+      return;
+    }
+    const declineBtn = e.target.closest("[data-share-decline]");
+    if (declineBtn) {
+      window.ikaShare?.decline(declineBtn.dataset.shareDecline);
+      return;
+    }
     const share = e.target.closest("[data-share]");
     if (share) {
       setNotifyPanelOpen(false);
@@ -18653,6 +20015,10 @@ function initNotificationCenter() {
     }
     const dismiss = e.target.closest("[data-dismiss]");
     if (dismiss) {
+      const item = notifications.find((n) => n.id === dismiss.dataset.dismiss);
+      if (item?.shareId) {
+        window.ikaShare?.decline(item.shareId);
+      }
       notifications = notifications.filter((n) => n.id !== dismiss.dataset.dismiss);
       saveNotifications();
       renderNotifications();
@@ -18679,14 +20045,8 @@ function initNotificationCenter() {
   setInterval(() => !panel.classList.contains("hidden") && renderNotifications(), 30000);
 }
 
-let toastTimer = null;
-function showToast(msg) {
-  el.toast.textContent = msg;
-  el.toast.classList.remove("hidden");
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => {
-    el.toast.classList.add("hidden");
-  }, 2800);
+function showToast(_msg) {
+  if (el.toast) el.toast.classList.add("hidden");
 }
 
 function escapeHtml(str) {
@@ -19484,11 +20844,18 @@ async function openExternalUrl(url) {
 // Skin assigned in the profile, as PNG base64 for the launcher's local skin server.
 // Custom skin: the uploaded image. Official: the account's skin (Pinecone/Prism accounts)
 // or the public skin of that username.
+const skinCacheByUser = new Map();
+
 async function getActiveSkinForGame() {
   const user = state.activeUser;
   if (!user || !user.username) return null;
   const slim = user.skinModelType === "slim";
+  const cacheKey = `${user.username.toLowerCase()}::${user.activeSkinId || "default"}`;
   let dataUrl = user.activeSkinId && user.customSkinData ? user.customSkinData : null;
+  if (!dataUrl && skinCacheByUser.has(cacheKey)) {
+    const cached = skinCacheByUser.get(cacheKey);
+    return cached ? { pngBase64: cached, slim } : null;
+  }
   if (!dataUrl) {
     try {
       const acc = await invoke("get_account_skin", { username: user.username });
@@ -19497,19 +20864,33 @@ async function getActiveSkinForGame() {
   }
   if (!dataUrl) {
     try {
-      const res = await fetch(`https://minotar.net/skin/${encodeURIComponent(user.username)}`, { signal: AbortSignal.timeout(6000) });
-      if (res.ok) {
-        const blob = await res.blob();
-        dataUrl = await new Promise((resolve) => {
-          const r = new FileReader();
-          r.onload = () => resolve(r.result);
-          r.onerror = () => resolve(null);
-          r.readAsDataURL(blob);
+      const lsKey = `ika_minotar_skin_${user.username.toLowerCase()}`;
+      const fromLs = localStorage.getItem(lsKey);
+      if (fromLs) {
+        dataUrl = fromLs === "NONE" ? null : fromLs;
+      } else {
+        const res = await fetch(`https://minotar.net/skin/${encodeURIComponent(user.username)}`, {
+          signal: AbortSignal.timeout(1200),
         });
+        if (res.ok) {
+          const blob = await res.blob();
+          dataUrl = await new Promise((resolve) => {
+            const r = new FileReader();
+            r.onload = () => resolve(r.result);
+            r.onerror = () => resolve(null);
+            r.readAsDataURL(blob);
+          });
+          if (dataUrl) {
+            try { localStorage.setItem(lsKey, dataUrl); } catch {}
+          }
+        } else {
+          try { localStorage.setItem(lsKey, "NONE"); } catch {}
+        }
       }
     } catch {}
   }
   const b64 = typeof dataUrl === "string" && dataUrl.startsWith("data:image/png") ? dataUrl.split(",")[1] : null;
+  skinCacheByUser.set(cacheKey, b64 || null);
   return b64 ? { pngBase64: b64, slim } : null;
 }
 
@@ -25163,10 +26544,12 @@ const ikaShare = (() => {
     { urls: ["stun:global.stun.twilio.com:3478", "stun:stun.services.mozilla.com:3478"] }
   ];
   const READ_BYTES = 3584 * 1024; // 3.5 MB per disk read / relay chunk (fits under Cloudflare 4MB max)
-  const MESSAGE_BYTES = 64 * 1024; // 64 KB per WebRTC dataChannel message
-  const BUFFER_HIGH = 16 * 1024 * 1024; // 16 MB buffer for fast gigabit throughput
-  const ROOM_POLL_MS = 1000; // While waiting for friend to enter the 6-digit code
-  const WEBRTC_FALLBACK_MS = 14000; // Give WebRTC 14s to traverse NAT/Firewall before falling back to relay
+  const MESSAGE_BYTES = 128 * 1024; // 128 KB per WebRTC dataChannel frame for high-speed throughput
+  const WEBRTC_CHANNELS = 4; // 4 parallel WebRTC DataChannels to eliminate head-of-line blocking
+  const RELAY_CONCURRENCY = 4; // 4 parallel upload/download workers in Relay mode
+  const BUFFER_HIGH = 16 * 1024 * 1024; // 16 MB buffer per channel for gigabit saturation
+  const ROOM_POLL_MS = 900;
+  const WEBRTC_FALLBACK_MS = 12000;
 
   const $ = (id) => document.getElementById(id);
   const modal = $("modal-share");
@@ -25202,11 +26585,24 @@ const ikaShare = (() => {
     clearTimeout(rec.pollTimer);
     rec.timer = 0;
     rec.pollTimer = 0;
-    const { pc, dc } = rec;
+    const { pc, dc, dcs } = rec;
     rec.pc = rec.dc = null;
+    rec.dcs = [];
     if (dc) dc.onclose = dc.onmessage = dc.onopen = null;
+    if (Array.isArray(dcs)) {
+      for (const ch of dcs) {
+        if (ch) ch.onclose = ch.onmessage = ch.onopen = null;
+      }
+    }
     if (pc) pc.onconnectionstatechange = pc.ondatachannel = null;
     const shut = () => {
+      if (Array.isArray(dcs)) {
+        for (const ch of dcs) {
+          try {
+            ch?.close();
+          } catch {}
+        }
+      }
       try {
         dc?.close();
       } catch {}
@@ -25218,38 +26614,138 @@ const ikaShare = (() => {
     else shut();
   }
 
-  const iceComplete = (pc, ms = 5000) =>
+  // Fast ICE gathering: finishes immediately on complete OR 350ms after receiving a public srflx candidate (max 2500ms)
+  const iceComplete = (pc, ms = 2500) =>
     new Promise((resolve) => {
       if (pc.iceGatheringState === "complete") return resolve();
+      let settleTimer = 0;
       const done = () => {
         pc.removeEventListener("icegatheringstatechange", check);
+        pc.removeEventListener("icecandidate", onCand);
         clearTimeout(timer);
+        clearTimeout(settleTimer);
         resolve();
       };
       const check = () => pc.iceGatheringState === "complete" && done();
+      const onCand = (ev) => {
+        if (!ev.candidate) return done();
+        if (ev.candidate.candidate && ev.candidate.candidate.includes(" typ srflx ")) {
+          clearTimeout(settleTimer);
+          settleTimer = setTimeout(done, 350);
+        }
+      };
       const timer = setTimeout(done, ms);
       pc.addEventListener("icegatheringstatechange", check);
+      pc.addEventListener("icecandidate", onCand);
     });
 
+  // Listen for unified CDN + runtime installation progress from Rust
+  if (window.__TAURI__?.event?.listen) {
+    window.__TAURI__.event.listen("share-transfer-progress", (ev) => {
+      const p = ev.payload || {};
+      const rec = p.id ? shares.get(`in:${p.id}`) : null;
+      if (!rec || rec.aborted) return;
+      if (p.stage === "cdn" && typeof p.cdnDone === "number") {
+        rec.cdnDone = p.cdnDone;
+        rec.done = Math.min(rec.totalSize || rec.meta.size, (rec.zipDone || 0) + rec.cdnDone);
+        render();
+      } else if (p.stage === "runtime" && p.message) {
+        rec.installNote = p.message;
+        render();
+      }
+    });
+    window.__TAURI__.event.listen("mc-launch-progress", (ev) => {
+      const p = ev.payload || {};
+      for (const rec of shares.values()) {
+        if (rec.role === "in" && rec.state === "installing" && !rec.aborted) {
+          if (p.message) {
+            rec.installNote = p.total > 0 ? `${p.message} (${p.done}/${p.total})` : p.message;
+            render();
+          }
+        }
+      }
+    });
+  }
+
   // ---------------------------------------------------------------------------------------
-  // Sending (Generate 6-digit code -> WebRTC P2P or automatic Relay fallback)
+  // Sending (Username -> 6-digit room code in the background -> 4x WebRTC P2P or 4x Relay)
   // ---------------------------------------------------------------------------------------
-  async function startSend(inst) {
+  async function prepareSenderWebRTC(rec) {
+    try {
+      const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+      rec.pc = pc;
+      rec.dcs = [];
+      for (let idx = 0; idx < WEBRTC_CHANNELS; idx++) {
+        const ch = pc.createDataChannel(idx === 0 ? "ika-share" : `ika-share-${idx}`);
+        ch.binaryType = "arraybuffer";
+        rec.dcs.push(ch);
+        if (idx === 0) {
+          rec.dc = ch;
+          ch.onopen = () => {
+            if (rec.mode === "relay" || rec.aborted) return;
+            clearTimeout(rec.timer);
+            clearTimeout(rec.pollTimer);
+            pumpWebRTC(rec, ch);
+          };
+          ch.onmessage = (msg) => {
+            if (typeof msg.data !== "string") return;
+            let m = {};
+            try {
+              m = JSON.parse(msg.data);
+            } catch {}
+            if (m.t === "done") finishSend(rec);
+            else if (m.t === "error") failSend(rec, `Tu amigo no pudo instalar la instancia: ${m.message || "error desconocido"}`);
+          };
+          ch.onclose = () => {
+            if (rec.mode === "webrtc" && rec.state === "sending" && !rec.aborted) {
+              startSenderRelay(rec);
+            }
+          };
+        }
+      }
+      pc.onconnectionstatechange = () => {
+        if (pc.connectionState === "failed" && rec.mode === "webrtc" && !rec.aborted && rec.state !== "done") {
+          startSenderRelay(rec);
+        }
+      };
+      await pc.setLocalDescription(await pc.createOffer());
+      await iceComplete(pc);
+      return pc.localDescription?.sdp || null;
+    } catch (rtcErr) {
+      console.warn("WebRTC offer fallback to relay:", rtcErr);
+      return null;
+    }
+  }
+
+  async function startSend(inst, rawTargetUser = "") {
+    const targetUser = String(rawTargetUser || "").trim().replace(/^@/, "");
     const rec = {
       key: "",
       id: newId(),
       role: "out",
       me: myName(),
-      peer: "tu amigo",
+      targetUser,
+      peer: targetUser || "tu amigo",
       code: "",
       instPath: inst.path,
       cover: getInstanceCoverUrl(inst, homeInstancesList.indexOf(inst)),
-      meta: { v: 1, name: inst.name || inst.folder_name || "Instancia", mc: inst.mc_version || "", loader: inst.loader || "Vanilla", mods: 0, files: 0, size: 0 },
+      meta: {
+        v: 2,
+        name: inst.name || inst.folder_name || "Instancia",
+        mc: inst.mc_version || "",
+        loader: inst.loader || "Vanilla",
+        mods: 0,
+        files: 0,
+        size: 0,
+        zipSize: 0,
+        cdnSize: 0,
+      },
       state: "packing",
       mode: "webrtc",
       note: "",
       done: 0,
       aborted: false,
+      dcs: [],
     };
     rec.key = `out:${rec.id}`;
     shares.set(rec.key, rec);
@@ -25257,57 +26753,35 @@ const ikaShare = (() => {
     render();
 
     try {
-      const pkg = await invoke("share_pack", { instancePath: inst.path, id: rec.id });
+      // Pack instance (with parallel SHA-1 CDN deduplication) AND gather WebRTC STUN candidates in parallel!
+      const [pkg, offerSdp] = await Promise.all([
+        invoke("share_pack", { instancePath: inst.path, id: rec.id }),
+        prepareSenderWebRTC(rec),
+      ]);
       if (rec.aborted) return;
-      Object.assign(rec.meta, { mods: pkg.mods, files: pkg.files, size: pkg.size, sha256: pkg.sha256 });
+      const zipSize = Number(pkg.zip_size) || Number(pkg.size) || 0;
+      const cdnSize = Number(pkg.cdn_size) || 0;
+      const totalSize = Number(pkg.size) || zipSize + cdnSize;
+      Object.assign(rec.meta, {
+        mods: pkg.mods,
+        files: pkg.files,
+        size: totalSize,
+        zipSize,
+        cdnSize,
+        sha256: pkg.sha256,
+      });
+      rec.zipSize = zipSize;
+      rec.cdnSize = cdnSize;
+      rec.totalSize = totalSize;
       rec.sha256 = pkg.sha256;
 
       setState(rec, "creating_room");
-
-      // Prepare WebRTC offer upfront so the receiver gets it the instant they enter the code
-      let offerSdp = null;
-      try {
-        const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-        rec.pc = pc;
-        const dc = pc.createDataChannel("ika-share");
-        rec.dc = dc;
-        dc.binaryType = "arraybuffer";
-        dc.onopen = () => {
-          if (rec.mode === "relay" || rec.aborted) return;
-          clearTimeout(rec.timer);
-          clearTimeout(rec.pollTimer);
-          pumpWebRTC(rec, dc);
-        };
-        dc.onmessage = (msg) => {
-          if (typeof msg.data !== "string") return;
-          let m = {};
-          try {
-            m = JSON.parse(msg.data);
-          } catch {}
-          if (m.t === "done") finishSend(rec);
-          else if (m.t === "error") failSend(rec, `Tu amigo no pudo instalar la instancia: ${m.message || "error desconocido"}`);
-        };
-        dc.onclose = () => {
-          if (rec.mode === "webrtc" && rec.state === "sending" && !rec.aborted) {
-            startSenderRelay(rec);
-          }
-        };
-        pc.onconnectionstatechange = () => {
-          if (pc.connectionState === "failed" && rec.mode === "webrtc" && !rec.aborted && rec.state !== "done") {
-            startSenderRelay(rec);
-          }
-        };
-        await pc.setLocalDescription(await pc.createOffer());
-        await iceComplete(pc);
-        offerSdp = pc.localDescription?.sdp || null;
-      } catch (rtcErr) {
-        console.warn("WebRTC offer fallback to relay:", rtcErr);
-      }
 
       if (rec.aborted) return;
       const room = await invoke("share_room_create", {
         id: rec.id,
         sender: rec.me,
+        recipient: targetUser || null,
         meta: rec.meta,
         offer: offerSdp,
       });
@@ -25364,7 +26838,7 @@ const ikaShare = (() => {
         }
       }
     } catch (err) {
-      if (String(err).includes("no existe o ya expiró") && rec.state === "waiting") {
+      if (String(err).includes("ya expiró") && rec.state === "waiting") {
         return failSend(rec, String(err));
       }
     }
@@ -25373,45 +26847,97 @@ const ikaShare = (() => {
     }
   }
 
+  const waitChannelDrain = (ch) =>
+    new Promise((resolve) => {
+      const wake = () => {
+        ch.removeEventListener("bufferedamountlow", wake);
+        ch.removeEventListener("close", wake);
+        resolve();
+      };
+      ch.addEventListener("bufferedamountlow", wake);
+      ch.addEventListener("close", wake);
+    });
+
+  // High-speed Multi-Channel WebRTC P2P sender with Read-Ahead Disk Prefetching
   async function pumpWebRTC(rec, dc) {
     if (rec.state === "sending" || rec.mode === "relay") return;
     clearTimeout(rec.timer);
     rec.done = 0;
     rec.startedAt = Date.now();
     setState(rec, "sending");
-    const total = rec.meta.size;
+    const zipTotal = rec.zipSize || rec.meta.zipSize || rec.meta.size;
+    const displayTotal = rec.totalSize || rec.meta.size || zipTotal;
+
     try {
-      dc.bufferedAmountLowThreshold = READ_BYTES;
-      dc.send(JSON.stringify({ t: "meta", size: total, sha256: rec.sha256 }));
+      const allChannels = (rec.dcs && rec.dcs.length ? rec.dcs : [dc]).filter(Boolean);
+      for (const ch of allChannels) {
+        ch.bufferedAmountLowThreshold = READ_BYTES;
+      }
+      dc.send(
+        JSON.stringify({
+          t: "meta",
+          size: zipTotal,
+          totalSize: displayTotal,
+          cdnSize: rec.cdnSize || 0,
+          sha256: rec.sha256,
+          framed: true,
+        })
+      );
+
       let offset = 0;
       let lastPaint = 0;
-      while (offset < total) {
+      let rr = 0;
+
+      // Read-ahead prefetch pipeline: read next chunk from Rust while sending current chunk over network
+      let nextPromise =
+        offset < zipTotal
+          ? invoke("share_read_chunk", { id: rec.id, offset, len: Math.min(READ_BYTES, zipTotal - offset) })
+          : null;
+
+      while (offset < zipTotal && nextPromise) {
         if (rec.aborted || rec.mode === "relay") return;
-        const bytes = new Uint8Array(await invoke("share_read_chunk", { id: rec.id, offset, len: READ_BYTES }));
+        const curOffset = offset;
+        const rawBuf = await nextPromise;
+        if (rec.aborted || rec.mode === "relay") return;
+        const bytes = new Uint8Array(rawBuf);
         if (!bytes.length) throw new Error("el paquete terminó antes de tiempo");
+
+        const nextOffset = curOffset + bytes.length;
+        nextPromise =
+          nextOffset < zipTotal
+            ? invoke("share_read_chunk", { id: rec.id, offset: nextOffset, len: Math.min(READ_BYTES, zipTotal - nextOffset) })
+            : null;
+
         for (let i = 0; i < bytes.length; i += MESSAGE_BYTES) {
           if (rec.dc !== dc || dc.readyState !== "open") return;
-          if (dc.bufferedAmount > BUFFER_HIGH) {
-            await new Promise((resolve) => {
-              const wake = () => {
-                dc.removeEventListener("bufferedamountlow", wake);
-                dc.removeEventListener("close", wake);
-                resolve();
-              };
-              dc.addEventListener("bufferedamountlow", wake);
-              dc.addEventListener("close", wake);
-            });
+          const openChans = allChannels.filter((c) => c.readyState === "open");
+          const ch = openChans.length ? openChans[rr++ % openChans.length] : dc;
+          if (ch.bufferedAmount > BUFFER_HIGH) {
+            await waitChannelDrain(ch);
             if (rec.dc !== dc || dc.readyState !== "open") return;
           }
-          dc.send(bytes.subarray(i, i + MESSAGE_BYTES));
+          const slice = bytes.subarray(i, i + MESSAGE_BYTES);
+          const packet = new Uint8Array(8 + slice.byteLength);
+          new DataView(packet.buffer).setBigUint64(0, BigInt(curOffset + i), true);
+          packet.set(slice, 8);
+          ch.send(packet);
         }
-        offset += bytes.length;
-        rec.done = offset;
-        if (Date.now() - lastPaint > 250) {
+
+        offset = nextOffset;
+        rec.done = zipTotal > 0 ? Math.min(displayTotal, Math.round((offset / zipTotal) * displayTotal)) : displayTotal;
+        if (Date.now() - lastPaint > 180) {
           lastPaint = Date.now();
           render();
         }
       }
+
+      // Wait for all auxiliary dataChannels to flush their outgoing buffers before signaling "end"
+      for (const ch of allChannels) {
+        while (ch.readyState === "open" && ch.bufferedAmount > 0 && !rec.aborted && rec.mode === "webrtc") {
+          await new Promise((r) => setTimeout(r, 20));
+        }
+      }
+      rec.done = displayTotal;
       dc.send(JSON.stringify({ t: "end" }));
       render();
     } catch (err) {
@@ -25421,6 +26947,7 @@ const ikaShare = (() => {
     }
   }
 
+  // 4-Worker Parallel Relay Upload Pipeline
   async function startSenderRelay(rec) {
     if (rec.mode === "relay" || rec.aborted || rec.state === "done") return;
     rec.mode = "relay";
@@ -25431,38 +26958,51 @@ const ikaShare = (() => {
 
     try {
       await invoke("share_room_update", { code: rec.code, patch: { mode: "relay", state: "transferring" } });
-      const total = rec.meta.size;
-      let offset = 0;
-      let index = 0;
+      const zipTotal = rec.zipSize || rec.meta.zipSize || rec.meta.size;
+      const displayTotal = rec.totalSize || rec.meta.size || zipTotal;
+      const totalChunks = Math.ceil(zipTotal / READ_BYTES);
+      let nextIndex = 0;
+      let uploadedZipBytes = 0;
       let lastPaint = 0;
 
-      while (offset < total) {
-        if (rec.aborted) return;
-        const len = Math.min(READ_BYTES, total - offset);
-        const res = await invoke("share_room_put_chunk", {
-          code: rec.code,
-          id: rec.id,
-          index,
-          offset,
-          len,
-        });
-        if (rec.aborted) return;
-        if (res.wait) {
-          await new Promise((r) => setTimeout(r, 60));
-          continue;
+      const uploadWorker = async () => {
+        while (!rec.aborted) {
+          const index = nextIndex++;
+          if (index >= totalChunks) return;
+          const offset = index * READ_BYTES;
+          const len = Math.min(READ_BYTES, zipTotal - offset);
+          while (!rec.aborted) {
+            const res = await invoke("share_room_put_chunk", {
+              code: rec.code,
+              id: rec.id,
+              index,
+              offset,
+              len,
+            });
+            if (rec.aborted) return;
+            if (res.wait) {
+              await new Promise((r) => setTimeout(r, 45));
+              continue;
+            }
+            uploadedZipBytes += res.sent || len;
+            rec.done = zipTotal > 0 ? Math.min(displayTotal, Math.round((uploadedZipBytes / zipTotal) * displayTotal)) : displayTotal;
+            if (Date.now() - lastPaint > 180) {
+              lastPaint = Date.now();
+              render();
+            }
+            break;
+          }
         }
-        offset += res.sent || len;
-        index += 1;
-        rec.done = offset;
-        if (Date.now() - lastPaint > 250) {
-          lastPaint = Date.now();
-          render();
-        }
-      }
+      };
+
+      const workers = Array.from({ length: Math.min(RELAY_CONCURRENCY, Math.max(1, totalChunks)) }, () => uploadWorker());
+      await Promise.all(workers);
+      if (rec.aborted) return;
+      rec.done = displayTotal;
       render();
 
-      // Wait for receiver to finish unpacking and mark room as "done"
-      for (let wait = 0; wait < 90 && !rec.aborted; wait++) {
+      // Wait for receiver to finish unpacking/CDN/runtime and mark room as "done"
+      for (let wait = 0; wait < 180 && !rec.aborted; wait++) {
         await new Promise((r) => setTimeout(r, 1000));
         if (rec.aborted) return;
         const room = await invoke("share_room_get", { code: rec.code }).catch(() => null);
@@ -25486,7 +27026,7 @@ const ikaShare = (() => {
     invoke("share_discard", { id: rec.id }).catch(() => {});
     setState(rec, "done");
     if (viewKey !== rec.key || modal.classList.contains("hidden")) {
-      showToast(`Tu amigo ya recibió «${rec.meta.name}»`);
+      showToast(`${rec.targetUser || "Tu amigo"} ya recibió «${rec.meta.name}»`);
     }
   }
 
@@ -25511,36 +27051,30 @@ const ikaShare = (() => {
   }
 
   // ---------------------------------------------------------------------------------------
-  // Receiving (Enter 6-digit code -> Instant connect via WebRTC P2P or Relay fallback)
+  // Receiving (Notification arrives for username -> Accept uses 6-digit code in background)
   // ---------------------------------------------------------------------------------------
-  async function startReceive(rawCode) {
-    const code = cleanCode(rawCode);
-    const errorEl = $("share-form-error");
-    if (code.length !== 6) {
-      errorEl.textContent = "Escribe los 6 dígitos del código que te pasó tu amigo (ej. 582-194).";
-      return;
-    }
-    errorEl.textContent = "";
+  const seenInvites = new Set();
+  const INCOMING_POLL_MS = 4000;
 
-    const primary = $("btn-share-primary");
-    primary.disabled = true;
-    primary.textContent = "Conectando...";
-
-    let room;
-    try {
-      room = await invoke("share_room_get", { code });
-    } catch (err) {
-      primary.disabled = false;
-      primary.textContent = "Recibir instancia";
-      errorEl.textContent = String(err);
-      return;
-    }
-
+  function buildIncomingRecFromRoom(room) {
+    const code = String(room.code || "");
     const d = room.meta && typeof room.meta === "object" ? room.meta : {};
+    const id = room.id || `s${code}recv`;
+    const key = `in:${id}`;
+    const existing = shares.get(key);
+    if (existing) {
+      existing.code = code;
+      existing.offer = room.offer || existing.offer;
+      return existing;
+    }
+    const totalSize = Number(d.size) || 0;
+    const zipSize = Number(d.zipSize) || totalSize;
+    const cdnSize = Number(d.cdnSize) || Math.max(0, totalSize - zipSize);
     const rec = {
-      key: `in:${room.id || code}`,
-      id: room.id || `s${code}recv`,
+      key,
+      id,
       code,
+      offer: room.offer || null,
       role: "in",
       me: myName(),
       peer: room.sender || "Tu amigo",
@@ -25551,26 +27085,96 @@ const ikaShare = (() => {
         loader: String(d.loader || "Vanilla").slice(0, 20),
         mods: Number(d.mods) || 0,
         files: Number(d.files) || 0,
-        size: Number(d.size) || 0,
+        size: totalSize,
+        zipSize,
+        cdnSize,
         sha256: String(d.sha256 || ""),
       },
       expect: {
-        size: Number(d.size) || 0,
+        size: zipSize,
+        totalSize,
+        cdnSize,
         sha256: String(d.sha256 || ""),
       },
+      totalSize,
+      zipTotal: zipSize,
+      cdnTotal: cdnSize,
+      zipDone: 0,
+      cdnDone: 0,
       mode: room.mode === "relay" || !room.offer ? "relay" : "webrtc",
-      state: "connecting",
+      state: "invited",
       note: "",
+      installNote: "",
       done: 0,
+      framed: false,
       pending: [],
       pendingBytes: 0,
+      pendingStartOffset: null,
+      dcs: [],
       chain: Promise.resolve(),
       aborted: false,
     };
+    shares.set(key, rec);
+    return rec;
+  }
 
-    shares.set(rec.key, rec);
-    viewKey = rec.key;
-    render();
+  async function checkIncomingInvites() {
+    const me = myName();
+    if (!me || me === "Tu amigo" || me.length < 2) return;
+    try {
+      const room = await invoke("share_room_get", { code: me });
+      const recipient = String(room?.recipient || "").trim().toLowerCase();
+      if (room && room.state === "waiting" && recipient === me.toLowerCase()) {
+        const rec = buildIncomingRecFromRoom(room);
+        if (!seenInvites.has(rec.id)) {
+          seenInvites.add(rec.id);
+          notify({
+            type: "download",
+            title: `${rec.peer} te envió «${rec.meta.name}»`,
+            text: metaLine(rec.meta),
+            shareId: rec.id,
+          });
+          showToast(`«${rec.peer}» quiere enviarte «${rec.meta.name}». Ábrela en Notificaciones para aceptarla.`);
+        }
+      } else {
+        for (const r of [...shares.values()]) {
+          if (r.role === "in" && r.state === "invited") {
+            dismissShareNotification(r.id);
+            shares.delete(r.key);
+          }
+        }
+      }
+    } catch {
+      for (const r of [...shares.values()]) {
+        if (r.role === "in" && r.state === "invited") {
+          dismissShareNotification(r.id);
+          shares.delete(r.key);
+        }
+      }
+    }
+  }
+
+  setInterval(() => {
+    if (!document.hidden) checkIncomingInvites();
+  }, INCOMING_POLL_MS);
+  setTimeout(checkIncomingInvites, 1500);
+
+  async function beginReceive(rec) {
+    if (!rec || rec.state !== "invited") return;
+    dismissShareNotification(rec.id);
+    rec.state = "connecting";
+    show(rec.key);
+
+    // Refresh room state to get latest offer / mode
+    let room = null;
+    try {
+      room = await invoke("share_room_get", { code: rec.code || myName() });
+      if (room?.code) rec.code = String(room.code);
+      if (room?.offer) rec.offer = room.offer;
+      if (room?.mode === "relay" || !rec.offer) rec.mode = "relay";
+    } catch (err) {
+      return failReceive(rec, String(err));
+    }
 
     try {
       await invoke("share_recv_begin", { id: rec.id });
@@ -25582,27 +27186,31 @@ const ikaShare = (() => {
       return startReceiverRelay(rec);
     }
 
-    // Try direct WebRTC P2P first; if NAT/Firewall blocks it, seamlessly switch to Relay
+    // Try direct multi-channel WebRTC P2P first; if NAT/Firewall blocks it, seamlessly switch to 4x Parallel Relay
     try {
       const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
       rec.pc = pc;
+      rec.dcs = [];
       pc.ondatachannel = (ev) => {
         if (rec.mode === "relay" || rec.aborted) return;
         const dc = ev.channel;
-        rec.dc = dc;
         dc.binaryType = "arraybuffer";
+        rec.dcs.push(dc);
+        if (!rec.dc || dc.label === "ika-share") {
+          rec.dc = dc;
+        }
         dc.onopen = () => {
           if (rec.mode === "relay" || rec.aborted) return;
           clearTimeout(rec.timer);
-          rec.startedAt = Date.now();
-          setState(rec, "receiving");
+          if (!rec.startedAt) rec.startedAt = Date.now();
+          if (rec.state === "connecting") setState(rec, "receiving");
         };
         dc.onmessage = (msg) => {
           if (rec.mode === "relay" || rec.aborted) return;
           rec.chain = rec.chain.then(() => onWebRTCPiece(rec, dc, msg.data)).catch((err) => failReceive(rec, String(err)));
         };
         dc.onclose = () => {
-          if (rec.mode === "webrtc" && ["connecting", "receiving"].includes(rec.state) && !rec.aborted) {
+          if (dc === rec.dc && rec.mode === "webrtc" && ["connecting", "receiving"].includes(rec.state) && !rec.aborted) {
             startReceiverRelay(rec);
           }
         };
@@ -25614,7 +27222,7 @@ const ikaShare = (() => {
         }
       };
 
-      await pc.setRemoteDescription({ type: "offer", sdp: room.offer });
+      await pc.setRemoteDescription({ type: "offer", sdp: rec.offer });
       await pc.setLocalDescription(await pc.createAnswer());
       await iceComplete(pc);
       if (rec.aborted || rec.mode === "relay") return;
@@ -25638,6 +27246,49 @@ const ikaShare = (() => {
     }
   }
 
+  async function acceptInviteById(shareId) {
+    dismissShareNotification(shareId);
+    let rec = shares.get(`in:${shareId}`);
+    if (!rec) {
+      try {
+        const room = await invoke("share_room_get", { code: myName() });
+        if (room) rec = buildIncomingRecFromRoom(room);
+      } catch (err) {
+        showToast(String(err));
+        return;
+      }
+    }
+    if (rec) {
+      await beginReceive(rec);
+    }
+  }
+
+  async function declineInviteById(shareId) {
+    dismissShareNotification(shareId);
+    let rec = shares.get(`in:${shareId}`);
+    if (!rec) {
+      try {
+        const room = await invoke("share_room_get", { code: myName() });
+        if (room && room.id === shareId) rec = buildIncomingRecFromRoom(room);
+      } catch {}
+    }
+    if (rec) {
+      rec.aborted = true;
+      closeConnection(rec);
+      if (rec.code) {
+        invoke("share_room_update", {
+          code: rec.code,
+          patch: { state: "cancelled", error: "Tu amigo rechazó la invitación." },
+        }).catch(() => {});
+      }
+      shares.delete(rec.key);
+      if (viewKey === rec.key) {
+        viewKey = null;
+        hide();
+      }
+    }
+  }
+
   const flushWebRTC = async (rec) => {
     if (!rec.pendingBytes) return;
     const bytes = new Uint8Array(rec.pendingBytes);
@@ -25646,22 +27297,45 @@ const ikaShare = (() => {
       bytes.set(piece, at);
       at += piece.length;
     }
+    const startOffset = rec.pendingStartOffset;
     rec.pending = [];
     rec.pendingBytes = 0;
-    await invoke("share_recv_chunk", bytes, { headers: { "x-share-id": rec.id } });
+    rec.pendingStartOffset = null;
+    const headers = { "x-share-id": rec.id };
+    if (typeof startOffset === "number") {
+      headers["x-share-offset"] = String(startOffset);
+    }
+    await invoke("share_recv_chunk", bytes, { headers });
   };
 
   async function onWebRTCPiece(rec, dc, data) {
-    if (rec.dc !== dc || rec.mode === "relay" || rec.aborted) return;
+    if (rec.mode === "relay" || rec.aborted) return;
     if (typeof data !== "string") {
       if (!rec.expect) throw new Error("llegaron datos antes de la cabecera");
-      const piece = new Uint8Array(data);
-      rec.done += piece.length;
-      if (rec.done > rec.expect.size) throw new Error("llegaron más datos de los anunciados");
+      const raw = new Uint8Array(data);
+      let piece = raw;
+      let pieceOffset = null;
+      if (rec.framed) {
+        if (raw.byteLength <= 8) return;
+        pieceOffset = Number(new DataView(raw.buffer, raw.byteOffset, 8).getBigUint64(0, true));
+        piece = raw.subarray(8);
+      }
+      rec.zipDone = (rec.zipDone || 0) + piece.length;
+      rec.done = Math.min(rec.totalSize || rec.meta.size, rec.zipDone + (rec.cdnDone || 0));
+      if (rec.zipDone > rec.expect.size) throw new Error("llegaron más datos de los anunciados");
+
+      if (pieceOffset !== null) {
+        if (rec.pendingBytes > 0 && rec.pendingStartOffset + rec.pendingBytes !== pieceOffset) {
+          await flushWebRTC(rec);
+        }
+        if (rec.pendingBytes === 0) {
+          rec.pendingStartOffset = pieceOffset;
+        }
+      }
       rec.pending.push(piece);
       rec.pendingBytes += piece.length;
       if (rec.pendingBytes >= READ_BYTES) await flushWebRTC(rec);
-      if (Date.now() - (rec.lastPaint || 0) > 250) {
+      if (Date.now() - (rec.lastPaint || 0) > 180) {
         rec.lastPaint = Date.now();
         render();
       }
@@ -25669,12 +27343,16 @@ const ikaShare = (() => {
     }
     const m = JSON.parse(data);
     if (m.t === "meta") {
-      if (!(m.size > 0) || (rec.meta.size && m.size > rec.meta.size)) throw new Error("el tamaño no coincide");
+      if (!(m.size > 0)) throw new Error("el tamaño no coincide");
+      rec.framed = !!m.framed;
+      rec.zipTotal = m.size;
+      if (m.totalSize) rec.totalSize = m.totalSize;
       rec.expect = { size: m.size, sha256: String(m.sha256 || "") };
     } else if (m.t === "end") {
       await flushWebRTC(rec);
       setState(rec, "installing");
       const path = await invoke("share_recv_finish", { id: rec.id, sha256: rec.expect.sha256, name: rec.meta.name });
+      rec.done = rec.totalSize || rec.meta.size;
       try {
         dc.send(JSON.stringify({ t: "done" }));
       } catch {}
@@ -25683,6 +27361,7 @@ const ikaShare = (() => {
     }
   }
 
+  // 4-Worker Parallel Relay Download Pipeline
   async function startReceiverRelay(rec) {
     if (rec.relayRunning || rec.aborted || rec.state === "done") return;
     rec.relayRunning = true;
@@ -25690,11 +27369,13 @@ const ikaShare = (() => {
     closeConnection(rec);
 
     try {
-      // Reset incoming file cleanly in case any partial bytes arrived before fallback
       await invoke("share_recv_begin", { id: rec.id });
+      rec.zipDone = 0;
+      rec.cdnDone = 0;
       rec.done = 0;
       rec.pending = [];
       rec.pendingBytes = 0;
+      rec.pendingStartOffset = null;
       rec.startedAt = Date.now();
       setState(rec, "receiving");
 
@@ -25703,42 +27384,53 @@ const ikaShare = (() => {
         patch: { mode: "relay", state: "transferring" },
       });
 
-      const total = rec.expect.size;
-      let index = 0;
-      let emptyRetries = 0;
+      const zipTotal = rec.expect.size || rec.zipTotal || rec.meta.size;
+      const totalChunks = Math.ceil(zipTotal / READ_BYTES);
+      let nextIndex = 0;
       let lastPaint = 0;
 
-      while (rec.done < total) {
-        if (rec.aborted) return;
-        const res = await invoke("share_room_get_chunk", {
-          code: rec.code,
-          id: rec.id,
-          index,
-        });
-        if (rec.aborted) return;
-
-        if (res.ready) {
-          emptyRetries = 0;
-          rec.done += res.bytes;
-          index += 1;
-          if (Date.now() - lastPaint > 250) {
-            lastPaint = Date.now();
-            render();
-          }
-        } else {
-          emptyRetries += 1;
-          if (emptyRetries % 6 === 0) {
-            const room = await invoke("share_room_get", { code: rec.code }).catch(() => null);
-            if (!room || room.state === "cancelled" || room.state === "failed") {
-              throw new Error(room?.error || "El remitente canceló el envío.");
+      const downloadWorker = async () => {
+        while (!rec.aborted) {
+          const index = nextIndex++;
+          if (index >= totalChunks) return;
+          const offset = index * READ_BYTES;
+          let emptyRetries = 0;
+          while (!rec.aborted) {
+            const res = await invoke("share_room_get_chunk", {
+              code: rec.code,
+              id: rec.id,
+              index,
+              offset,
+            });
+            if (rec.aborted) return;
+            if (res.ready) {
+              rec.zipDone += res.bytes;
+              rec.done = Math.min(rec.totalSize || rec.meta.size, rec.zipDone + (rec.cdnDone || 0));
+              if (Date.now() - lastPaint > 180) {
+                lastPaint = Date.now();
+                render();
+              }
+              break;
+            } else {
+              emptyRetries += 1;
+              if (emptyRetries % 8 === 0) {
+                const room = await invoke("share_room_get", { code: rec.code }).catch(() => null);
+                if (!room || room.state === "cancelled" || room.state === "failed") {
+                  throw new Error(room?.error || "El remitente canceló el envío.");
+                }
+              }
+              if (emptyRetries > 220) {
+                throw new Error("El ordenador de tu amigo dejó de enviar datos.");
+              }
+              await new Promise((r) => setTimeout(r, 55));
             }
           }
-          if (emptyRetries > 150) {
-            throw new Error("El ordenador de tu amigo dejó de enviar datos.");
-          }
-          await new Promise((r) => setTimeout(r, 60));
         }
-      }
+      };
+
+      const workers = Array.from({ length: Math.min(RELAY_CONCURRENCY, Math.max(1, totalChunks)) }, () => downloadWorker());
+      await Promise.all(workers);
+      if (rec.aborted) return;
 
       render();
       setState(rec, "installing");
@@ -25747,6 +27439,7 @@ const ikaShare = (() => {
         sha256: rec.expect.sha256,
         name: rec.meta.name,
       });
+      rec.done = rec.totalSize || rec.meta.size;
       await invoke("share_room_update", { code: rec.code, patch: { state: "done" } }).catch(() => {});
       await finishReceive(rec, path);
     } catch (err) {
@@ -25765,7 +27458,7 @@ const ikaShare = (() => {
     }
     setState(rec, "done");
     if (viewKey !== rec.key || modal.classList.contains("hidden")) {
-      showToast(`«${rec.installedName || rec.meta.name}» ya está en tus instancias`);
+      showToast(`«${rec.installedName || rec.meta.name}» ya está lista para jugar`);
     }
   }
 
@@ -25797,80 +27490,86 @@ const ikaShare = (() => {
   // ---------------------------------------------------------------------------------------
   function progressText(rec, total) {
     const secs = (Date.now() - (rec.startedAt || Date.now())) / 1000;
-    const speed = secs > 0.8 ? rec.done / secs : 0;
-    const left = speed > 0 ? (total - rec.done) / speed : 0;
+    const speed = secs > 0.6 ? rec.done / secs : 0;
+    const left = speed > 0 ? Math.max(0, total - rec.done) / speed : 0;
     return `${fmtSize(rec.done)} de ${fmtSize(total)}${speed ? ` · ${fmtSize(speed)}/s` : ""}${left > 1 ? ` · quedan ~${fmtTime(left)}` : ""}`;
   }
 
   function describe(rec) {
-    const total = rec.role === "out" ? rec.meta.size : rec.expect?.size || rec.meta.size;
+    const total = rec.totalSize || rec.meta.size || rec.expect?.size || 0;
     const fraction = total ? Math.min(1, rec.done / total) : 0;
     if (rec.role === "out") {
       switch (rec.state) {
         case "packing":
-          return ["Preparando el paquete...", "Se copian mods, configuración, shaders y resource packs. No se incluyen tus mundos.", ["Seguir en segundo plano", "hide"], ["Cancelar", "cancel"], "busy"];
+          return ["Preparando el paquete...", "Analizando hashes y comprimiendo tu configuración exacta, shaders y mods...", ["Seguir en segundo plano", "hide"], ["Cancelar", "cancel"], "busy"];
         case "creating_room":
-          return ["Generando código de sala...", "Abriendo punto de encuentro directo...", ["Seguir en segundo plano", "hide"], ["Cancelar", "cancel"], "busy"];
+          return [`Enviando invitación a ${rec.targetUser}...`, "Abriendo canal multicanal de alta velocidad...", ["Seguir en segundo plano", "hide"], ["Cancelar", "cancel"], "busy"];
         case "waiting":
           return [
-            "Esperando a que tu amigo introduzca el código...",
-            `En cuanto tu amigo escriba este código en «Recibir con código», la transferencia empezará al instante (${fmtSize(rec.meta.size)}, ${rec.meta.mods} mods).`,
+            `Esperando a que ${rec.targetUser} acepte la notificación...`,
+            `A ${rec.targetUser} le aparecerá una notificación en su launcher para aceptar «${rec.meta.name}» (${fmtSize(rec.meta.size)}, ${rec.meta.mods} mods).`,
             ["Seguir en segundo plano", "hide"],
             ["Cancelar envío", "cancel"],
             "busy",
           ];
         case "connecting":
-          return ["¡Código aceptado! Conectando los dos ordenadores...", "Estableciendo túnel de transferencia...", ["Seguir en segundo plano", "hide"], ["Cancelar envío", "cancel"], "busy"];
+          return [`¡${rec.targetUser} aceptó! Conectando a máxima velocidad...`, "Abriendo canales paralelos de transferencia...", ["Seguir en segundo plano", "hide"], ["Cancelar envío", "cancel"], "busy"];
         case "sending":
-          return [`Enviando instancia${rec.mode === "relay" ? " (Modo Directo Asistido)" : ""}`, progressText(rec, total), ["Seguir en segundo plano", "hide"], ["Cancelar envío", "cancel"], fraction];
+          return [`Enviando instancia a ${rec.targetUser}${rec.mode === "relay" ? " (Modo Directo Asistido)" : ""}`, progressText(rec, total), ["Seguir en segundo plano", "hide"], ["Cancelar envío", "cancel"], fraction];
         case "done":
-          return [`¡Enviada! Tu amigo ya tiene «${rec.meta.name}».`, "", ["Cerrar", "dismiss"], null, 1];
+          return [`¡Enviada! ${rec.targetUser || "Tu amigo"} ya tiene «${rec.meta.name}» lista para jugar.`, "", ["Cerrar", "dismiss"], null, 1];
         default:
           return ["No se pudo completar el envío", rec.note, ["Cerrar", "dismiss"], null, null];
       }
     }
     switch (rec.state) {
+      case "invited":
+        return [
+          `${rec.peer} quiere enviarte «${rec.meta.name}»`,
+          `Acepta para descargar e instalar esta instancia completa en una sola descarga (${metaLine(rec.meta)}).`,
+          ["Aceptar e instalar", "accept_invite"],
+          ["Rechazar", "decline_invite"],
+          null,
+        ];
       case "connecting":
-        return [`Conectando con ${rec.peer}...`, "Abriendo canal de descarga instantáneo...", ["Seguir en segundo plano", "hide"], ["Cancelar", "abort"], "busy"];
+        return [`Conectando con ${rec.peer}...`, "Abriendo canales paralelos de descarga...", ["Seguir en segundo plano", "hide"], ["Cancelar", "abort"], "busy"];
       case "receiving":
         return [`Recibiendo de ${rec.peer}${rec.mode === "relay" ? " (Modo Directo Asistido)" : ""}`, total ? progressText(rec, total) : "", ["Seguir en segundo plano", "hide"], ["Cancelar", "abort"], fraction];
       case "installing":
-        return ["Instalando la instancia...", "Verificando integridad y preparando archivos...", ["Seguir en segundo plano", "hide"], null, "busy"];
+        return [
+          rec.done < total ? `Descargando e instalando «${rec.meta.name}»...` : "Preparando motor de Minecraft, loader y Java...",
+          rec.done < total ? progressText(rec, total) : rec.installNote || "Dejando todo listo para que puedas jugar sin segunda descarga...",
+          ["Seguir en segundo plano", "hide"],
+          null,
+          rec.done < total ? fraction : "busy",
+        ];
       case "done":
-        return [`¡Lista! «${rec.installedName || rec.meta.name}» ya está en tus instancias.`, "La primera vez que la juegues, el launcher descargará Minecraft, el loader y Java automáticamente.", ["Cerrar", "dismiss"], null, 1];
+        return [`¡Lista! «${rec.installedName || rec.meta.name}» ya está 100% instalada.`, "Todo está descargado (mods, configuración exacta, Minecraft, loader y Java). ¡Ya puedes darle a Jugar directamente!", ["Cerrar", "dismiss"], null, 1];
       default:
-        return ["No se pudo recibir la instancia", rec.note, ["Intentar otro código", "back_to_recv"], ["Cerrar", "dismiss"], null];
+        return ["No se pudo recibir la instancia", rec.note, ["Cerrar", "dismiss"], null, null];
     }
   }
 
   function render() {
     if (modal.classList.contains("hidden")) return;
     const rec = viewKey ? shares.get(viewKey) : null;
-    const tabs = $("share-mode-tabs");
-    const tabSend = $("tab-share-send");
-    const tabRecv = $("tab-share-recv");
     const instCard = $("share-instance-card");
     const form = $("share-form");
     const formSend = $("share-form-send");
-    const formRecv = $("share-form-recv");
     const progress = $("share-progress");
-    const codeBox = $("share-code-box");
-    const codeVal = $("share-code-value");
     const primary = $("btn-share-primary");
     const secondary = $("btn-share-secondary");
 
-    const isRecvMode = rec ? rec.role === "in" : formMode === "recv";
-    $("share-title").textContent = isRecvMode ? "RECIBIR INSTANCIA" : "ENVIAR INSTANCIA";
+    const isRecvMode = rec ? rec.role === "in" : false;
+    $("share-title").textContent = isRecvMode ? "RECIBIR INSTANCIA" : "EXPORTAR";
+    const selTitle = $("share-selected-title");
+    if (selTitle) selTitle.textContent = isRecvMode ? "Instancia Recibida" : "Instancia Seleccionada";
     $("share-sub").textContent = isRecvMode
-      ? "Introduce el código de 6 dígitos de tu amigo para recibir su instancia al instante."
-      : "Comparte tu instancia con un código temporal de 6 dígitos, sin esperas.";
-
-    tabs.classList.toggle("hidden", !!rec);
-    tabSend.classList.toggle("active", formMode === "send");
-    tabRecv.classList.toggle("active", formMode === "recv");
+      ? `Recibiendo instancia enviada por ${rec?.peer || "tu amigo"}.`
+      : "Esta instancia será enviada a tu amigo para que la instale.";
 
     const inst = rec ? null : formInstance;
-    const showCard = rec ? true : formMode === "send" && !!inst;
+    const showCard = rec ? true : !!inst;
     instCard.classList.toggle("hidden", !showCard);
 
     if (showCard) {
@@ -25888,15 +27587,40 @@ const ikaShare = (() => {
           : "";
     }
 
-    form.classList.toggle("hidden", !!rec);
-    progress.classList.toggle("hidden", !rec);
+    setPane(rec ? "progress" : "form");
+
+    const hudSender = $("share-hud-sender-name");
+    const hudTarget = $("share-hud-target-name");
+    const hudBadge = $("share-hud-badge-text");
+    const hudEl = $("share-transmission-hud");
+    const successBanner = $("share-success-banner");
+
+    if (hudSender) hudSender.textContent = rec ? (rec.me || "Tu PC") : (myName() || "Tu PC");
+    if (hudTarget) hudTarget.textContent = rec ? (rec.targetUser || rec.peer || "Tu amigo") : "Tu amigo";
+    if (hudBadge && rec) {
+      const stateMap = {
+        packing: "EMPAQUETANDO INSTANCIA...",
+        creating_room: "CREANDO CANAL P2P...",
+        waiting: "INVITACIÓN ENVIADA · ESPERANDO",
+        connecting: "CONECTANDO WEBRTC x4...",
+        sending: "TRANSFERENCIA DIRECTA ACTIVA",
+        receiving: "RECIBIENDO PAQUETES...",
+        installing: "INSTALANDO MOTOR Y CONFIG...",
+        done: "¡TRANSFERENCIA COMPLETADA!",
+      };
+      hudBadge.textContent = stateMap[rec.state] || "CANAL P2P DIRECTO";
+    }
+
+    if (hudEl) hudEl.classList.toggle("is-done", rec?.state === "done");
 
     if (!rec) {
-      formSend.classList.toggle("hidden", formMode !== "send");
-      formRecv.classList.toggle("hidden", formMode !== "recv");
-      primary.disabled = formMode === "send" && !inst;
-      primary.textContent = formMode === "send" ? "Generar código de envío" : "Recibir instancia";
-      primary.dataset.act = formMode === "send" ? "send" : "recv";
+      celebratedShareId = null;
+      if (formSend) formSend.classList.remove("hidden");
+      if (successBanner) successBanner.classList.add("hidden");
+      primary.classList.remove("btn-victory-mode");
+      primary.disabled = !inst;
+      primary.textContent = "Enviar invitación";
+      primary.dataset.act = "send";
       primary.classList.remove("hidden");
       secondary.textContent = "Cancelar";
       secondary.dataset.act = "hide";
@@ -25904,10 +27628,23 @@ const ikaShare = (() => {
       return;
     }
 
-    const showCode = rec.role === "out" && !!rec.code && ["waiting", "connecting"].includes(rec.state);
-    codeBox.classList.toggle("hidden", !showCode);
-    if (showCode) {
-      codeVal.textContent = fmtCode(rec.code);
+    const isDone = rec.state === "done";
+    if (successBanner) {
+      successBanner.classList.toggle("hidden", !isDone);
+      if (isDone) {
+        const successSub = $("share-success-sub");
+        if (successSub) {
+          successSub.textContent = rec.role === "in"
+            ? `«${rec.installedName || rec.meta.name}» ya está 100% instalada y lista para jugar.`
+            : `Tu amigo ya tiene «${rec.meta.name}» lista para jugar.`;
+        }
+      }
+    }
+    primary.classList.toggle("btn-victory-mode", isDone);
+
+    if (isDone && celebratedShareId !== rec.id) {
+      celebratedShareId = rec.id;
+      triggerCelebrationFx();
     }
 
     const [status, detail, main, other, bar] = describe(rec);
@@ -25927,32 +27664,216 @@ const ikaShare = (() => {
     }
   }
 
-  function show(key) {
-    viewKey = key;
-    modal.classList.remove("hidden");
-    render();
-  }
+  // --- Motion Graphics Engine & Micro-Interactions ---
+  let isClosing = false;
+  let celebratedShareId = null;
+  let currentPane = null;
+  const shareBox = $("share-modal-box");
+  const targetUserInput = $("input-share-target-user");
+  const charsDisplay = $("share-chars-display");
+  let prevInputValue = "";
 
-  function hide() {
-    modal.classList.add("hidden");
-    const rec = viewKey ? shares.get(viewKey) : null;
-    if (rec && ["done", "cancelled", "failed"].includes(rec.state)) {
-      shares.delete(rec.key);
-      viewKey = null;
+  function updateCharDisplay() {
+    if (!charsDisplay || !targetUserInput) return;
+    const val = targetUserInput.value;
+    if (val === prevInputValue) return;
+
+    if (!val) {
+      charsDisplay.textContent = "";
+      prevInputValue = "";
+      return;
     }
-  }
 
-  function setMode(mode) {
-    formMode = mode === "recv" ? "recv" : "send";
-    $("share-form-error").textContent = "";
-    render();
-    if (formMode === "recv") {
-      const input = $("input-share-code");
-      if (input) {
-        input.focus();
-        input.select();
+    if (val.startsWith(prevInputValue)) {
+      // Appending new character(s)
+      const newChars = val.slice(prevInputValue.length);
+      for (let i = 0; i < newChars.length; i++) {
+        const span = document.createElement("span");
+        span.className = "share-char-glyph share-char-new";
+        span.textContent = newChars[i] === " " ? "\u00A0" : newChars[i];
+        if (newChars.length > 1) {
+          span.style.animationDelay = `${Math.min(i * 18, 120)}ms`;
+        }
+        charsDisplay.appendChild(span);
+      }
+    } else if (prevInputValue.startsWith(val)) {
+      // Deleting character(s) from end
+      const removeCount = prevInputValue.length - val.length;
+      for (let i = 0; i < removeCount; i++) {
+        if (charsDisplay.lastChild) charsDisplay.removeChild(charsDisplay.lastChild);
+      }
+    } else {
+      // Replacement, paste, or mid-string typing
+      charsDisplay.textContent = "";
+      for (let i = 0; i < val.length; i++) {
+        const span = document.createElement("span");
+        const isNew = i >= prevInputValue.length || val[i] !== prevInputValue[i];
+        span.className = isNew ? "share-char-glyph share-char-new" : "share-char-glyph";
+        span.textContent = val[i] === " " ? "\u00A0" : val[i];
+        if (isNew && val.length > 1) {
+          span.style.animationDelay = `${Math.min(i * 18, 120)}ms`;
+        }
+        charsDisplay.appendChild(span);
       }
     }
+
+    prevInputValue = val;
+    charsDisplay.scrollLeft = targetUserInput.scrollLeft;
+  }
+
+  function setPane(targetPane) {
+    const form = $("share-form");
+    const progress = $("share-progress");
+    if (!form || !progress) return;
+
+    if (currentPane === targetPane) return;
+
+    if (!currentPane) {
+      currentPane = targetPane;
+      form.classList.toggle("hidden", targetPane !== "form");
+      progress.classList.toggle("hidden", targetPane !== "progress");
+      form.classList.remove("is-morphing-out", "is-morphing-in", "is-warp-launching");
+      progress.classList.remove("is-morphing-out", "is-morphing-in", "is-warp-entering");
+      return;
+    }
+
+    if (currentPane === "form" && targetPane === "progress" && form.classList.contains("is-warp-launching")) {
+      currentPane = "progress";
+      setTimeout(() => {
+        form.classList.add("hidden");
+        form.classList.remove("is-warp-launching");
+        progress.classList.remove("hidden");
+        progress.classList.add("is-warp-entering");
+        setTimeout(() => progress.classList.remove("is-warp-entering"), 340);
+      }, 200);
+      return;
+    }
+
+    const outgoing = currentPane === "form" ? form : progress;
+    const incoming = targetPane === "form" ? form : progress;
+    currentPane = targetPane;
+
+    outgoing.classList.remove("is-morphing-in", "is-warp-entering");
+    outgoing.classList.add("is-morphing-out");
+
+    setTimeout(() => {
+      outgoing.classList.add("hidden");
+      outgoing.classList.remove("is-morphing-out");
+      incoming.classList.remove("hidden");
+      incoming.classList.remove("is-morphing-out");
+      incoming.classList.add("is-morphing-in");
+      setTimeout(() => {
+        incoming.classList.remove("is-morphing-in");
+      }, 380);
+    }, 180);
+  }
+
+  function triggerSendShockwave(sourceEl) {
+    if (!shareBox) return;
+    const shock = document.createElement("div");
+    shock.className = "share-warp-shockwave";
+    if (sourceEl) {
+      const boxRect = shareBox.getBoundingClientRect();
+      const btnRect = sourceEl.getBoundingClientRect();
+      const cx = btnRect.left + btnRect.width / 2 - boxRect.left;
+      const cy = btnRect.top + btnRect.height / 2 - boxRect.top;
+      shock.style.left = `${cx}px`;
+      shock.style.top = `${cy}px`;
+      shock.style.width = `${Math.max(boxRect.width, boxRect.height) * 1.6}px`;
+      shock.style.height = `${Math.max(boxRect.width, boxRect.height) * 1.6}px`;
+    } else {
+      shock.style.left = "50%";
+      shock.style.top = "50%";
+      shock.style.width = "650px";
+      shock.style.height = "650px";
+    }
+    shareBox.appendChild(shock);
+    setTimeout(() => shock.remove(), 700);
+  }
+
+  function triggerCelebrationFx() {
+    const canvas = $("share-celebration-fx");
+    if (!canvas) return;
+    canvas.innerHTML = "";
+    canvas.classList.remove("hidden");
+    const colors = ["#06f3e8", "#a855f7", "#38bdf8", "#ec4899", "#f59e0b", "#10b981", "#ffffff"];
+    for (let i = 0; i < 32; i++) {
+      const p = document.createElement("div");
+      p.className = "share-confetti-particle";
+      const color = colors[i % colors.length];
+      const size = Math.random() * 8 + 4;
+      const left = Math.random() * 90 + 5;
+      const tx = (Math.random() - 0.5) * 160;
+      const ty = Math.random() * 260 + 120;
+      const rot = (Math.random() - 0.5) * 720;
+      const dur = Math.random() * 1.2 + 1.2;
+      const isCircle = Math.random() > 0.5;
+
+      p.style.cssText = `
+        left: ${left}%;
+        top: 15%;
+        width: ${size}px;
+        height: ${isCircle ? size : size * 0.5}px;
+        background: ${color};
+        border-radius: ${isCircle ? "50%" : "2px"};
+        box-shadow: 0 0 8px ${color};
+        --tx: ${tx}px;
+        --ty: ${ty}px;
+        --rot: ${rot}deg;
+        --fall-dur: ${dur}s;
+      `;
+      canvas.appendChild(p);
+    }
+    setTimeout(() => {
+      canvas.classList.add("hidden");
+      canvas.innerHTML = "";
+    }, 3000);
+  }
+
+  function show(key) {
+    if (isClosing) return;
+    viewKey = key;
+    currentPane = null;
+    modal.classList.remove("hidden");
+    modal.classList.remove("is-closing", "is-closing-close", "is-closing-cancel");
+
+    // Retrigger cinematic materialize on modal box
+    if (shareBox) {
+      shareBox.style.animation = "none";
+      void shareBox.offsetWidth;
+      shareBox.style.animation = "";
+    }
+
+    // Retrigger cover shine sweep
+    const coverShine = modal.querySelector(".share-cover-shine");
+    if (coverShine) {
+      coverShine.style.animation = "none";
+      void coverShine.offsetWidth;
+      coverShine.style.animation = "";
+    }
+
+    updateCharDisplay();
+    render();
+  }
+
+  function hide(reason = "close") {
+    if (isClosing || modal.classList.contains("hidden")) return;
+    isClosing = true;
+    const isCancel = reason === "cancel";
+    modal.classList.remove("is-closing-close", "is-closing-cancel", "is-closing");
+    modal.classList.add(isCancel ? "is-closing-cancel" : "is-closing-close");
+    const dur = isCancel ? 380 : 320;
+    setTimeout(() => {
+      modal.classList.add("hidden");
+      modal.classList.remove("is-closing-close", "is-closing-cancel", "is-closing");
+      currentPane = null;
+      isClosing = false;
+      const rec = viewKey ? shares.get(viewKey) : null;
+      if (rec && ["done", "cancelled", "failed"].includes(rec.state)) {
+        shares.delete(rec.key);
+        viewKey = null;
+      }
+    }, dur);
   }
 
   function act(action) {
@@ -25967,98 +27888,149 @@ const ikaShare = (() => {
         error.textContent = "Cierra el juego de esta instancia antes de enviarla.";
         return;
       }
+      const targetInput = $("input-share-target-user");
+      const targetUser = (targetInput ? targetInput.value : "").trim().replace(/^@/, "");
+      if (targetUser.length < 2) {
+        error.textContent = "Escribe el nombre de usuario de tu amigo.";
+        const wrap = $("share-input-wrap");
+        if (wrap) {
+          wrap.classList.remove("input-shake-error");
+          void wrap.offsetWidth;
+          wrap.classList.add("input-shake-error");
+          setTimeout(() => wrap.classList.remove("input-shake-error"), 480);
+        }
+        targetInput?.focus();
+        return;
+      }
       error.textContent = "";
-      return startSend(formInstance);
+      triggerSendShockwave($("btn-share-primary"));
+      const form = $("share-form");
+      if (form) {
+        form.classList.remove("is-warp-launching", "is-morphing-out");
+        void form.offsetWidth;
+        form.classList.add("is-warp-launching");
+      }
+      return startSend(formInstance, targetUser);
     }
-    if (action === "recv") {
-      const codeInput = $("input-share-code");
-      return startReceive(codeInput ? codeInput.value : "");
-    }
-    if (action === "back_to_recv") {
-      if (rec) shares.delete(rec.key);
-      viewKey = null;
-      setMode("recv");
+    if (action === "accept_invite") {
+      if (rec) return beginReceive(rec);
       return;
     }
-    if (action === "hide") return hide();
-    if (!rec) return hide();
+    if (action === "decline_invite") {
+      if (rec) declineInviteById(rec.id);
+      return hide("cancel");
+    }
+    if (action === "hide") return hide("cancel");
+    if (!rec) return hide("cancel");
     if (action === "dismiss") {
       shares.delete(rec.key);
       viewKey = null;
-      return hide();
+      return hide("close");
     }
     if (action === "cancel") {
       cancelSend(rec);
       viewKey = null;
-      return hide();
+      return hide("cancel");
     }
     if (action === "abort") {
       abortReceive(rec);
       viewKey = null;
-      return hide();
+      return hide("cancel");
     }
   }
 
   $("btn-share-primary").addEventListener("click", (e) => act(e.currentTarget.dataset.act));
   $("btn-share-secondary").addEventListener("click", (e) => act(e.currentTarget.dataset.act));
-  $("btn-close-share").addEventListener("click", hide);
-  modal.addEventListener("click", (e) => e.target === modal && hide());
+  $("btn-close-share").addEventListener("click", () => hide("close"));
+  let modalBackdropDown = false;
+  modal.addEventListener("mousedown", (e) => {
+    modalBackdropDown = e.target === modal;
+  });
+  modal.addEventListener("click", (e) => {
+    if (e.target === modal && modalBackdropDown) {
+      hide("close");
+    }
+    modalBackdropDown = false;
+  });
 
-  $("tab-share-send")?.addEventListener("click", () => setMode("send"));
-  $("tab-share-recv")?.addEventListener("click", () => setMode("recv"));
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !modal.classList.contains("hidden") && !isClosing) {
+      hide("close");
+    }
+  });
 
-  const codeInput = $("input-share-code");
-  if (codeInput) {
-    codeInput.addEventListener("input", () => {
-      const formatted = fmtCode(codeInput.value);
-      if (codeInput.value !== formatted) codeInput.value = formatted;
+  const inputWrap = $("share-input-wrap");
+  const userIcon = $("share-target-user-icon");
+
+  if (targetUserInput) {
+    targetUserInput.addEventListener("input", () => {
       $("share-form-error").textContent = "";
+      const val = targetUserInput.value.trim().replace(/^@/, "");
+
+      updateCharDisplay();
+
+      // Micro-pulso sutil en el avatar de usuario
+      if (userIcon) {
+        userIcon.classList.remove("key-press-pulse");
+        void userIcon.offsetWidth;
+        userIcon.classList.add("key-press-pulse");
+        setTimeout(() => userIcon.classList.remove("key-press-pulse"), 160);
+      }
     });
-    codeInput.addEventListener("keydown", (e) => {
+
+    targetUserInput.addEventListener("scroll", () => {
+      if (charsDisplay) charsDisplay.scrollLeft = targetUserInput.scrollLeft;
+    });
+
+    targetUserInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") {
         e.preventDefault();
-        act("recv");
+        act("send");
       }
     });
   }
 
-  $("btn-share-copy-code")?.addEventListener("click", () => {
-    const rec = viewKey ? shares.get(viewKey) : null;
-    if (!rec?.code) return;
-    navigator.clipboard?.writeText(fmtCode(rec.code)).catch(() => {});
-    showToast(`Código ${fmtCode(rec.code)} copiado al portapapeles`);
-  });
-
-  // Clean up leftover temp files from any previous interrupted session (no background polling)
+  // Clean up leftover temp files from any previous interrupted session
   invoke("share_cleanup").catch(() => {});
 
   function open(id) {
     const key = shares.has(`in:${id}`) ? `in:${id}` : shares.has(`out:${id}`) ? `out:${id}` : null;
-    if (!key) return;
+    if (!key) {
+      acceptInviteById(id);
+      return;
+    }
     show(key);
   }
 
   return {
     openSend(inst) {
-      const running = [...shares.values()].find((r) => !["done", "cancelled", "failed"].includes(r.state));
+      const running = [...shares.values()].find((r) => r.role === "out" && !["done", "cancelled", "failed"].includes(r.state));
       if (running) return show(running.key);
       if (inst) formInstance = inst;
-      formMode = inst ? "send" : "recv";
+      formMode = "send";
       $("share-form-error").textContent = "";
+      if (targetUserInput) targetUserInput.value = "";
+      updateCharDisplay();
       show(null);
+      $("input-share-target-user")?.focus();
     },
     openReceive() {
-      const running = [...shares.values()].find((r) => !["done", "cancelled", "failed"].includes(r.state));
-      if (running) return show(running.key);
-      formMode = "recv";
-      $("share-form-error").textContent = "";
-      show(null);
-      $("input-share-code")?.focus();
+      checkIncomingInvites();
+      setNotifyPanelOpen(true);
+    },
+    accept(shareId) {
+      return acceptInviteById(shareId);
+    },
+    decline(shareId) {
+      return declineInviteById(shareId);
+    },
+    checkNow() {
+      return checkIncomingInvites();
     },
     activeInstancePath() {
-      const rec = (viewKey && shares.get(viewKey)) || [...shares.values()].find((r) => !["done", "cancelled", "failed"].includes(r.state)) || null;
+      const rec = (viewKey && shares.get(viewKey)) || [...shares.values()].find((r) => !["done", "cancelled", "failed", "invited"].includes(r.state)) || null;
       if (rec) return rec.installedPath || rec.instPath || null;
-      if (!modal.classList.contains("hidden") && formMode === "send" && formInstance) return formInstance.path || null;
+      if (!modal.classList.contains("hidden") && formInstance) return formInstance.path || null;
       return null;
     },
     open,
@@ -26231,4 +28203,533 @@ window.ikaShare = ikaShare;
     // Silently ignore if updater endpoint is unreachable or offline
     console.debug("Updater check skipped:", e);
   }
+})();
+
+// =========================================================
+// THEME MANAGER (Full Cyber Spectrum & Special Aurora)
+// =========================================================
+(() => {
+  const THEME_KEY = "ika_theme_color";
+  const gradCache = {};
+
+  function cacheGradient(id) {
+    const el = document.getElementById(id);
+    if (el && !gradCache[id]) {
+      gradCache[id] = el.innerHTML;
+    }
+  }
+
+  function setGradientHTML(id, customHTML) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    cacheGradient(id);
+    if (customHTML) {
+      el.innerHTML = customHTML;
+    } else if (gradCache[id]) {
+      el.innerHTML = gradCache[id];
+    }
+  }
+
+  const THEME_GRADIENTS = {
+    crimson: {
+      dockStroke: `
+        <stop offset="0%" stop-color="#8c1f2a" stop-opacity="0.0"/>
+        <stop offset="4.5%" stop-color="#ff2a4b" stop-opacity="0.85"/>
+        <stop offset="7%" stop-color="#c41432" stop-opacity="0.6"/>
+        <stop offset="12%" stop-color="#730e1f" stop-opacity="0.38"/>
+        <stop offset="35%" stop-color="#5a0b18" stop-opacity="0.45"/>
+        <stop offset="48%" stop-color="#a8132e" stop-opacity="0.7"/>
+        <stop offset="50%" stop-color="#ff3b5c" stop-opacity="0.85"/>
+        <stop offset="52%" stop-color="#a8132e" stop-opacity="0.7"/>
+        <stop offset="65%" stop-color="#5a0b18" stop-opacity="0.45"/>
+        <stop offset="88%" stop-color="#730e1f" stop-opacity="0.38"/>
+        <stop offset="93%" stop-color="#c41432" stop-opacity="0.6"/>
+        <stop offset="95.5%" stop-color="#ff2a4b" stop-opacity="0.85"/>
+        <stop offset="100%" stop-color="#8c1f2a" stop-opacity="0.0"/>
+      `,
+      jugarLinear: `
+        <stop offset="0%" stop-color="#ff4d64"/>
+        <stop offset="10%" stop-color="#f4374f"/>
+        <stop offset="25%" stop-color="#e6223b"/>
+        <stop offset="45%" stop-color="#d4142d"/>
+        <stop offset="68%" stop-color="#c00c24"/>
+        <stop offset="88%" stop-color="#b0061e"/>
+        <stop offset="100%" stop-color="#bd0922"/>
+      `,
+      jugarCenterBloom: `
+        <stop offset="0%" stop-color="#ff758a" stop-opacity="0.55"/>
+        <stop offset="35%" stop-color="#ff3b56" stop-opacity="0.38"/>
+        <stop offset="70%" stop-color="#d91833" stop-opacity="0.15"/>
+        <stop offset="100%" stop-color="#b0061e" stop-opacity="0.0"/>
+      `,
+      jugarTopSheen: `
+        <stop offset="0%" stop-color="#ffe8ed" stop-opacity="0.52"/>
+        <stop offset="12%" stop-color="#ff8a9c" stop-opacity="0.28"/>
+        <stop offset="30%" stop-color="#e6223b" stop-opacity="0.0"/>
+        <stop offset="90%" stop-color="#b0061e" stop-opacity="0.0"/>
+        <stop offset="100%" stop-color="#ff667e" stop-opacity="0.22"/>
+      `,
+      dockBgV: `
+        <stop offset="0%" stop-color="#120205"/>
+        <stop offset="55%" stop-color="#1a0409"/>
+        <stop offset="100%" stop-color="#28050e"/>
+      `,
+      dockBgH: `
+        <stop offset="0%" stop-color="#120205" stop-opacity="0.0"/>
+        <stop offset="24%" stop-color="#160307" stop-opacity="0.0"/>
+        <stop offset="30%" stop-color="#3d050f" stop-opacity="0.35"/>
+        <stop offset="38%" stop-color="#69091b" stop-opacity="0.75"/>
+        <stop offset="45%" stop-color="#990e28" stop-opacity="0.92"/>
+        <stop offset="50%" stop-color="#bd1433" stop-opacity="0.98"/>
+        <stop offset="55%" stop-color="#990e28" stop-opacity="0.92"/>
+        <stop offset="62%" stop-color="#69091b" stop-opacity="0.75"/>
+        <stop offset="70%" stop-color="#3d050f" stop-opacity="0.35"/>
+        <stop offset="76%" stop-color="#160307" stop-opacity="0.0"/>
+        <stop offset="100%" stop-color="#120205" stop-opacity="0.0"/>
+      `,
+      chassisCenterGlow: `
+        <stop offset="0%" stop-color="#ff2a4b" stop-opacity="0.75"/>
+        <stop offset="30%" stop-color="#cf1333" stop-opacity="0.60"/>
+        <stop offset="60%" stop-color="#800a1d" stop-opacity="0.38"/>
+        <stop offset="82%" stop-color="#450510" stop-opacity="0.18"/>
+        <stop offset="100%" stop-color="#140206" stop-opacity="0.0"/>
+      `,
+      btnSideBg: `
+        <stop offset="0%" stop-color="#140206"/>
+        <stop offset="100%" stop-color="#26040d"/>
+      `,
+      btnSideStroke: `
+        <stop offset="0%" stop-color="#ff3b56" stop-opacity="0.80"/>
+        <stop offset="100%" stop-color="#730a1c" stop-opacity="0.50"/>
+      `
+    },
+    pink: {
+      dockStroke: `
+        <stop offset="0%" stop-color="#8c1f60" stop-opacity="0.0"/>
+        <stop offset="4.5%" stop-color="#ff2a85" stop-opacity="0.85"/>
+        <stop offset="7%" stop-color="#c4146a" stop-opacity="0.6"/>
+        <stop offset="12%" stop-color="#730e3f" stop-opacity="0.38"/>
+        <stop offset="35%" stop-color="#5a0b32" stop-opacity="0.45"/>
+        <stop offset="48%" stop-color="#a8135e" stop-opacity="0.7"/>
+        <stop offset="50%" stop-color="#ff3b99" stop-opacity="0.85"/>
+        <stop offset="52%" stop-color="#a8135e" stop-opacity="0.7"/>
+        <stop offset="65%" stop-color="#5a0b32" stop-opacity="0.45"/>
+        <stop offset="88%" stop-color="#730e3f" stop-opacity="0.38"/>
+        <stop offset="93%" stop-color="#c4146a" stop-opacity="0.6"/>
+        <stop offset="95.5%" stop-color="#ff2a85" stop-opacity="0.85"/>
+        <stop offset="100%" stop-color="#8c1f60" stop-opacity="0.0"/>
+      `,
+      jugarLinear: `
+        <stop offset="0%" stop-color="#ff4da6"/>
+        <stop offset="10%" stop-color="#f43794"/>
+        <stop offset="25%" stop-color="#e62283"/>
+        <stop offset="45%" stop-color="#d41476"/>
+        <stop offset="68%" stop-color="#c00c69"/>
+        <stop offset="88%" stop-color="#b0065e"/>
+        <stop offset="100%" stop-color="#bd0966"/>
+      `,
+      jugarCenterBloom: `
+        <stop offset="0%" stop-color="#ff75b8" stop-opacity="0.55"/>
+        <stop offset="35%" stop-color="#ff3b99" stop-opacity="0.38"/>
+        <stop offset="70%" stop-color="#d9187a" stop-opacity="0.15"/>
+        <stop offset="100%" stop-color="#b0065e" stop-opacity="0.0"/>
+      `,
+      jugarTopSheen: `
+        <stop offset="0%" stop-color="#ffe8f4" stop-opacity="0.52"/>
+        <stop offset="12%" stop-color="#ff8ac4" stop-opacity="0.28"/>
+        <stop offset="30%" stop-color="#e62283" stop-opacity="0.0"/>
+        <stop offset="90%" stop-color="#b0065e" stop-opacity="0.0"/>
+        <stop offset="100%" stop-color="#ff66b0" stop-opacity="0.22"/>
+      `,
+      dockBgV: `
+        <stop offset="0%" stop-color="#12020e"/>
+        <stop offset="55%" stop-color="#1a0415"/>
+        <stop offset="100%" stop-color="#280521"/>
+      `,
+      dockBgH: `
+        <stop offset="0%" stop-color="#12020e" stop-opacity="0.0"/>
+        <stop offset="24%" stop-color="#160312" stop-opacity="0.0"/>
+        <stop offset="30%" stop-color="#3d052d" stop-opacity="0.35"/>
+        <stop offset="38%" stop-color="#69094e" stop-opacity="0.75"/>
+        <stop offset="45%" stop-color="#990e72" stop-opacity="0.92"/>
+        <stop offset="50%" stop-color="#bd148e" stop-opacity="0.98"/>
+        <stop offset="55%" stop-color="#990e72" stop-opacity="0.92"/>
+        <stop offset="62%" stop-color="#69094e" stop-opacity="0.75"/>
+        <stop offset="70%" stop-color="#3d052d" stop-opacity="0.35"/>
+        <stop offset="76%" stop-color="#160312" stop-opacity="0.0"/>
+        <stop offset="100%" stop-color="#12020e" stop-opacity="0.0"/>
+      `,
+      chassisCenterGlow: `
+        <stop offset="0%" stop-color="#ff2a85" stop-opacity="0.75"/>
+        <stop offset="30%" stop-color="#cf136c" stop-opacity="0.60"/>
+        <stop offset="60%" stop-color="#800a42" stop-opacity="0.38"/>
+        <stop offset="82%" stop-color="#450524" stop-opacity="0.18"/>
+        <stop offset="100%" stop-color="#14020b" stop-opacity="0.0"/>
+      `,
+      btnSideBg: `
+        <stop offset="0%" stop-color="#14020d"/>
+        <stop offset="100%" stop-color="#26041c"/>
+      `,
+      btnSideStroke: `
+        <stop offset="0%" stop-color="#ff3b99" stop-opacity="0.80"/>
+        <stop offset="100%" stop-color="#730a41" stop-opacity="0.50"/>
+      `
+    },
+    green: {
+      dockStroke: `
+        <stop offset="0%" stop-color="#0e6b37" stop-opacity="0.0"/>
+        <stop offset="4.5%" stop-color="#00ff88" stop-opacity="0.85"/>
+        <stop offset="7%" stop-color="#05c46b" stop-opacity="0.6"/>
+        <stop offset="12%" stop-color="#075e33" stop-opacity="0.38"/>
+        <stop offset="35%" stop-color="#064225" stop-opacity="0.45"/>
+        <stop offset="48%" stop-color="#088c4d" stop-opacity="0.7"/>
+        <stop offset="50%" stop-color="#10f089" stop-opacity="0.85"/>
+        <stop offset="52%" stop-color="#088c4d" stop-opacity="0.7"/>
+        <stop offset="65%" stop-color="#064225" stop-opacity="0.45"/>
+        <stop offset="88%" stop-color="#075e33" stop-opacity="0.38"/>
+        <stop offset="93%" stop-color="#05c46b" stop-opacity="0.6"/>
+        <stop offset="95.5%" stop-color="#00ff88" stop-opacity="0.85"/>
+        <stop offset="100%" stop-color="#0e6b37" stop-opacity="0.0"/>
+      `,
+      jugarLinear: `
+        <stop offset="0%" stop-color="#34d399"/>
+        <stop offset="10%" stop-color="#10b981"/>
+        <stop offset="25%" stop-color="#059669"/>
+        <stop offset="45%" stop-color="#047857"/>
+        <stop offset="68%" stop-color="#065f46"/>
+        <stop offset="88%" stop-color="#064e3b"/>
+        <stop offset="100%" stop-color="#047857"/>
+      `,
+      jugarCenterBloom: `
+        <stop offset="0%" stop-color="#6ee7b7" stop-opacity="0.55"/>
+        <stop offset="35%" stop-color="#10b981" stop-opacity="0.38"/>
+        <stop offset="70%" stop-color="#059669" stop-opacity="0.15"/>
+        <stop offset="100%" stop-color="#064e3b" stop-opacity="0.0"/>
+      `,
+      jugarTopSheen: `
+        <stop offset="0%" stop-color="#ecfdf5" stop-opacity="0.52"/>
+        <stop offset="12%" stop-color="#a7f3d0" stop-opacity="0.28"/>
+        <stop offset="30%" stop-color="#059669" stop-opacity="0.0"/>
+        <stop offset="90%" stop-color="#064e3b" stop-opacity="0.0"/>
+        <stop offset="100%" stop-color="#34d399" stop-opacity="0.22"/>
+      `,
+      dockBgV: `
+        <stop offset="0%" stop-color="#021208"/>
+        <stop offset="55%" stop-color="#031a0c"/>
+        <stop offset="100%" stop-color="#052814"/>
+      `,
+      dockBgH: `
+        <stop offset="0%" stop-color="#021208" stop-opacity="0.0"/>
+        <stop offset="24%" stop-color="#03160b" stop-opacity="0.0"/>
+        <stop offset="30%" stop-color="#053d1d" stop-opacity="0.35"/>
+        <stop offset="38%" stop-color="#096932" stop-opacity="0.75"/>
+        <stop offset="45%" stop-color="#0e9949" stop-opacity="0.92"/>
+        <stop offset="50%" stop-color="#14bd5c" stop-opacity="0.98"/>
+        <stop offset="55%" stop-color="#0e9949" stop-opacity="0.92"/>
+        <stop offset="62%" stop-color="#096932" stop-opacity="0.75"/>
+        <stop offset="70%" stop-color="#053d1d" stop-opacity="0.35"/>
+        <stop offset="76%" stop-color="#03160b" stop-opacity="0.0"/>
+        <stop offset="100%" stop-color="#021208" stop-opacity="0.0"/>
+      `,
+      chassisCenterGlow: `
+        <stop offset="0%" stop-color="#00ff88" stop-opacity="0.75"/>
+        <stop offset="30%" stop-color="#05c46b" stop-opacity="0.60"/>
+        <stop offset="60%" stop-color="#067841" stop-opacity="0.38"/>
+        <stop offset="82%" stop-color="#04381e" stop-opacity="0.18"/>
+        <stop offset="100%" stop-color="#021208" stop-opacity="0.0"/>
+      `,
+      btnSideBg: `
+        <stop offset="0%" stop-color="#02140a"/>
+        <stop offset="100%" stop-color="#042614"/>
+      `,
+      btnSideStroke: `
+        <stop offset="0%" stop-color="#10b981" stop-opacity="0.80"/>
+        <stop offset="100%" stop-color="#075e33" stop-opacity="0.50"/>
+      `
+    },
+    cyan: {
+      dockStroke: `
+        <stop offset="0%" stop-color="#0e5473" stop-opacity="0.0"/>
+        <stop offset="4.5%" stop-color="#00d2ff" stop-opacity="0.85"/>
+        <stop offset="7%" stop-color="#0ea5e9" stop-opacity="0.6"/>
+        <stop offset="12%" stop-color="#0369a1" stop-opacity="0.38"/>
+        <stop offset="35%" stop-color="#073b5c" stop-opacity="0.45"/>
+        <stop offset="48%" stop-color="#0284c7" stop-opacity="0.7"/>
+        <stop offset="50%" stop-color="#38bdf8" stop-opacity="0.85"/>
+        <stop offset="52%" stop-color="#0284c7" stop-opacity="0.7"/>
+        <stop offset="65%" stop-color="#073b5c" stop-opacity="0.45"/>
+        <stop offset="88%" stop-color="#0369a1" stop-opacity="0.38"/>
+        <stop offset="93%" stop-color="#0ea5e9" stop-opacity="0.6"/>
+        <stop offset="95.5%" stop-color="#00d2ff" stop-opacity="0.85"/>
+        <stop offset="100%" stop-color="#0e5473" stop-opacity="0.0"/>
+      `,
+      jugarLinear: `
+        <stop offset="0%" stop-color="#38bdf8"/>
+        <stop offset="10%" stop-color="#0ea5e9"/>
+        <stop offset="25%" stop-color="#0284c7"/>
+        <stop offset="45%" stop-color="#0369a1"/>
+        <stop offset="68%" stop-color="#075985"/>
+        <stop offset="88%" stop-color="#0c4a6e"/>
+        <stop offset="100%" stop-color="#0369a1"/>
+      `,
+      jugarCenterBloom: `
+        <stop offset="0%" stop-color="#7dd3fc" stop-opacity="0.55"/>
+        <stop offset="35%" stop-color="#38bdf8" stop-opacity="0.38"/>
+        <stop offset="70%" stop-color="#0284c7" stop-opacity="0.15"/>
+        <stop offset="100%" stop-color="#0c4a6e" stop-opacity="0.0"/>
+      `,
+      jugarTopSheen: `
+        <stop offset="0%" stop-color="#f0f9ff" stop-opacity="0.52"/>
+        <stop offset="12%" stop-color="#bae6fd" stop-opacity="0.28"/>
+        <stop offset="30%" stop-color="#0284c7" stop-opacity="0.0"/>
+        <stop offset="90%" stop-color="#0c4a6e" stop-opacity="0.0"/>
+        <stop offset="100%" stop-color="#38bdf8" stop-opacity="0.22"/>
+      `,
+      dockBgV: `
+        <stop offset="0%" stop-color="#020e14"/>
+        <stop offset="55%" stop-color="#031621"/>
+        <stop offset="100%" stop-color="#052133"/>
+      `,
+      dockBgH: `
+        <stop offset="0%" stop-color="#020e14" stop-opacity="0.0"/>
+        <stop offset="24%" stop-color="#03141f" stop-opacity="0.0"/>
+        <stop offset="30%" stop-color="#06324d" stop-opacity="0.35"/>
+        <stop offset="38%" stop-color="#095682" stop-opacity="0.75"/>
+        <stop offset="45%" stop-color="#0c7cb8" stop-opacity="0.92"/>
+        <stop offset="50%" stop-color="#0ea5e9" stop-opacity="0.98"/>
+        <stop offset="55%" stop-color="#0c7cb8" stop-opacity="0.92"/>
+        <stop offset="62%" stop-color="#095682" stop-opacity="0.75"/>
+        <stop offset="70%" stop-color="#06324d" stop-opacity="0.35"/>
+        <stop offset="76%" stop-color="#03141f" stop-opacity="0.0"/>
+        <stop offset="100%" stop-color="#020e14" stop-opacity="0.0"/>
+      `,
+      chassisCenterGlow: `
+        <stop offset="0%" stop-color="#00d2ff" stop-opacity="0.75"/>
+        <stop offset="30%" stop-color="#0ea5e9" stop-opacity="0.60"/>
+        <stop offset="60%" stop-color="#0284c7" stop-opacity="0.38"/>
+        <stop offset="82%" stop-color="#073b5c" stop-opacity="0.18"/>
+        <stop offset="100%" stop-color="#020e14" stop-opacity="0.0"/>
+      `,
+      btnSideBg: `
+        <stop offset="0%" stop-color="#021018"/>
+        <stop offset="100%" stop-color="#042030"/>
+      `,
+      btnSideStroke: `
+        <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.80"/>
+        <stop offset="100%" stop-color="#0369a1" stop-opacity="0.50"/>
+      `
+    },
+    orange: {
+      dockStroke: `
+        <stop offset="0%" stop-color="#8c440e" stop-opacity="0.0"/>
+        <stop offset="4.5%" stop-color="#ff7b00" stop-opacity="0.85"/>
+        <stop offset="7%" stop-color="#ea580c" stop-opacity="0.6"/>
+        <stop offset="12%" stop-color="#733207" stop-opacity="0.38"/>
+        <stop offset="35%" stop-color="#5a2705" stop-opacity="0.45"/>
+        <stop offset="48%" stop-color="#a8490a" stop-opacity="0.7"/>
+        <stop offset="50%" stop-color="#ff9500" stop-opacity="0.85"/>
+        <stop offset="52%" stop-color="#a8490a" stop-opacity="0.7"/>
+        <stop offset="65%" stop-color="#5a2705" stop-opacity="0.45"/>
+        <stop offset="88%" stop-color="#733207" stop-opacity="0.38"/>
+        <stop offset="93%" stop-color="#ea580c" stop-opacity="0.6"/>
+        <stop offset="95.5%" stop-color="#ff7b00" stop-opacity="0.85"/>
+        <stop offset="100%" stop-color="#8c440e" stop-opacity="0.0"/>
+      `,
+      jugarLinear: `
+        <stop offset="0%" stop-color="#fb923c"/>
+        <stop offset="10%" stop-color="#f97316"/>
+        <stop offset="25%" stop-color="#ea580c"/>
+        <stop offset="45%" stop-color="#c2410c"/>
+        <stop offset="68%" stop-color="#9a3412"/>
+        <stop offset="88%" stop-color="#7c2d12"/>
+        <stop offset="100%" stop-color="#c2410c"/>
+      `,
+      jugarCenterBloom: `
+        <stop offset="0%" stop-color="#fdba74" stop-opacity="0.55"/>
+        <stop offset="35%" stop-color="#f97316" stop-opacity="0.38"/>
+        <stop offset="70%" stop-color="#ea580c" stop-opacity="0.15"/>
+        <stop offset="100%" stop-color="#7c2d12" stop-opacity="0.0"/>
+      `,
+      jugarTopSheen: `
+        <stop offset="0%" stop-color="#fff7ed" stop-opacity="0.52"/>
+        <stop offset="12%" stop-color="#fed7aa" stop-opacity="0.28"/>
+        <stop offset="30%" stop-color="#ea580c" stop-opacity="0.0"/>
+        <stop offset="90%" stop-color="#7c2d12" stop-opacity="0.0"/>
+        <stop offset="100%" stop-color="#fb923c" stop-opacity="0.22"/>
+      `,
+      dockBgV: `
+        <stop offset="0%" stop-color="#140802"/>
+        <stop offset="55%" stop-color="#1f0c03"/>
+        <stop offset="100%" stop-color="#301405"/>
+      `,
+      dockBgH: `
+        <stop offset="0%" stop-color="#140802" stop-opacity="0.0"/>
+        <stop offset="24%" stop-color="#1a0b03" stop-opacity="0.0"/>
+        <stop offset="30%" stop-color="#421a05" stop-opacity="0.35"/>
+        <stop offset="38%" stop-color="#732e08" stop-opacity="0.75"/>
+        <stop offset="45%" stop-color="#a8430b" stop-opacity="0.92"/>
+        <stop offset="50%" stop-color="#d9560e" stop-opacity="0.98"/>
+        <stop offset="55%" stop-color="#a8430b" stop-opacity="0.92"/>
+        <stop offset="62%" stop-color="#732e08" stop-opacity="0.75"/>
+        <stop offset="70%" stop-color="#421a05" stop-opacity="0.35"/>
+        <stop offset="76%" stop-color="#1a0b03" stop-opacity="0.0"/>
+        <stop offset="100%" stop-color="#140802" stop-opacity="0.0"/>
+      `,
+      chassisCenterGlow: `
+        <stop offset="0%" stop-color="#ff7b00" stop-opacity="0.75"/>
+        <stop offset="30%" stop-color="#ea580c" stop-opacity="0.60"/>
+        <stop offset="60%" stop-color="#9a3412" stop-opacity="0.38"/>
+        <stop offset="82%" stop-color="#5a1e05" stop-opacity="0.18"/>
+        <stop offset="100%" stop-color="#140802" stop-opacity="0.0"/>
+      `,
+      btnSideBg: `
+        <stop offset="0%" stop-color="#160802"/>
+        <stop offset="100%" stop-color="#2c1104"/>
+      `,
+      btnSideStroke: `
+        <stop offset="0%" stop-color="#f97316" stop-opacity="0.80"/>
+        <stop offset="100%" stop-color="#7c2d12" stop-opacity="0.50"/>
+      `
+    },
+    aurora: {
+      dockStroke: `
+        <stop offset="0%" stop-color="#164d36" stop-opacity="0.0"/>
+        <stop offset="4.5%" stop-color="#2df49d" stop-opacity="0.85"/>
+        <stop offset="7%" stop-color="#38cfff" stop-opacity="0.75"/>
+        <stop offset="12%" stop-color="#8070d6" stop-opacity="0.45"/>
+        <stop offset="35%" stop-color="#3b2075" stop-opacity="0.50"/>
+        <stop offset="48%" stop-color="#38cfff" stop-opacity="0.75"/>
+        <stop offset="50%" stop-color="#2df49d" stop-opacity="0.95"/>
+        <stop offset="52%" stop-color="#c5b4fb" stop-opacity="0.80"/>
+        <stop offset="65%" stop-color="#3b2075" stop-opacity="0.50"/>
+        <stop offset="88%" stop-color="#8070d6" stop-opacity="0.45"/>
+        <stop offset="93%" stop-color="#38cfff" stop-opacity="0.75"/>
+        <stop offset="95.5%" stop-color="#2df49d" stop-opacity="0.85"/>
+        <stop offset="100%" stop-color="#164d36" stop-opacity="0.0"/>
+      `,
+      jugarLinear: `
+        <stop offset="0%" stop-color="#2df49d"/>
+        <stop offset="25%" stop-color="#25d392"/>
+        <stop offset="50%" stop-color="#20b895"/>
+        <stop offset="75%" stop-color="#1e9496"/>
+        <stop offset="100%" stop-color="#1f718c"/>
+      `,
+      jugarCenterBloom: `
+        <stop offset="0%" stop-color="#38cfff" stop-opacity="0.65"/>
+        <stop offset="35%" stop-color="#2df49d" stop-opacity="0.45"/>
+        <stop offset="70%" stop-color="#9079ea" stop-opacity="0.25"/>
+        <stop offset="100%" stop-color="#110b28" stop-opacity="0.0"/>
+      `,
+      jugarTopSheen: `
+        <stop offset="0%" stop-color="#e6fff5" stop-opacity="0.60"/>
+        <stop offset="15%" stop-color="#a6ffe0" stop-opacity="0.35"/>
+        <stop offset="35%" stop-color="#38cfff" stop-opacity="0.0"/>
+        <stop offset="85%" stop-color="#c5b4fb" stop-opacity="0.0"/>
+        <stop offset="100%" stop-color="#c5b4fb" stop-opacity="0.30"/>
+      `,
+      dockBgV: `
+        <stop offset="0%" stop-color="#0a0718"/>
+        <stop offset="55%" stop-color="#110c28"/>
+        <stop offset="100%" stop-color="#1c1340"/>
+      `,
+      dockBgH: `
+        <stop offset="0%" stop-color="#0a0718" stop-opacity="0.0"/>
+        <stop offset="24%" stop-color="#0d0920" stop-opacity="0.0"/>
+        <stop offset="30%" stop-color="#172445" stop-opacity="0.35"/>
+        <stop offset="38%" stop-color="#19485e" stop-opacity="0.75"/>
+        <stop offset="45%" stop-color="#1b7278" stop-opacity="0.92"/>
+        <stop offset="50%" stop-color="#2df49d" stop-opacity="0.98"/>
+        <stop offset="55%" stop-color="#247895" stop-opacity="0.92"/>
+        <stop offset="62%" stop-color="#304482" stop-opacity="0.75"/>
+        <stop offset="70%" stop-color="#231750" stop-opacity="0.35"/>
+        <stop offset="76%" stop-color="#0d0920" stop-opacity="0.0"/>
+        <stop offset="100%" stop-color="#0a0718" stop-opacity="0.0"/>
+      `,
+      chassisCenterGlow: `
+        <stop offset="0%" stop-color="#2df49d" stop-opacity="0.75"/>
+        <stop offset="30%" stop-color="#38cfff" stop-opacity="0.60"/>
+        <stop offset="60%" stop-color="#7b5fd6" stop-opacity="0.40"/>
+        <stop offset="82%" stop-color="#271552" stop-opacity="0.20"/>
+        <stop offset="100%" stop-color="#0a0718" stop-opacity="0.0"/>
+      `,
+      btnSideBg: `
+        <stop offset="0%" stop-color="#0c081e"/>
+        <stop offset="100%" stop-color="#18103d"/>
+      `,
+      btnSideStroke: `
+        <stop offset="0%" stop-color="#2df49d" stop-opacity="0.80"/>
+        <stop offset="100%" stop-color="#38cfff" stop-opacity="0.50"/>
+      `
+    }
+  };
+
+  function applyTheme(themeName) {
+    let activeTheme = themeName || "indigo";
+    if (activeTheme === "crimson") activeTheme = "crimson-coral";
+
+    const ALL_THEME_CLASSES = [
+      "theme-crimson",
+      "theme-crimson-coral",
+      "theme-crimson-amber",
+      "theme-crimson-ruby",
+      "theme-pink",
+      "theme-green",
+      "theme-cyan",
+      "theme-orange",
+      "theme-aurora"
+    ];
+    ALL_THEME_CLASSES.forEach((cls) => document.body.classList.remove(cls));
+
+    if (activeTheme.startsWith("crimson")) {
+      document.body.classList.add("theme-crimson");
+      document.body.classList.add(`theme-${activeTheme}`);
+    } else if (activeTheme !== "indigo") {
+      document.body.classList.add(`theme-${activeTheme}`);
+    }
+
+    // Update active state in Aspecto Visual cards
+    document.querySelectorAll(".theme-card").forEach((card) => {
+      const cardTheme = card.dataset.theme;
+      const isCardActive = (cardTheme === activeTheme) || (cardTheme === "crimson" && activeTheme === "crimson-coral");
+      card.classList.toggle("is-active", isCardActive);
+    });
+
+    const themeKey = activeTheme.startsWith("crimson") ? "crimson" : activeTheme;
+    const grads = THEME_GRADIENTS[themeKey];
+
+    const GRAD_IDS = [
+      "dockStroke",
+      "jugarLinear",
+      "jugarCenterBloom",
+      "jugarTopSheen",
+      "dockBgV",
+      "dockBgH",
+      "chassisCenterGlow",
+      "btnSideBg",
+      "btnSideStroke"
+    ];
+
+    GRAD_IDS.forEach((id) => {
+      setGradientHTML(id, grads ? grads[id] : null);
+    });
+  }
+
+    // Restore saved theme on load
+  const initialTheme = localStorage.getItem(THEME_KEY) || "indigo";
+  applyTheme(initialTheme);
+
+  // Wire up theme cards in Aspecto Visual
+  const attachCardListeners = () => {
+    document.querySelectorAll(".theme-card").forEach((card) => {
+      card.addEventListener("click", () => {
+        const theme = card.dataset.theme;
+        if (!theme) return;
+        localStorage.setItem(THEME_KEY, theme);
+        applyTheme(theme);
+      });
+    });
+  };
+
+  document.addEventListener("DOMContentLoaded", attachCardListeners);
+  attachCardListeners();
 })();

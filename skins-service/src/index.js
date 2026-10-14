@@ -82,7 +82,35 @@ const skinKey = (name) => `skins/${name}.png`;
 const nameKey = (name) => `names/${name}.json`;
 const boxKey = (name) => `share/box/${name}.json`;
 const roomKey = (code) => `share/room/${code}.json`;
+const userRoomKey = (name) => `share/user-room/${String(name || "").trim().toLowerCase().replace(/^@/, "")}.json`;
 const chunkKey = (code, idx) => `share/room/${code}/chunk-${idx}.bin`;
+
+async function userToCode(name) {
+  const clean = String(name || "").trim().toLowerCase().replace(/^@/, "");
+  const data = new TextEncoder().encode(`ika-user-code:${clean}`);
+  const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", data));
+  const view = new DataView(hash.buffer, hash.byteOffset, hash.byteLength);
+  const num = 100000 + (view.getUint32(0, false) % 900000);
+  return String(num);
+}
+
+async function resolveUserRoom(env, rawUser) {
+  const clean = String(rawUser || "").trim().toLowerCase().replace(/^@/, "");
+  if (!clean) return { room: null, etag: null };
+  try {
+    const ptrObj = await env.SKINS.get(userRoomKey(clean));
+    if (ptrObj) {
+      const ptr = await ptrObj.json();
+      if (ptr?.code && ROOM_CODE_RE.test(ptr.code)) {
+        const found = await readRoom(env, ptr.code);
+        if (found.room) return found;
+      }
+      await env.SKINS.delete(userRoomKey(clean));
+    }
+  } catch {}
+  const derivedCode = await userToCode(clean);
+  return readRoom(env, derivedCode);
+}
 
 // Public key of the device that owns the name, or null if nobody uses it yet.
 async function ownerOf(env, name) {
@@ -137,10 +165,13 @@ async function readRoom(env, code) {
   try {
     const room = await obj.json();
     if (!room || Date.now() - (room.updated || room.created || 0) > ROOM_TTL_MS) {
+      await env.SKINS.delete(roomKey(code));
+      if (room?.recipient) await env.SKINS.delete(userRoomKey(room.recipient));
       return { room: null, etag: null };
     }
     return { room, etag: obj.etag };
   } catch {
+    await env.SKINS.delete(roomKey(code));
     return { room: null, etag: null };
   }
 }
@@ -149,6 +180,7 @@ const publicRoom = (r) => ({
   code: r.code,
   id: r.id,
   sender: r.sender,
+  recipient: r.recipient || null,
   meta: r.meta,
   offer: r.offer,
   answer: r.answer,
@@ -178,8 +210,8 @@ async function handleRoom(request, env, url) {
       if (room.senderPubkey !== auth.pubkey) return json(403, { error: "not room sender" });
       if (room.state === "cancelled" || room.state === "failed") return json(410, { error: "transfer stopped" });
 
-      if (idx >= 8) {
-        const behind = await env.SKINS.head(chunkKey(code, idx - 8));
+      if (idx >= 16) {
+        const behind = await env.SKINS.head(chunkKey(code, idx - 16));
         if (behind) return json(200, { ok: false, wait: true });
       }
       await env.SKINS.put(chunkKey(code, idx), body);
@@ -215,25 +247,37 @@ async function handleRoom(request, env, url) {
     if (!payload || !SHARE_ID_RE.test(payload.id || "")) return json(400, { error: "bad room payload" });
 
     let code = "";
-    for (let i = 0; i < 12; i++) {
-      const rand = new Uint32Array(1);
-      crypto.getRandomValues(rand);
-      const candidate = String(100000 + (rand[0] % 900000));
-      const existing = await readRoom(env, candidate);
-      if (!existing.room) {
-        code = candidate;
-        break;
+    const preferred = String(payload.code || "").trim();
+    if (ROOM_CODE_RE.test(preferred)) {
+      const existing = await readRoom(env, preferred);
+      if (!existing.room || existing.room.senderPubkey === auth.pubkey || ["done", "cancelled", "failed"].includes(existing.room.state)) {
+        code = preferred;
+      }
+    }
+    if (!code) {
+      for (let i = 0; i < 12; i++) {
+        const rand = new Uint32Array(1);
+        crypto.getRandomValues(rand);
+        const candidate = String(100000 + (rand[0] % 900000));
+        const existing = await readRoom(env, candidate);
+        if (!existing.room) {
+          code = candidate;
+          break;
+        }
       }
     }
     if (!code) return json(503, { error: "no free codes, try again" });
 
     const now = Date.now();
+    const senderName = String(payload.sender || "Jugador").trim().slice(0, 24);
+    const recipientName = String(payload.recipient || "").trim().slice(0, 24);
     const room = {
       code,
       id: payload.id,
       senderPubkey: auth.pubkey,
       receiverPubkey: null,
-      sender: String(payload.sender || "Jugador").slice(0, 24),
+      sender: senderName,
+      recipient: recipientName || null,
       meta: payload.meta || {},
       offer: payload.offer || null,
       answer: null,
@@ -244,6 +288,22 @@ async function handleRoom(request, env, url) {
       updated: now,
     };
     await env.SKINS.put(roomKey(code), JSON.stringify(room));
+    if (recipientName) {
+      await env.SKINS.put(userRoomKey(recipientName), JSON.stringify({ code, updated: now }));
+    } else if (senderName) {
+      await env.SKINS.put(userRoomKey(senderName), JSON.stringify({ code, updated: now }));
+    }
+    return json(200, publicRoom(room));
+  }
+
+  // Lookup room by username: GET /share/room/by-user/{username}
+  const byUserMatch = url.pathname.match(/^\/share\/room\/by-user\/([^/]+)$/);
+  if (byUserMatch && method === "GET") {
+    const auth = await verifyRequest(request, "ika-share-v1", "GET", url.pathname + url.search, new Uint8Array());
+    if (auth.error) return auth.error;
+    const rawUser = decodeURIComponent(byUserMatch[1]);
+    const { room } = await resolveUserRoom(env, rawUser);
+    if (!room) return json(404, { error: "room not found" });
     return json(200, publicRoom(room));
   }
 
@@ -269,6 +329,8 @@ async function handleRoom(request, env, url) {
     const { room } = await readRoom(env, code);
     if (room && (room.senderPubkey === auth.pubkey || room.receiverPubkey === auth.pubkey)) {
       await env.SKINS.delete(roomKey(code));
+      if (room.recipient) await env.SKINS.delete(userRoomKey(room.recipient));
+      if (room.sender) await env.SKINS.delete(userRoomKey(room.sender));
     }
     return json(200, { ok: true });
   }
