@@ -162,12 +162,16 @@ impl Download {
 /// Downloads every missing file in parallel, reporting progress under `stage`.
 fn download_all(list: Vec<Download>, progress: &Progress, stage: &str, label: &str) -> Result<(), String> {
     use rayon::prelude::*;
-    let mut seen = HashSet::new();
-    let pending: Vec<Download> = list
+    let mut seen = HashSet::with_capacity(list.len());
+    let unique: Vec<Download> = list
         .into_iter()
         .filter(|d| seen.insert(d.path.clone()))
-        .filter(|d| !d.satisfied())
         .collect();
+    let pending: Vec<Download> = if unique.len() > 32 {
+        unique.into_par_iter().filter(|d| !d.satisfied()).collect()
+    } else {
+        unique.into_iter().filter(|d| !d.satisfied()).collect()
+    };
     let total = pending.len();
     if total == 0 {
         return Ok(());
@@ -699,26 +703,49 @@ fn share_skins_in_instance(
         set_cfg_values(inst_dir, &[("IkaShareSkins", "false".to_string())]);
         return;
     }
-    let result = if existing.is_some() {
-        crate::skinrestorer_setup::merge_config(gdir, service).map(|_| None)
-    } else {
-        crate::skinrestorer_setup::install_into(agent, gdir, mc_version, loader, service).map(|_| {
-            crate::skinrestorer_setup::has_skinrestorer(&mods)
-        })
-    };
-    match result {
-        Ok(Some(jar)) => {
-            set_cfg_values(inst_dir, &[("IkaSkinRestorerJar", jar)]);
-            progress.emit(
-                "skins-lan",
-                "SkinRestorer añadido: al abrir tu mundo en LAN, tus amigos verán las skins (bórralo de la carpeta mods si no lo quieres)",
-                0,
-                0,
-            );
-        }
-        Ok(None) => {}
-        Err(e) => progress.emit("skin-warn", &format!("No se pudo preparar SkinRestorer para LAN ({})", e), 0, 0),
+    let check_tag = format!("{}:{}", mc_version, loader);
+    if existing.is_some() {
+        let _ = crate::skinrestorer_setup::merge_config(gdir, service);
+        return;
     }
+    if cfg.get("IkaSkinRestorerChecked").map_or(false, |v| v == &check_tag) {
+        return;
+    }
+    let inst_dir_bg = inst_dir.to_path_buf();
+    let gdir_bg = gdir.to_path_buf();
+    let mc_bg = mc_version.to_string();
+    let loader_bg = loader.to_string();
+    let service_bg = service.to_string();
+    let progress_bg = progress.clone();
+    let agent_bg = agent.clone();
+    std::thread::spawn(move || {
+        let mods_bg = gdir_bg.join("mods");
+        let res = crate::skinrestorer_setup::install_into(&agent_bg, &gdir_bg, &mc_bg, &loader_bg, &service_bg)
+            .map(|_| crate::skinrestorer_setup::has_skinrestorer(&mods_bg));
+        match res {
+            Ok(Some(jar)) => {
+                set_cfg_values(
+                    &inst_dir_bg,
+                    &[
+                        ("IkaSkinRestorerJar", jar),
+                        ("IkaSkinRestorerChecked", check_tag),
+                    ],
+                );
+                progress_bg.emit(
+                    "skins-lan",
+                    "SkinRestorer añadido: al abrir tu mundo en LAN, tus amigos verán las skins (bórralo de la carpeta mods si no lo quieres)",
+                    0,
+                    0,
+                );
+            }
+            Ok(None) => {
+                set_cfg_values(&inst_dir_bg, &[("IkaSkinRestorerChecked", check_tag)]);
+            }
+            Err(_) => {
+                set_cfg_values(&inst_dir_bg, &[("IkaSkinRestorerChecked", check_tag)]);
+            }
+        }
+    });
 }
 
 /// Rewrites (or adds) keys of the instance's instance.cfg, keeping everything else.
@@ -763,7 +790,13 @@ fn pick_java(
         if override_on || cfg.get("OverrideJavaLocation").is_none() {
             let p = to_javaw(jp);
             if p.exists() {
-                return Ok(p);
+                // If automatically cached (not explicit override), verify major version still matches profile
+                let compatible = override_on
+                    || profile.java_majors.is_empty()
+                    || java_major_of(&p).map_or(true, |m| profile.java_majors.contains(&m));
+                if compatible {
+                    return Ok(p);
+                }
             }
         }
     }
@@ -802,19 +835,29 @@ fn pick_java(
         return Ok(javaw);
     }
 
-    // 3. Automatic
+    // 3. Automatic (persist resolved JavaPath so subsequent launches skip full-disk Java scan)
     let wanted: Vec<u32> = if profile.java_majors.is_empty() { vec![8] } else { profile.java_majors.clone() };
     let installed = crate::list_java_installations();
     for major in &wanted {
         if let Some(j) = installed.iter().find(|j| j.major == *major && Path::new(&j.path).exists()) {
-            return Ok(PathBuf::from(&j.path));
+            let javaw = PathBuf::from(&j.path);
+            set_cfg_values(
+                inst_dir,
+                &[("JavaPath", javaw.to_string_lossy().replace('\\', "/"))],
+            );
+            return Ok(javaw);
         }
     }
 
     let major = wanted[0];
     progress.emit("java", &format!("Descargando Java {} de Mojang...", major), 0, 0);
     let inst = crate::download_java_runtime_inner("mojang", major, None, profile.java_name.clone())?;
-    Ok(PathBuf::from(inst.path))
+    let javaw = PathBuf::from(inst.path);
+    set_cfg_values(
+        inst_dir,
+        &[("JavaPath", javaw.to_string_lossy().replace('\\', "/"))],
+    );
+    Ok(javaw)
 }
 
 fn copy_if_missing(src: &Path, dst: &Path) {
@@ -829,7 +872,22 @@ fn copy_if_missing(src: &Path, dst: &Path) {
 
 /// Extracts old-style native jars (LWJGL 2 era) into `natives_dir`. LWJGL 3 natives are
 /// regular classpath jars that LWJGL unpacks by itself.
+/// Uses `.ika-natives.stamp` to avoid deleting and re-extracting DLLs on every launch
+/// (which otherwise triggers Windows Defender real-time scanning on every startup).
 fn extract_natives(jars: &[(PathBuf, Vec<String>)], natives_dir: &Path) -> Result<(), String> {
+    let stamp_file = natives_dir.join(".ika-natives.stamp");
+    let mut stamp = String::new();
+    for (jar, excludes) in jars {
+        let len = std::fs::metadata(jar).map(|m| m.len()).unwrap_or(0);
+        stamp.push_str(&format!("{}|{}|{}\n", jar.display(), len, excludes.join(",")));
+    }
+    if natives_dir.is_dir() {
+        if let Ok(existing_stamp) = std::fs::read_to_string(&stamp_file) {
+            if existing_stamp == stamp {
+                return Ok(());
+            }
+        }
+    }
     let _ = std::fs::remove_dir_all(natives_dir);
     std::fs::create_dir_all(natives_dir).map_err(|e| e.to_string())?;
     for (jar, excludes) in jars {
@@ -850,6 +908,7 @@ fn extract_natives(jars: &[(PathBuf, Vec<String>)], natives_dir: &Path) -> Resul
             std::io::copy(&mut entry, &mut f).map_err(|e| e.to_string())?;
         }
     }
+    let _ = std::fs::write(&stamp_file, stamp);
     Ok(())
 }
 
@@ -908,6 +967,9 @@ const AUTHLIB_INJECTOR_LATEST: &str = "https://authlib-injector.yushi.moe/artifa
 fn ensure_authlib_injector(agent: &ureq::Agent) -> Result<PathBuf, String> {
     let jar = ika_root().join("authlib-injector.jar");
     let sum_file = ika_root().join("authlib-injector.sha256");
+    if jar.metadata().map(|m| m.is_file() && m.len() > 50_000).unwrap_or(false) && sum_file.is_file() {
+        return Ok(jar);
+    }
     let sha256 = |data: &[u8]| {
         use sha2::Digest;
         sha2::Sha256::digest(data).iter().map(|b| format!("{:02x}", b)).collect::<String>()
@@ -1027,8 +1089,9 @@ pub fn launch_instance(
         });
     });
 
-    // Crashes during startup (bad Java, missing file...) show up within a few seconds.
-    if let Ok(msg) = exit_rx.recv_timeout(std::time::Duration::from_secs(6)) {
+    // Crashes during immediate JVM startup (bad Java args, missing DLL...) show up within a few hundred ms;
+    // any later crash is reported asynchronously via the "mc-game-exit" event.
+    if let Ok(msg) = exit_rx.recv_timeout(std::time::Duration::from_millis(450)) {
         if !msg.is_empty() {
             progress.emit("error", &msg, 0, 0);
             return Err(msg);
@@ -1228,6 +1291,189 @@ fn spawn_output_reader<R: std::io::Read + Send + 'static>(
     })
 }
 
+/// Pre-downloads and prepares everything an instance needs (Minecraft jar, Modloader libraries,
+/// assets, Java runtime, natives, SkinRestorer, authlib-injector) without launching the game,
+/// so that when a received instance is finished, clicking Play launches immediately with zero second download.
+pub fn preinstall_instance_runtime(
+    app: Option<tauri::AppHandle>,
+    inst_dir: &Path,
+) -> Result<(), String> {
+    if !inst_dir.join("mmc-pack.json").exists() {
+        return Ok(());
+    }
+    let progress = Progress {
+        app,
+        instance: inst_dir.to_string_lossy().to_string(),
+    };
+    let agent = agent();
+    let root = ika_root();
+    let libs_dir = root.join("libraries");
+    let assets_dir = root.join("assets");
+    let cfg = read_cfg(inst_dir);
+    let gdir = game_dir(inst_dir);
+    std::fs::create_dir_all(&gdir).map_err(|e| e.to_string())?;
+
+    progress.emit("meta", "Preparando versión de Minecraft y Loader...", 0, 0);
+    let components = resolve_components(&agent, inst_dir)?;
+    let mut profile = Profile::default();
+    for (comp, meta) in &components {
+        profile.apply(comp, meta);
+    }
+    if profile.main_class.is_empty() && profile.traits.contains("legacyLaunch") {
+        if let Ok(mojang) = load_mojang_version(&agent, &profile.mc_version) {
+            profile.main_class = mojang
+                .get("mainClass")
+                .and_then(|v| v.as_str())
+                .unwrap_or("net.minecraft.launchwrapper.Launch")
+                .to_string();
+            for lib in mojang.get("libraries").and_then(|l| l.as_array()).into_iter().flatten() {
+                let name = lib.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                let key = library_key(name);
+                if lib.get("natives").is_none()
+                    && !profile.libraries.iter().any(|l| library_key(l.get("name").and_then(|n| n.as_str()).unwrap_or("")) == key)
+                {
+                    profile.libraries.push(lib.clone());
+                }
+            }
+        }
+    }
+
+    if let Some(service) = crate::device_key::skins_service_url() {
+        let loader = components.iter().find_map(|(c, _)| match c.uid.as_str() {
+            "net.fabricmc.fabric-loader" => Some("fabric"),
+            "org.quiltmc.quilt-loader" => Some("quilt"),
+            "net.minecraftforge" => Some("forge"),
+            "net.neoforged" => Some("neoforge"),
+            _ => None,
+        });
+        if let Some(loader) = loader {
+            share_skins_in_instance(&agent, inst_dir, &gdir, &cfg, &profile.mc_version, loader, &service, &progress);
+        }
+    }
+
+    let mut downloads: Vec<Download> = Vec::new();
+    let mut native_jars: Vec<(PathBuf, Vec<String>)> = Vec::new();
+    for lib in profile.libraries.iter().filter(|l| rules_allow(l)) {
+        let has_artifact = lib.pointer("/downloads/artifact").is_some() || lib.get("natives").is_none();
+        if has_artifact {
+            if let Some(d) = library_download(lib, &libs_dir, None) {
+                if !d.url.is_empty() && !d.url.ends_with('/') {
+                    downloads.push(d);
+                }
+            }
+        }
+        if let Some(cls) = native_classifier(lib) {
+            if let Some(d) = library_download(lib, &libs_dir, Some(&cls)) {
+                let excludes = str_list(lib.pointer("/extract/exclude"));
+                native_jars.push((d.path.clone(), excludes));
+                downloads.push(d);
+            }
+        }
+    }
+    for f in profile.maven_files.iter().filter(|l| rules_allow(l)) {
+        if let Some(d) = library_download(f, &libs_dir, None) {
+            if !d.url.is_empty() {
+                downloads.push(d);
+            }
+        }
+    }
+    let main_jar = profile
+        .main_jar
+        .as_ref()
+        .and_then(|j| library_download(j, &libs_dir, None))
+        .ok_or("No se encontró el jar de Minecraft en los metadatos")?;
+    downloads.push(main_jar.clone());
+
+    if let Some(log) = &profile.logging {
+        if let (Some(id), Some(url)) = (
+            log.pointer("/file/id").and_then(|v| v.as_str()),
+            log.pointer("/file/url").and_then(|v| v.as_str()),
+        ) {
+            let path = assets_dir.join("log_configs").join(id);
+            downloads.push(Download {
+                url: url.to_string(),
+                path,
+                sha1: log.pointer("/file/sha1").and_then(|v| v.as_str()).map(str::to_string),
+                size: log.pointer("/file/size").and_then(|v| v.as_u64()),
+            });
+        }
+    }
+    download_all(downloads, &progress, "libraries", "Descargando motor de Minecraft y librerías")?;
+
+    if !profile.jar_mods.is_empty() {
+        let _ = build_modded_jar(inst_dir, &main_jar.path, &profile.jar_mods);
+    }
+
+    if let Some(asset_index) = profile.asset_index.clone() {
+        let asset_id = asset_index.get("id").and_then(|v| v.as_str()).unwrap_or("legacy").to_string();
+        let index_path = assets_dir.join("indexes").join(format!("{}.json", asset_id));
+        let index_stamp_path = assets_dir.join("indexes").join(format!("{}.ika-ok", asset_id));
+        let expected_index_sha1 = asset_index.get("sha1").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
+        let index_dl = Download {
+            url: asset_index.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            path: index_path.clone(),
+            sha1: asset_index.get("sha1").and_then(|v| v.as_str()).map(str::to_string),
+            size: asset_index.get("size").and_then(|v| v.as_u64()),
+        };
+        let is_legacy_layout = asset_id == "legacy" || asset_id == "pre-1.6";
+        let fast_verified = !is_legacy_layout
+            && index_dl.satisfied()
+            && std::fs::read_to_string(&index_stamp_path)
+                .map(|s| s.trim() == expected_index_sha1 && !expected_index_sha1.is_empty())
+                .unwrap_or(false);
+        if !fast_verified {
+            let index_ok = index_dl.satisfied()
+                && index_dl.sha1.as_ref().map_or(true, |s| sha1_file(&index_path).map_or(false, |h| h.eq_ignore_ascii_case(s)));
+            if !index_ok {
+                let _ = index_dl.fetch(&agent);
+            }
+            if let Ok(index_str) = std::fs::read_to_string(&index_path) {
+                if let Ok(index) = serde_json::from_str::<Value>(&index_str) {
+                    let objects = index.get("objects").and_then(|o| o.as_object()).cloned().unwrap_or_default();
+                    let mut asset_dls = Vec::with_capacity(objects.len());
+                    for obj in objects.values() {
+                        let Some(hash) = obj.get("hash").and_then(|h| h.as_str()) else { continue };
+                        if hash.len() < 2 {
+                            continue;
+                        }
+                        asset_dls.push(Download {
+                            url: format!("{}/{}/{}", RESOURCES_URL, &hash[..2], hash),
+                            path: assets_dir.join("objects").join(&hash[..2]).join(hash),
+                            sha1: Some(hash.to_string()),
+                            size: obj.get("size").and_then(|s| s.as_u64()),
+                        });
+                    }
+                    let dl_ok = download_all(asset_dls, &progress, "assets", "Descargando recursos de Minecraft").is_ok();
+
+                    let is_virtual = index.get("virtual").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let to_resources = index.get("map_to_resources").and_then(|v| v.as_bool()).unwrap_or(false);
+                    if is_virtual || to_resources {
+                        let game_assets = if to_resources {
+                            gdir.join("resources")
+                        } else {
+                            assets_dir.join("virtual").join(&asset_id)
+                        };
+                        for (name, obj) in &objects {
+                            if let Some(hash) = obj.get("hash").and_then(|h| h.as_str()) {
+                                let src = assets_dir.join("objects").join(&hash[..2]).join(hash);
+                                copy_if_missing(&src, &game_assets.join(name.replace('/', "\\")));
+                            }
+                        }
+                    } else if dl_ok && !expected_index_sha1.is_empty() {
+                        let _ = std::fs::write(&index_stamp_path, &expected_index_sha1);
+                    }
+                }
+            }
+        }
+    }
+
+    let _ = pick_java(inst_dir, &cfg, &profile, &progress);
+    let natives_dir = inst_dir.join("natives");
+    let _ = extract_natives(&native_jars, &natives_dir);
+    let _ = ensure_authlib_injector(&agent);
+    Ok(())
+}
+
 /// Downloads everything the instance needs and starts the game process.
 pub(crate) fn prepare_and_spawn(
     progress: &Progress,
@@ -1401,59 +1647,75 @@ pub(crate) fn prepare_and_spawn(
         classpath[main_jar_slot] = build_modded_jar(&inst_dir, &main_jar.path, &profile.jar_mods)?;
     }
 
-    // 3. Assets
+    // 3. Assets (skip parsing 450 KB JSON + 4,000 stat calls if already verified via .ika-ok stamp)
     let asset_index = profile.asset_index.clone().ok_or("Faltan los assets en los metadatos")?;
     let asset_id = asset_index.get("id").and_then(|v| v.as_str()).unwrap_or("legacy").to_string();
     let index_path = assets_dir.join("indexes").join(format!("{}.json", asset_id));
+    let index_stamp_path = assets_dir.join("indexes").join(format!("{}.ika-ok", asset_id));
+    let expected_index_sha1 = asset_index.get("sha1").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
     let index_dl = Download {
         url: asset_index.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         path: index_path.clone(),
         sha1: asset_index.get("sha1").and_then(|v| v.as_str()).map(str::to_string),
         size: asset_index.get("size").and_then(|v| v.as_u64()),
     };
-    let index_ok = index_dl.satisfied()
-        && index_dl.sha1.as_ref().map_or(true, |s| sha1_file(&index_path).map_or(false, |h| h.eq_ignore_ascii_case(s)));
-    if !index_ok {
-        progress.emit("assets", "Descargando índice de assets...", 0, 0);
-        index_dl.fetch(&agent)?;
-    }
-    let index: Value = serde_json::from_str(&std::fs::read_to_string(&index_path).map_err(|e| e.to_string())?)
-        .map_err(|e| format!("Índice de assets inválido: {}", e))?;
-    let objects = index.get("objects").and_then(|o| o.as_object()).cloned().unwrap_or_default();
-    let mut asset_dls = Vec::with_capacity(objects.len());
-    for obj in objects.values() {
-        let Some(hash) = obj.get("hash").and_then(|h| h.as_str()) else { continue };
-        if hash.len() < 2 {
-            continue;
-        }
-        asset_dls.push(Download {
-            url: format!("{}/{}/{}", RESOURCES_URL, &hash[..2], hash),
-            path: assets_dir.join("objects").join(&hash[..2]).join(hash),
-            sha1: Some(hash.to_string()),
-            size: obj.get("size").and_then(|s| s.as_u64()),
-        });
-    }
-    download_all(asset_dls, progress, "assets", "Descargando assets")?;
+    let is_legacy_layout = asset_id == "legacy" || asset_id == "pre-1.6";
+    let fast_verified = !is_legacy_layout
+        && index_dl.satisfied()
+        && std::fs::read_to_string(&index_stamp_path)
+            .map(|s| s.trim() == expected_index_sha1 && !expected_index_sha1.is_empty())
+            .unwrap_or(false);
 
-    // Old asset layouts: "virtual" (1.6) and "map_to_resources" (pre-1.6) need real files.
-    let is_virtual = index.get("virtual").and_then(|v| v.as_bool()).unwrap_or(false);
-    let to_resources = index.get("map_to_resources").and_then(|v| v.as_bool()).unwrap_or(false);
-    let game_assets = if to_resources {
-        gdir.join("resources")
-    } else if is_virtual {
-        assets_dir.join("virtual").join(&asset_id)
-    } else {
+    let game_assets = if fast_verified {
         assets_dir.clone()
-    };
-    if is_virtual || to_resources {
-        progress.emit("assets", "Preparando assets antiguos...", 0, 0);
-        for (name, obj) in &objects {
-            if let Some(hash) = obj.get("hash").and_then(|h| h.as_str()) {
-                let src = assets_dir.join("objects").join(&hash[..2]).join(hash);
-                copy_if_missing(&src, &game_assets.join(name.replace('/', "\\")));
-            }
+    } else {
+        let index_ok = index_dl.satisfied()
+            && index_dl.sha1.as_ref().map_or(true, |s| sha1_file(&index_path).map_or(false, |h| h.eq_ignore_ascii_case(s)));
+        if !index_ok {
+            progress.emit("assets", "Descargando índice de assets...", 0, 0);
+            index_dl.fetch(&agent)?;
         }
-    }
+        let index: Value = serde_json::from_str(&std::fs::read_to_string(&index_path).map_err(|e| e.to_string())?)
+            .map_err(|e| format!("Índice de assets inválido: {}", e))?;
+        let objects = index.get("objects").and_then(|o| o.as_object()).cloned().unwrap_or_default();
+        let mut asset_dls = Vec::with_capacity(objects.len());
+        for obj in objects.values() {
+            let Some(hash) = obj.get("hash").and_then(|h| h.as_str()) else { continue };
+            if hash.len() < 2 {
+                continue;
+            }
+            asset_dls.push(Download {
+                url: format!("{}/{}/{}", RESOURCES_URL, &hash[..2], hash),
+                path: assets_dir.join("objects").join(&hash[..2]).join(hash),
+                sha1: Some(hash.to_string()),
+                size: obj.get("size").and_then(|s| s.as_u64()),
+            });
+        }
+        download_all(asset_dls, progress, "assets", "Descargando assets")?;
+
+        // Old asset layouts: "virtual" (1.6) and "map_to_resources" (pre-1.6) need real files.
+        let is_virtual = index.get("virtual").and_then(|v| v.as_bool()).unwrap_or(false);
+        let to_resources = index.get("map_to_resources").and_then(|v| v.as_bool()).unwrap_or(false);
+        let ga = if to_resources {
+            gdir.join("resources")
+        } else if is_virtual {
+            assets_dir.join("virtual").join(&asset_id)
+        } else {
+            assets_dir.clone()
+        };
+        if is_virtual || to_resources {
+            progress.emit("assets", "Preparando assets antiguos...", 0, 0);
+            for (name, obj) in &objects {
+                if let Some(hash) = obj.get("hash").and_then(|h| h.as_str()) {
+                    let src = assets_dir.join("objects").join(&hash[..2]).join(hash);
+                    copy_if_missing(&src, &ga.join(name.replace('/', "\\")));
+                }
+            }
+        } else if !expected_index_sha1.is_empty() {
+            let _ = std::fs::write(&index_stamp_path, &expected_index_sha1);
+        }
+        ga
+    };
 
     // 4. Java
     let java = pick_java(&inst_dir, &cfg, &profile, progress)?;
@@ -1486,7 +1748,6 @@ pub(crate) fn prepare_and_spawn(
     }
 
     // 5. Natives
-    progress.emit("natives", "Preparando nativos...", 0, 0);
     let natives_dir = inst_dir.join("natives");
     extract_natives(&native_jars, &natives_dir)?;
 
@@ -1498,29 +1759,34 @@ pub(crate) fn prepare_and_spawn(
     let mut skin_agent: Option<String> = None;
     if let Some(skin) = skin {
         progress.emit("skin", "Aplicando tu skin...", 0, 0);
-        // Publish it to the Ika skins service so other players see it on servers with
-        // SkinRestorer (only when the skin changed; never blocks the launch).
+        // Publish it to the Ika skins service in a background thread so network latency never delays game launch.
         if let Some(service) = crate::device_key::skins_service_url() {
-            match crate::device_key::publish_skin(&agent, &service, &username, &skin.png) {
-                Ok(crate::device_key::PublishOutcome::Published { claimed }) => progress.emit(
-                    "skin-published",
-                    &if claimed {
-                        format!("El nombre {} ahora es tuyo: otros jugadores verán tu skin en servidores con SkinRestorer", username)
-                    } else {
-                        "Tu skin está publicada: otros jugadores la verán en servidores con SkinRestorer".to_string()
-                    },
-                    0,
-                    0,
-                ),
-                Ok(crate::device_key::PublishOutcome::Unchanged) => {}
-                Ok(crate::device_key::PublishOutcome::NameTaken) => progress.emit(
-                    "skin-warn",
-                    &format!("El nombre {} pertenece a otro PC: en servidores con SkinRestorer se verá su skin, no la tuya", username),
-                    0,
-                    0,
-                ),
-                Err(e) => progress.emit("skin-warn", &format!("No se pudo publicar tu skin ({})", e), 0, 0),
-            }
+            let username_bg = username.clone();
+            let png_bg = skin.png.clone();
+            let progress_bg = progress.clone();
+            let agent_bg = agent.clone();
+            std::thread::spawn(move || {
+                match crate::device_key::publish_skin(&agent_bg, &service, &username_bg, &png_bg) {
+                    Ok(crate::device_key::PublishOutcome::Published { claimed }) => progress_bg.emit(
+                        "skin-published",
+                        &if claimed {
+                            format!("El nombre {} ahora es tuyo: otros jugadores verán tu skin en servidores con SkinRestorer", username_bg)
+                        } else {
+                            "Tu skin está publicada: otros jugadores la verán en servidores con SkinRestorer".to_string()
+                        },
+                        0,
+                        0,
+                    ),
+                    Ok(crate::device_key::PublishOutcome::Unchanged) => {}
+                    Ok(crate::device_key::PublishOutcome::NameTaken) => progress_bg.emit(
+                        "skin-warn",
+                        &format!("El nombre {} pertenece a otro PC: en servidores con SkinRestorer se verá su skin, no la tuya", username_bg),
+                        0,
+                        0,
+                    ),
+                    Err(e) => progress_bg.emit("skin-warn", &format!("No se pudo publicar tu skin ({})", e), 0, 0),
+                }
+            });
         }
         let setup = ensure_authlib_injector(&agent).and_then(|jar| {
             crate::skin_server::register(&username, &uuid, skin.png, skin.slim)
@@ -1563,11 +1829,32 @@ pub(crate) fn prepare_and_spawn(
     tokens.insert("launcher_version", env!("CARGO_PKG_VERSION").to_string());
 
     let mut args: Vec<String> = vec!["-Duser.language=en".to_string()];
+    let mut user_jvm_args = Vec::new();
     if cfg.get("OverrideJavaArgs").map_or(true, |v| v == "true") {
         if let Some(extra) = cfg.get("JvmArgs") {
-            args.extend(split_args(&unescape_ini(extra)));
+            user_jvm_args = split_args(&unescape_ini(extra));
         }
     }
+    let has_custom_gc = user_jvm_args.iter().any(|a| a.contains("GC") || a.starts_with("-XX:+Use"));
+    if !has_custom_gc {
+        // Fast-boot & G1GC flags tuned for rapid classloading and Minecraft window creation
+        args.extend([
+            "-XX:+UnlockExperimentalVMOptions".to_string(),
+            "-XX:+TieredCompilation".to_string(),
+            "-XX:+AlwaysActAsServerClassMachine".to_string(),
+            "-XX:+UseG1GC".to_string(),
+            "-XX:+ParallelRefProcEnabled".to_string(),
+            "-XX:MaxGCPauseMillis=200".to_string(),
+            "-XX:+DisableExplicitGC".to_string(),
+            "-XX:G1NewSizePercent=20".to_string(),
+            "-XX:G1ReservePercent=20".to_string(),
+            "-XX:G1HeapRegionSize=32M".to_string(),
+        ]);
+    }
+    // Skip redundant DataFixerUpper rule optimization on startup so the game window opens much faster
+    args.push("-Dminecraft.disableDataFixerOptimizations=true".to_string());
+    args.push("-Dfml.readTimeout=90".to_string());
+    args.extend(user_jvm_args);
     args.push("-XX:HeapDumpPath=MojangTricksIntelDriversForPerformance_javaw.exe_minecraft.exe.heapdump".to_string());
     let mem = |k: &str, d: u32| cfg.get(k).and_then(|v| v.parse::<u32>().ok()).unwrap_or(d);
     let (min_mem, max_mem) = if cfg.get("OverrideMemory").map_or(false, |v| v == "true") {
