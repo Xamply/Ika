@@ -28372,14 +28372,8 @@ window.ikaShare = ikaShare;
     const update = await check();
     if (!update) return;
 
-    const displayVer = (update.body && update.body.match(/v\d+\.\d+\.\d+\s*·\s*Patch\s*[A-Z]/i))
-      ? update.body.match(/v\d+\.\d+\.\d+\s*·\s*Patch\s*[A-Z]/i)[0]
-      : (update.version.includes("-patch-")
-          ? `v${update.version.split("-patch-")[0]} · Patch ${update.version.split("-patch-")[1].toUpperCase()}`
-          : `v${update.version}`);
-
     btn.classList.remove("hidden");
-    if (label) label.textContent = `Actualizar (${displayVer})`;
+    if (label) label.textContent = `Actualizar (v${update.version})`;
 
     btn.addEventListener("click", async () => {
       btn.classList.add("is-downloading");
@@ -28387,7 +28381,7 @@ window.ikaShare = ikaShare;
 
       const launcherDl = startDownloadNotification({
         id: "launcher-update",
-        title: `Ika Launcher ${displayVer}`,
+        title: `Ika Launcher v${update.version}`,
         text: "Descargando actualización...",
         progress: 0
       });
