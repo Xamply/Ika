@@ -11215,19 +11215,22 @@ async function initHomeInstanceSwitcher() {
         let modpackDl = null;
         if (modpack) {
           modpackDl = startDownloadNotification({
-            id: `modpack-${name}`,
-            title: `Modpack: ${name}`,
+            id: `modpack-${name.trim().toLowerCase()}`,
+            title: name,
             text: "Preparando descarga e instalación...",
-            progress: null
+            progress: 0
           });
           try {
             unlistenModpackProgress = await listen("modpack-install-progress", (ev) => {
               const msg = ev?.payload?.message;
+              const done = ev?.payload?.done || 0;
+              const total = ev?.payload?.total || 0;
+              const pct = total > 0 ? Math.round((done / total) * 100) : null;
               if (msg && submitSpan) {
                 submitSpan.textContent = msg;
               }
-              if (msg) {
-                modpackDl?.update(null, msg);
+              if (modpackDl) {
+                modpackDl.update(pct, msg || "Descargando mods del modpack...");
               }
             });
           } catch (_) {}
@@ -11256,7 +11259,7 @@ async function initHomeInstanceSwitcher() {
         }
 
         if (modpackDl) {
-          modpackDl.finish(`Modpack "${name}" instalado correctamente`);
+          modpackDl.finish("Modpack instalado correctamente");
         }
 
         await triggerModalVictorySweep(el.modalCreateInstance);
@@ -19937,6 +19940,16 @@ try {
       if (!n.text || n.text.includes("...")) n.text = "Descarga completada";
     }
   });
+  // Clean duplicate titles so only the newest state of each download is kept
+  const seenTitles = new Set();
+  notifications = notifications.filter((n) => {
+    if (n.type === "download") {
+      const key = `${n.title.toLowerCase()}`;
+      if (seenTitles.has(key)) return false;
+      seenTitles.add(key);
+    }
+    return true;
+  });
 } catch {
   notifications = [];
 }
@@ -19978,18 +19991,31 @@ function startDownloadNotification({ id, title, text = "Iniciando descarga...", 
     item.ts = Date.now();
     item.read = false;
   } else {
-    item = {
-      id: downloadId,
-      type: "download",
-      title: title || "Descarga",
-      text,
-      progress,
-      status: "downloading",
-      ts: Date.now(),
-      read: false
-    };
-    notifications.unshift(item);
-    notifications = notifications.slice(0, NOTIFY_MAX);
+    // If a notification with this title already exists, reuse it in place so no duplicate cards appear
+    const existingByTitle = title ? notifications.find((n) => n.type === "download" && n.title.toLowerCase() === title.toLowerCase()) : null;
+    if (existingByTitle) {
+      existingByTitle.id = downloadId;
+      existingByTitle.title = title;
+      existingByTitle.text = text;
+      existingByTitle.progress = progress;
+      existingByTitle.status = "downloading";
+      existingByTitle.ts = Date.now();
+      existingByTitle.read = false;
+      item = existingByTitle;
+    } else {
+      item = {
+        id: downloadId,
+        type: "download",
+        title: title || "Descarga",
+        text,
+        progress,
+        status: "downloading",
+        ts: Date.now(),
+        read: false
+      };
+      notifications.unshift(item);
+      notifications = notifications.slice(0, NOTIFY_MAX);
+    }
   }
   saveNotifications();
   renderNotifications();
@@ -21112,78 +21138,51 @@ async function handlePlayGame(instOverride) {
 }
 
 // --- Launch progress card (downloads of Minecraft files, Java, natives...) ---
-let launchProgressHideTimer = null;
-
-function showLaunchProgress(instanceName, message, done, total, isError = false) {
-  let card = document.getElementById("launch-progress-card");
-  if (!card) {
-    card = document.createElement("div");
-    card.id = "launch-progress-card";
-    card.className = "launch-progress-card";
-    card.innerHTML = `
-      <div class="launch-progress-head">
-        <span class="launch-progress-title"></span>
-        <button type="button" class="launch-progress-close" aria-label="Cerrar">✕</button>
-      </div>
-      <div class="launch-progress-msg"></div>
-      <div class="launch-progress-bar"><div class="launch-progress-fill"></div></div>
-      <div class="launch-progress-count"></div>`;
-    card.querySelector(".launch-progress-close").addEventListener("click", () => card.classList.add("hidden"));
-    document.body.appendChild(card);
-  }
-  clearTimeout(launchProgressHideTimer);
-  card.classList.remove("hidden");
-  card.classList.toggle("is-error", isError);
-  card.querySelector(".launch-progress-title").textContent = isError ? `No se pudo iniciar ${instanceName}` : instanceName;
-  card.querySelector(".launch-progress-msg").textContent = message;
-  const fill = card.querySelector(".launch-progress-fill");
-  const determinate = total > 0;
-  card.classList.toggle("is-indeterminate", !determinate && !isError);
-  fill.style.width = determinate ? `${Math.round((done / total) * 100)}%` : "100%";
-  card.querySelector(".launch-progress-count").textContent = determinate ? `${done} / ${total}` : "";
+function showLaunchProgress(_instanceName, _message, _done, _total, _isError = false) {
+  // Floating box completely disabled: all download feedback is handled exclusively in notifications
+  const card = document.getElementById("launch-progress-card");
+  if (card) card.remove();
 }
 
 let lastLaunchStageLogged = "";
 let mcLaunchDlTracker = new Map();
 listen("mc-launch-progress", (event) => {
   const p = event.payload || {};
-  const name = getInstanceNameFromPath(p.instance || "") || "Minecraft";
-  const instKey = normInstancePath(p.instance || "");
+  // Skip modpack stage events here because modpack-install-progress already handles modpacks!
+  if (p.stage === "modpack" || p.stage === "download_modpack" || (p.message && /modpack/i.test(p.message))) {
+    return;
+  }
+
+  const cleanName = (getInstanceNameFromPath(p.instance || "") || p.instance || "Minecraft").trim();
+  const instDlId = `mc-dl-${cleanName.toLowerCase()}`;
   const isDownload = p.stage === "libraries" || p.stage === "assets" || p.stage === "java" || (p.message && /descarg/i.test(p.message));
 
   if (p.stage === "error") {
-    showLaunchProgress(name, p.message || "Error", 0, 0, true);
     lastLaunchStageLogged = "";
-    const tracker = mcLaunchDlTracker.get(instKey);
-    if (tracker) {
-      tracker.error(p.message || "Error al descargar recursos");
-      mcLaunchDlTracker.delete(instKey);
-    }
+    failDownloadNotification(instDlId, p.message || "Error al descargar recursos");
+    mcLaunchDlTracker.delete(instDlId);
     return;
   }
   if (p.stage === "done") {
     setGameState(p.instance, "running");
-    const tracker = mcLaunchDlTracker.get(instKey);
-    if (tracker) {
-      tracker.finish("Recursos descargados correctamente");
-      mcLaunchDlTracker.delete(instKey);
-    }
+    finishDownloadNotification(instDlId, "Recursos descargados correctamente");
+    mcLaunchDlTracker.delete(instDlId);
   } else if (p.message) {
     setGameState(p.instance, "preparing", p.message.replace(/\.\.\.$/, ""));
   }
 
   if (isDownload) {
     const pct = p.total > 0 ? Math.round((p.done / p.total) * 100) : null;
-    let tracker = mcLaunchDlTracker.get(instKey);
     const textDesc = p.total > 0 ? `${p.message || "Descargando"} (${p.done}/${p.total})` : (p.message || "Descargando recursos...");
+    let tracker = mcLaunchDlTracker.get(instDlId);
     if (!tracker) {
       tracker = startDownloadNotification({
-        id: `mc-dl-${instKey}`,
-        title: `${name} · Recursos`,
+        id: instDlId,
+        title: `${cleanName} · Recursos`,
         text: textDesc,
         progress: pct
       });
-      mcLaunchDlTracker.set(instKey, tracker);
+      mcLaunchDlTracker.set(instDlId, tracker);
     } else {
       tracker.update(pct, textDesc);
     }
@@ -21195,10 +21194,6 @@ listen("mc-launch-progress", (event) => {
     const stageText = p.total > 0 ? `${p.message} (${p.total} archivos)` : p.message;
     logToConsole("SYS", stageText, "sys");
     pushGameLog(p.instance, [{ level: "INFO", text: `[Launcher] ${stageText}`, ts: Date.now() }]);
-  }
-  showLaunchProgress(name, p.message || "", p.done || 0, p.total || 0);
-  if (p.stage === "done") {
-    launchProgressHideTimer = setTimeout(() => document.getElementById("launch-progress-card")?.classList.add("hidden"), 2500);
   }
 });
 
