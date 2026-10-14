@@ -11228,9 +11228,10 @@ async function initHomeInstanceSwitcher() {
               const msg = ev?.payload?.message;
               const done = ev?.payload?.done || 0;
               const total = ev?.payload?.total || 0;
+              const speed = ev?.payload?.speed || null;
               const pct = total > 0 ? Math.round((done / total) * 100) : null;
               if (modpackDl) {
-                modpackDl.update(pct, msg || "Descargando mods del modpack...");
+                modpackDl.update(pct, msg || "Descargando mods del modpack...", speed);
               }
             });
           } catch (_) {}
@@ -19982,13 +19983,14 @@ function notify({ type = "info", title, text = "", shareId = null }) {
 }
 window.ikaNotify = notify;
 
-function startDownloadNotification({ id, title, text = "Iniciando descarga...", progress = null }) {
+function startDownloadNotification({ id, title, text = "Iniciando descarga...", progress = null, speed = null }) {
   const downloadId = id || `dl-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   let item = notifications.find((n) => n.id === downloadId);
   if (item) {
     item.title = title || item.title;
     item.text = text;
     item.progress = progress;
+    item.speed = speed || item.speed || null;
     item.status = "downloading";
     item.ts = Date.now();
     item.read = false;
@@ -20000,6 +20002,7 @@ function startDownloadNotification({ id, title, text = "Iniciando descarga...", 
       existingByTitle.title = title;
       existingByTitle.text = text;
       existingByTitle.progress = progress;
+      existingByTitle.speed = speed || existingByTitle.speed || null;
       existingByTitle.status = "downloading";
       existingByTitle.ts = Date.now();
       existingByTitle.read = false;
@@ -20011,6 +20014,7 @@ function startDownloadNotification({ id, title, text = "Iniciando descarga...", 
         title: title || "Descarga",
         text,
         progress,
+        speed: speed || null,
         status: "downloading",
         ts: Date.now(),
         read: false
@@ -20025,19 +20029,20 @@ function startDownloadNotification({ id, title, text = "Iniciando descarga...", 
 
   return {
     id: downloadId,
-    update: (p, t) => updateDownloadNotification(downloadId, p, t),
+    update: (p, t, s) => updateDownloadNotification(downloadId, p, t, s),
     finish: (t) => finishDownloadNotification(downloadId, t),
     error: (e) => failDownloadNotification(downloadId, e)
   };
 }
 
-function updateDownloadNotification(id, progress, text) {
+function updateDownloadNotification(id, progress, text, speed) {
   const item = notifications.find((n) => n.id === id);
   if (!item) return;
   if (typeof progress === "number") {
     item.progress = Math.min(100, Math.max(0, Math.round(progress)));
   }
   if (text) item.text = text;
+  if (speed !== undefined) item.speed = speed;
   saveNotifications();
   renderNotifications();
 }
@@ -20047,6 +20052,7 @@ function finishDownloadNotification(id, text = "Descarga completada") {
   if (!item) return;
   item.status = "completed";
   item.progress = 100;
+  item.speed = null;
   if (text) item.text = text;
   item.read = false;
   saveNotifications();
@@ -20058,6 +20064,7 @@ function failDownloadNotification(id, errorText = "Error en la descarga") {
   const item = notifications.find((n) => n.id === id);
   if (!item) return;
   item.status = "error";
+  item.speed = null;
   if (errorText) item.text = String(errorText);
   item.read = false;
   saveNotifications();
@@ -20128,7 +20135,10 @@ function renderNotifications() {
                   <div class="notify-progress-track">
                     <div class="notify-progress-fill ${n.progress == null ? 'is-indeterminate' : ''}" style="width: ${n.progress != null ? n.progress : 45}%;"></div>
                   </div>
-                  ${n.progress != null ? `<span class="notify-progress-pct">${n.progress}%</span>` : ''}
+                  <div class="notify-progress-meta">
+                    ${n.speed ? `<span class="notify-progress-speed">${escapeHtml(n.speed)}</span>` : ""}
+                    ${n.progress != null ? `<span class="notify-progress-pct">${n.progress}%</span>` : ''}
+                  </div>
                 </div>
               ` : ""}
               ${
@@ -21175,6 +21185,7 @@ listen("mc-launch-progress", (event) => {
 
   if (isDownload) {
     const pct = p.total > 0 ? Math.round((p.done / p.total) * 100) : null;
+    const speed = p.speed || null;
     const textDesc = p.total > 0 ? `${p.message || "Descargando"} (${p.done}/${p.total})` : (p.message || "Descargando recursos...");
     let tracker = mcLaunchDlTracker.get(instDlId);
     if (!tracker) {
@@ -21182,11 +21193,12 @@ listen("mc-launch-progress", (event) => {
         id: instDlId,
         title: `${cleanName} · Recursos`,
         text: textDesc,
-        progress: pct
+        progress: pct,
+        speed: speed
       });
       mcLaunchDlTracker.set(instDlId, tracker);
     } else {
-      tracker.update(pct, textDesc);
+      tracker.update(pct, textDesc, speed);
     }
   }
 

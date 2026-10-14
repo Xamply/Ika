@@ -63,19 +63,38 @@ pub(crate) struct Progress {
     pub(crate) instance: String,
 }
 
+fn format_download_speed(bytes_per_sec: f64) -> String {
+    if bytes_per_sec >= 1024.0 * 1024.0 * 1024.0 {
+        format!("{:.1} GB/s", bytes_per_sec / (1024.0 * 1024.0 * 1024.0))
+    } else if bytes_per_sec >= 1024.0 * 1024.0 {
+        format!("{:.1} MB/s", bytes_per_sec / (1024.0 * 1024.0))
+    } else if bytes_per_sec >= 1024.0 {
+        format!("{:.0} KB/s", bytes_per_sec / 1024.0)
+    } else if bytes_per_sec > 0.0 {
+        format!("{:.0} B/s", bytes_per_sec)
+    } else {
+        String::new()
+    }
+}
+
 impl Progress {
     fn emit(&self, stage: &str, message: &str, done: usize, total: usize) {
+        self.emit_with_speed(stage, message, done, total, None);
+    }
+
+    fn emit_with_speed(&self, stage: &str, message: &str, done: usize, total: usize, speed: Option<&str>) {
         let Some(app) = &self.app else { return };
-        let _ = app.emit(
-            "mc-launch-progress",
-            serde_json::json!({
-                "instance": self.instance,
-                "stage": stage,
-                "message": message,
-                "done": done,
-                "total": total,
-            }),
-        );
+        let mut obj = serde_json::json!({
+            "instance": self.instance,
+            "stage": stage,
+            "message": message,
+            "done": done,
+            "total": total,
+        });
+        if let Some(s) = speed {
+            obj["speed"] = serde_json::Value::String(s.to_string());
+        }
+        let _ = app.emit("mc-launch-progress", obj);
     }
 }
 
@@ -126,7 +145,7 @@ impl Download {
         }
     }
 
-    fn fetch(&self, agent: &ureq::Agent) -> Result<(), String> {
+    fn fetch(&self, agent: &ureq::Agent) -> Result<usize, String> {
         let mut last_err = String::new();
         for attempt in 0..3 {
             if attempt > 0 {
@@ -148,9 +167,10 @@ impl Download {
                     let mut tmp = self.path.clone().into_os_string();
                     tmp.push(".part");
                     let tmp = PathBuf::from(tmp);
+                    let len = data.len();
                     std::fs::write(&tmp, &data).map_err(|e| format!("{}: {}", self.path.display(), e))?;
                     std::fs::rename(&tmp, &self.path).map_err(|e| format!("{}: {}", self.path.display(), e))?;
-                    return Ok(());
+                    return Ok(len);
                 }
                 Err(e) => last_err = e,
             }
@@ -178,6 +198,8 @@ fn download_all(list: Vec<Download>, progress: &Progress, stage: &str, label: &s
     }
     progress.emit(stage, label, 0, total);
     let done = AtomicUsize::new(0);
+    let downloaded_bytes = AtomicUsize::new(0);
+    let start_time = std::time::Instant::now();
     let last_emit = Mutex::new(std::time::Instant::now());
     let errors = Mutex::new(Vec::<String>::new());
     let pool = rayon::ThreadPoolBuilder::new()
@@ -186,14 +208,32 @@ fn download_all(list: Vec<Download>, progress: &Progress, stage: &str, label: &s
         .map_err(|e| e.to_string())?;
     pool.install(|| {
         pending.par_iter().for_each_init(agent, |agent, d| {
-            if let Err(e) = d.fetch(agent) {
-                errors.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+            match d.fetch(agent) {
+                Ok(bytes) => {
+                    downloaded_bytes.fetch_add(bytes, Ordering::Relaxed);
+                }
+                Err(e) => {
+                    errors.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+                }
             }
             let n = done.fetch_add(1, Ordering::SeqCst) + 1;
             let mut last = last_emit.lock().unwrap_or_else(|e| e.into_inner());
             if n == total || last.elapsed().as_millis() > 120 {
                 *last = std::time::Instant::now();
-                progress.emit(stage, label, n, total);
+                let elapsed = start_time.elapsed().as_secs_f64();
+                let bytes = downloaded_bytes.load(Ordering::Relaxed);
+                let speed_str = if elapsed > 0.25 && bytes > 0 {
+                    format_download_speed((bytes as f64) / elapsed)
+                } else {
+                    String::new()
+                };
+                progress.emit_with_speed(
+                    stage,
+                    label,
+                    n,
+                    total,
+                    if speed_str.is_empty() { None } else { Some(&speed_str) },
+                );
             }
         });
     });
@@ -2155,14 +2195,21 @@ pub struct ModpackInstallOutcome {
 }
 
 fn emit_modpack_progress(app: &Option<tauri::AppHandle>, inst_name: &str, stage: &str, message: &str, done: usize, total: usize) {
+    emit_modpack_progress_with_speed(app, inst_name, stage, message, done, total, None);
+}
+
+fn emit_modpack_progress_with_speed(app: &Option<tauri::AppHandle>, inst_name: &str, stage: &str, message: &str, done: usize, total: usize, speed: Option<&str>) {
     let Some(app) = app else { return };
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "instance": inst_name,
         "stage": stage,
         "message": message,
         "done": done,
         "total": total,
     });
+    if let Some(s) = speed {
+        payload["speed"] = serde_json::Value::String(s.to_string());
+    }
     let _ = app.emit("modpack-install-progress", payload.clone());
     let _ = app.emit("mc-launch-progress", payload);
 }
@@ -2260,10 +2307,10 @@ struct ModpackFileTask {
     sha1: Option<String>,
 }
 
-fn fetch_modpack_task(agent: &ureq::Agent, task: &ModpackFileTask) -> Result<(), String> {
+fn fetch_modpack_task(agent: &ureq::Agent, task: &ModpackFileTask) -> Result<usize, String> {
     if let Ok(m) = std::fs::metadata(&task.path) {
         if m.is_file() && m.len() > 0 {
-            return Ok(());
+            return Ok(0);
         }
     }
     let mut candidate_urls = task.urls.clone();
@@ -2297,9 +2344,10 @@ fn fetch_modpack_task(agent: &ureq::Agent, task: &ModpackFileTask) -> Result<(),
                     let mut tmp = task.path.clone().into_os_string();
                     tmp.push(".part");
                     let tmp = PathBuf::from(tmp);
+                    let len = data.len();
                     std::fs::write(&tmp, &data).map_err(|e| e.to_string())?;
                     std::fs::rename(&tmp, &task.path).map_err(|e| e.to_string())?;
-                    return Ok(());
+                    return Ok(len);
                 }
                 Ok(_) => last_err = format!("Respuesta vacía de {}", url),
                 Err(e) => last_err = e,
@@ -2352,7 +2400,9 @@ fn download_modpack_tasks(
         total,
     );
     let done = AtomicUsize::new(0);
+    let downloaded_bytes = AtomicUsize::new(0);
     let failed = AtomicUsize::new(0);
+    let start_time = std::time::Instant::now();
     let last_emit = Mutex::new(std::time::Instant::now());
     let first_err = Mutex::new(None::<String>);
 
@@ -2363,24 +2413,37 @@ fn download_modpack_tasks(
 
     pool.install(|| {
         pending.par_iter().for_each_init(agent, |ag, task| {
-            if let Err(e) = fetch_modpack_task(ag, task) {
-                failed.fetch_add(1, Ordering::SeqCst);
-                let mut fe = first_err.lock().unwrap_or_else(|e| e.into_inner());
-                if fe.is_none() {
-                    *fe = Some(e);
+            match fetch_modpack_task(ag, task) {
+                Ok(bytes) => {
+                    downloaded_bytes.fetch_add(bytes, Ordering::Relaxed);
+                }
+                Err(e) => {
+                    failed.fetch_add(1, Ordering::SeqCst);
+                    let mut fe = first_err.lock().unwrap_or_else(|e| e.into_inner());
+                    if fe.is_none() {
+                        *fe = Some(e);
+                    }
                 }
             }
             let n = done.fetch_add(1, Ordering::SeqCst) + 1;
             let mut last = last_emit.lock().unwrap_or_else(|e| e.into_inner());
             if n == total || last.elapsed().as_millis() > 100 {
                 *last = std::time::Instant::now();
-                emit_modpack_progress(
+                let elapsed = start_time.elapsed().as_secs_f64();
+                let bytes = downloaded_bytes.load(Ordering::Relaxed);
+                let speed_str = if elapsed > 0.25 && bytes > 0 {
+                    format_download_speed((bytes as f64) / elapsed)
+                } else {
+                    String::new()
+                };
+                emit_modpack_progress_with_speed(
                     app,
                     inst_name,
                     "modpack-mods",
                     &format!("Descargando mods del modpack ({}/{})...", n, total),
                     n,
                     total,
+                    if speed_str.is_empty() { None } else { Some(&speed_str) },
                 );
             }
         });

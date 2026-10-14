@@ -3228,20 +3228,7 @@ body {
 }
 
 .titlebar-app-version {
-  display: inline-flex;
-  align-items: center;
-  font-size: 10.5px;
-  font-weight: 700;
-  color: #38bdf8;
-  background: rgba(56, 189, 248, 0.12);
-  border: 1px solid rgba(56, 189, 248, 0.28);
-  border-radius: 6px;
-  padding: 1.5px 7px;
-  margin-left: 9px;
-  letter-spacing: 0.35px;
-  pointer-events: none;
-  white-space: nowrap;
-  box-shadow: 0 0 10px rgba(56, 189, 248, 0.15);
+  display: none !important;
 }
 
 /* Central Notch ("Montañita" / Dynamic Island) */
@@ -3673,15 +3660,15 @@ body .titlebar-update-btn:hover .update-btn-icon {
 
 .notify-progress-wrap {
   display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 5px;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 6px;
   margin-bottom: 3px;
   width: 100%;
 }
 
 .notify-progress-track {
-  flex: 1;
+  width: 100%;
   height: 6px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.1);
@@ -3708,7 +3695,30 @@ body .titlebar-update-btn:hover .update-btn-icon {
   100% { transform: translateX(250%); }
 }
 
+.notify-progress-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  min-height: 18px;
+}
+
+.notify-progress-speed {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: #38bdf8;
+  background: rgba(56, 189, 248, 0.14);
+  border: 1px solid rgba(56, 189, 248, 0.28);
+  padding: 1px 7px;
+  border-radius: 5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  letter-spacing: 0.2px;
+}
+
 .notify-progress-pct {
+  margin-left: auto;
   flex-shrink: 0;
   font-size: 12.5px;
   font-weight: 700;
@@ -14234,7 +14244,7 @@ body.has-we-active .home-bg-bottom-gradient {
   min-height: unset;
   display: flex;
   flex-direction: column;
-  background: rgba(10, 6, 24, 0.88);
+  background: #040416 !important;
   backdrop-filter: blur(28px);
   -webkit-backdrop-filter: blur(28px);
   border: 1px solid rgba(168, 85, 247, 0.25);
@@ -22506,8 +22516,8 @@ body.theme-crimson .profile-account-item.active .account-item-name {
   align-items: center !important;
   justify-content: space-between !important;
   padding: 14px 24px 16px !important;
-  background: rgba(9, 6, 22, 0.88) !important;
-  border-top: 1px solid rgba(79, 70, 229, 0.35) !important;
+  background: #040416 !important;
+  border-top: 1px solid rgba(255, 255, 255, 0.08) !important;
   position: relative !important;
   z-index: 2 !important;
   margin-top: auto !important;
