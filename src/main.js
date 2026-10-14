@@ -11220,15 +11220,15 @@ async function initHomeInstanceSwitcher() {
             text: "Preparando descarga e instalación...",
             progress: 0
           });
+          // Cerrar modal automáticamente para no bloquear al usuario mientras descarga
+          closeCreateInstModal();
+          setNotifyPanelOpen(true);
           try {
             unlistenModpackProgress = await listen("modpack-install-progress", (ev) => {
               const msg = ev?.payload?.message;
               const done = ev?.payload?.done || 0;
               const total = ev?.payload?.total || 0;
               const pct = total > 0 ? Math.round((done / total) * 100) : null;
-              if (msg && submitSpan) {
-                submitSpan.textContent = msg;
-              }
               if (modpackDl) {
                 modpackDl.update(pct, msg || "Descargando mods del modpack...");
               }
@@ -11262,8 +11262,10 @@ async function initHomeInstanceSwitcher() {
           modpackDl.finish("Modpack instalado correctamente");
         }
 
-        await triggerModalVictorySweep(el.modalCreateInstance);
-        closeCreateInstModal();
+        if (!modpack) {
+          await triggerModalVictorySweep(el.modalCreateInstance);
+          closeCreateInstModal();
+        }
         if (modpack && createdInst && typeof createdInst.mod_count === "number") {
           showToast(`¡Modpack "${name}" instalado (${createdInst.mod_count} mods)! ⭐`);
         } else {
@@ -20114,7 +20116,7 @@ function renderNotifications() {
                 : (NOTIFY_ICON[n.type] || NOTIFY_ICON.info);
 
             return `<div class="notify-item is-${n.type} ${n.read ? "" : "is-unread"} ${n.status ? `is-status-${n.status}` : ""}" data-id="${n.id}">
-            <span class="notify-icon"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${iconSvg}</svg></span>
+            <span class="notify-icon"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${iconSvg}</svg></span>
             <div class="notify-text">
               <div class="notify-item-head-row">
                 <span class="notify-item-title">${escapeHtml(n.title)}</span>

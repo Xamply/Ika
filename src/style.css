@@ -3482,21 +3482,21 @@ body .titlebar-update-btn:hover .update-btn-icon {
 .notify-panel {
   position: fixed;
   top: calc(var(--titlebar-height, 52px) - 4px);
-  right: 10px;
+  right: 12px;
   z-index: 100000;
   display: flex;
   flex-direction: column;
-  width: 340px;
+  width: 440px;
   max-width: calc(100vw - 24px);
-  max-height: min(480px, calc(100vh - 90px));
+  max-height: min(600px, calc(100vh - 80px));
   border-radius: 14px;
-  background: rgba(4, 4, 22, 0.8);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
-  border: none;
-  box-shadow: 0 22px 50px rgba(0, 0, 0, 0.65);
-  color: #e6e0ff;
-  font-size: 13px;
+  background: rgba(8, 8, 26, 0.94);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(139, 92, 246, 0.25);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.75), 0 0 24px rgba(124, 92, 255, 0.12);
+  color: #f1f0fb;
+  font-size: 14px;
   animation: notify-in 0.18s ease-out both;
 }
 
@@ -3512,28 +3512,30 @@ body .titlebar-update-btn:hover .update-btn-icon {
 .notify-head {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 12px 10px 10px 14px;
+  gap: 6px;
+  padding: 14px 14px 12px 18px;
   border-bottom: 1px solid rgba(124, 92, 255, 0.18);
 }
 
 .notify-title {
   flex: 1;
-  font-size: 14px;
+  font-size: 15.5px;
   font-weight: 700;
   color: #fff;
+  letter-spacing: 0.2px;
 }
 
 .notify-head-btn {
-  height: 26px;
-  padding: 0 8px;
+  height: 28px;
+  padding: 0 10px;
   border: 0;
-  border-radius: 7px;
+  border-radius: 8px;
   background: transparent;
-  color: #a99fd6;
+  color: #b8aff0;
   font: inherit;
-  font-size: 11.5px;
+  font-size: 12.5px;
   cursor: pointer;
+  transition: all 0.15s ease;
 }
 
 .notify-head-btn:hover {
@@ -3544,9 +3546,9 @@ body .titlebar-update-btn:hover .update-btn-icon {
 .notify-list {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 6px;
   min-height: 0;
-  padding: 6px;
+  padding: 8px;
   overflow-y: auto;
   scrollbar-width: thin;
   scrollbar-color: rgba(167, 139, 250, 0.35) transparent;
@@ -3556,36 +3558,29 @@ body .titlebar-update-btn:hover .update-btn-icon {
   position: relative;
   display: flex;
   align-items: flex-start;
-  gap: 10px;
-  padding: 9px 30px 9px 9px;
-  border-radius: 10px;
+  gap: 12px;
+  padding: 12px 34px 12px 12px;
+  border-radius: 12px;
   transition: background 0.15s ease;
 }
 
 .notify-item:hover {
-  background: rgba(124, 92, 255, 0.1);
+  background: rgba(124, 92, 255, 0.12);
 }
 
+/* Punto raro eliminado: ya no se dibuja el pseudo-elemento ::before suelto */
 .notify-item.is-unread::before {
-  content: "";
-  position: absolute;
-  left: 2px;
-  top: 50%;
-  width: 4px;
-  height: 4px;
-  margin-top: -2px;
-  border-radius: 50%;
-  background: #a78bfa;
-  box-shadow: 0 0 6px #a78bfa;
+  display: none !important;
+  content: none !important;
 }
 
 .notify-icon {
   display: grid;
   place-items: center;
   flex: none;
-  width: 30px;
-  height: 30px;
-  border-radius: 9px;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
   color: #c4b5fd;
   background: rgba(124, 92, 255, 0.16);
 }
@@ -3619,7 +3614,7 @@ body .titlebar-update-btn:hover .update-btn-icon {
 .notify-text {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
   min-width: 0;
   flex: 1;
 }
@@ -3628,23 +3623,25 @@ body .titlebar-update-btn:hover .update-btn-icon {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 10px;
   width: 100%;
 }
 
 .notify-item-title {
+  font-size: 14.5px;
   font-weight: 600;
-  color: #f4f0ff;
+  color: #ffffff;
   overflow-wrap: anywhere;
+  line-height: 1.35;
 }
 
 .notify-tag-dl {
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
-  padding: 1.5px 6px;
-  border-radius: 5px;
-  font-size: 10px;
+  padding: 2.5px 7px;
+  border-radius: 6px;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.3px;
   text-transform: uppercase;
@@ -3677,17 +3674,17 @@ body .titlebar-update-btn:hover .update-btn-icon {
 .notify-progress-wrap {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-top: 4px;
-  margin-bottom: 2px;
+  gap: 10px;
+  margin-top: 5px;
+  margin-bottom: 3px;
   width: 100%;
 }
 
 .notify-progress-track {
   flex: 1;
-  height: 5px;
+  height: 6px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.1);
   overflow: hidden;
   position: relative;
 }
@@ -3713,38 +3710,39 @@ body .titlebar-update-btn:hover .update-btn-icon {
 
 .notify-progress-pct {
   flex-shrink: 0;
-  font-size: 11px;
+  font-size: 12.5px;
   font-weight: 700;
   color: #38bdf8;
-  min-width: 28px;
+  min-width: 34px;
   text-align: right;
   font-family: monospace;
 }
 
 .notify-item-body {
-  font-size: 12px;
-  line-height: 1.4;
-  color: #b6aedc;
+  font-size: 13px;
+  line-height: 1.45;
+  color: #c7bfe8;
   overflow-wrap: anywhere;
 }
 
 .notify-time {
-  font-size: 11px;
-  color: #7d76a8;
+  font-size: 12px;
+  color: #8980b8;
+  margin-top: 1px;
 }
 
 .notify-dismiss {
   position: absolute;
-  top: 8px;
-  right: 6px;
-  width: 22px;
-  height: 22px;
+  top: 10px;
+  right: 8px;
+  width: 24px;
+  height: 24px;
   padding: 0;
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: #7d76a8;
-  font-size: 11px;
+  color: #8980b8;
+  font-size: 12px;
   cursor: pointer;
   opacity: 0;
   transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
