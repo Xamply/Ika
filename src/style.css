@@ -22208,25 +22208,11 @@ body.theme-crimson .profile-account-item.active .account-item-name {
 /* Launch progress card (Minecraft downloads / startup) */
 /* Top-right, under the title bar (below the notification bell): the bottom-right corner is taken by
    the "Fondos Animados" button. On narrow windows it drops below the section switcher. */
-.launch-progress-card {
-  position: fixed;
-  right: 14px;
-  top: calc(var(--titlebar-height, 52px) + 8px);
-  z-index: 9000;
-  width: 260px;
-  max-width: calc(100vw - 32px);
-  padding: 12px 14px 12px;
-  border-radius: 12px;
-  background: rgba(10, 14, 24, 0.92);
-  border: 1px solid rgba(56, 189, 248, 0.3);
-  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.45);
-  backdrop-filter: blur(10px);
-  color: #e2e8f0;
-  font-size: 12px;
-}
-
-.launch-progress-card.hidden {
-  display: none;
+.launch-progress-card,
+#launch-progress-card {
+  display: none !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
 }
 
 @media (max-width: 1279px) {
