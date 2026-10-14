@@ -28374,7 +28374,9 @@ window.ikaShare = ikaShare;
 
     const displayVer = (update.body && update.body.match(/v\d+\.\d+\.\d+\s*·\s*Patch\s*[A-Z]/i))
       ? update.body.match(/v\d+\.\d+\.\d+\s*·\s*Patch\s*[A-Z]/i)[0]
-      : (update.version === "1.5.4" ? "v1.5.3 · Patch A" : `v${update.version}`);
+      : (update.version.includes("-patch-")
+          ? `v${update.version.split("-patch-")[0]} · Patch ${update.version.split("-patch-")[1].toUpperCase()}`
+          : `v${update.version}`);
 
     btn.classList.remove("hidden");
     if (label) label.textContent = `Actualizar (${displayVer})`;
