@@ -11212,12 +11212,22 @@ async function initHomeInstanceSwitcher() {
         if (submitSpan) {
           submitSpan.textContent = modpack ? "Preparando descarga..." : "Creando instancia...";
         }
+        let modpackDl = null;
         if (modpack) {
+          modpackDl = startDownloadNotification({
+            id: `modpack-${name}`,
+            title: `Modpack: ${name}`,
+            text: "Preparando descarga e instalación...",
+            progress: null
+          });
           try {
             unlistenModpackProgress = await listen("modpack-install-progress", (ev) => {
               const msg = ev?.payload?.message;
               if (msg && submitSpan) {
                 submitSpan.textContent = msg;
+              }
+              if (msg) {
+                modpackDl?.update(null, msg);
               }
             });
           } catch (_) {}
@@ -11245,6 +11255,10 @@ async function initHomeInstanceSwitcher() {
           saveCustomInstanceIcon(name, currentInstIcon);
         }
 
+        if (modpackDl) {
+          modpackDl.finish(`Modpack "${name}" instalado correctamente`);
+        }
+
         await triggerModalVictorySweep(el.modalCreateInstance);
         closeCreateInstModal();
         if (modpack && createdInst && typeof createdInst.mod_count === "number") {
@@ -11256,6 +11270,9 @@ async function initHomeInstanceSwitcher() {
         // Reload all launcher instances and switch to new one
         await reloadAllHomeInstances(name);
       } catch (err) {
+        if (modpackDl) {
+          modpackDl.error(`Error al instalar modpack: ${err}`);
+        }
         showToast(`Error al crear instancia: ${err}`);
       } finally {
         if (typeof unlistenModpackProgress === "function") {
@@ -16715,10 +16732,31 @@ function startSteamWatcherForItem(id, onSuccess) {
 }
 
 // Real-time progress listener for Steam Workshop downloads
+let steamDlTrackers = new Map();
 listen("steam-download-progress", (event) => {
   const data = event.payload;
   if (!data || !data.id) return;
   const { id, percent, status } = data;
+
+  let sTracker = steamDlTrackers.get(id);
+  if (!sTracker) {
+    sTracker = startDownloadNotification({
+      id: `steam-${id}`,
+      title: `Steam Workshop: ${id}`,
+      text: status || "Descargando contenido...",
+      progress: percent
+    });
+    steamDlTrackers.set(id, sTracker);
+  } else {
+    sTracker.update(percent, status);
+  }
+  if (percent >= 100 || (status && /completad|listo/i.test(status))) {
+    sTracker.finish(status || "Descarga de Steam completada");
+    steamDlTrackers.delete(id);
+  } else if (status && /error|fall/i.test(status)) {
+    sTracker.error(status);
+    steamDlTrackers.delete(id);
+  }
 
   if (el.steamCatalogGrid) {
     const card = el.steamCatalogGrid.querySelector(`.steam-card[data-id="${id}"], .steam-card[data-steam-id="${id}"]`);
@@ -19888,8 +19926,17 @@ const NOTIFY_ICON = {
 let notifications = [];
 try {
   notifications = JSON.parse(localStorage.getItem(NOTIFY_KEY) || "[]");
-  // entries saved by versions that also listed events here are dropped
-  notifications = Array.isArray(notifications) ? notifications.filter((n) => n.shareId) : [];
+  notifications = Array.isArray(notifications)
+    ? notifications.filter((n) => n.shareId || n.type === "download")
+    : [];
+  // If app restarted while downloading, mark as completed so it does not stay spinning indefinitely
+  notifications.forEach((n) => {
+    if (n.type === "download" && n.status === "downloading") {
+      n.status = "completed";
+      n.progress = 100;
+      if (!n.text || n.text.includes("...")) n.text = "Descarga completada";
+    }
+  });
 } catch {
   notifications = [];
 }
@@ -19900,13 +19947,7 @@ function saveNotifications() {
   } catch {}
 }
 
-function notify({ type = "info", title, text = "", shareId = null }) {
-  if (!title) return;
-  if (shareId && notifications.some((n) => n.shareId === shareId)) return;
-  notifications.unshift({ id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, type, title, text, shareId, ts: Date.now(), read: false });
-  notifications = notifications.slice(0, NOTIFY_MAX);
-  saveNotifications();
-  renderNotifications();
+function ringNotifyBell() {
   const btn = document.getElementById("titlebar-btn-notify");
   if (btn) {
     btn.classList.remove("is-ringing");
@@ -19914,7 +19955,94 @@ function notify({ type = "info", title, text = "", shareId = null }) {
     btn.classList.add("is-ringing");
   }
 }
+
+function notify({ type = "info", title, text = "", shareId = null }) {
+  if (!title) return;
+  if (shareId && notifications.some((n) => n.shareId === shareId)) return;
+  notifications.unshift({ id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, type, title, text, shareId, ts: Date.now(), read: false });
+  notifications = notifications.slice(0, NOTIFY_MAX);
+  saveNotifications();
+  renderNotifications();
+  ringNotifyBell();
+}
 window.ikaNotify = notify;
+
+function startDownloadNotification({ id, title, text = "Iniciando descarga...", progress = null }) {
+  const downloadId = id || `dl-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  let item = notifications.find((n) => n.id === downloadId);
+  if (item) {
+    item.title = title || item.title;
+    item.text = text;
+    item.progress = progress;
+    item.status = "downloading";
+    item.ts = Date.now();
+    item.read = false;
+  } else {
+    item = {
+      id: downloadId,
+      type: "download",
+      title: title || "Descarga",
+      text,
+      progress,
+      status: "downloading",
+      ts: Date.now(),
+      read: false
+    };
+    notifications.unshift(item);
+    notifications = notifications.slice(0, NOTIFY_MAX);
+  }
+  saveNotifications();
+  renderNotifications();
+  ringNotifyBell();
+
+  return {
+    id: downloadId,
+    update: (p, t) => updateDownloadNotification(downloadId, p, t),
+    finish: (t) => finishDownloadNotification(downloadId, t),
+    error: (e) => failDownloadNotification(downloadId, e)
+  };
+}
+
+function updateDownloadNotification(id, progress, text) {
+  const item = notifications.find((n) => n.id === id);
+  if (!item) return;
+  if (typeof progress === "number") {
+    item.progress = Math.min(100, Math.max(0, Math.round(progress)));
+  }
+  if (text) item.text = text;
+  saveNotifications();
+  renderNotifications();
+}
+
+function finishDownloadNotification(id, text = "Descarga completada") {
+  const item = notifications.find((n) => n.id === id);
+  if (!item) return;
+  item.status = "completed";
+  item.progress = 100;
+  if (text) item.text = text;
+  item.read = false;
+  saveNotifications();
+  renderNotifications();
+  ringNotifyBell();
+}
+
+function failDownloadNotification(id, errorText = "Error en la descarga") {
+  const item = notifications.find((n) => n.id === id);
+  if (!item) return;
+  item.status = "error";
+  if (errorText) item.text = String(errorText);
+  item.read = false;
+  saveNotifications();
+  renderNotifications();
+  ringNotifyBell();
+}
+
+window.ikaDownloadNotify = {
+  start: startDownloadNotification,
+  update: updateDownloadNotification,
+  finish: finishDownloadNotification,
+  fail: failDownloadNotification,
+};
 
 // The invitation was answered (or withdrawn): its entry has nothing left to offer.
 function dismissShareNotification(shareId) {
@@ -19945,11 +20073,36 @@ function renderNotifications() {
   list.innerHTML = notifications.length
     ? notifications
         .map(
-          (n) => `<div class="notify-item is-${n.type} ${n.read ? "" : "is-unread"}" data-id="${n.id}">
-            <span class="notify-icon"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${NOTIFY_ICON[n.type] || NOTIFY_ICON.info}</svg></span>
+          (n) => {
+            const isDl = n.type === "download";
+            let statusLabel = "";
+            if (isDl) {
+              if (n.status === "completed") statusLabel = "Completado";
+              else if (n.status === "error") statusLabel = "Error";
+              else statusLabel = "Descargando";
+            }
+            const iconSvg = n.status === "completed"
+              ? NOTIFY_ICON.success
+              : n.status === "error"
+                ? NOTIFY_ICON.error
+                : (NOTIFY_ICON[n.type] || NOTIFY_ICON.info);
+
+            return `<div class="notify-item is-${n.type} ${n.read ? "" : "is-unread"} ${n.status ? `is-status-${n.status}` : ""}" data-id="${n.id}">
+            <span class="notify-icon"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${iconSvg}</svg></span>
             <div class="notify-text">
-              <span class="notify-item-title">${escapeHtml(n.title)}</span>
+              <div class="notify-item-head-row">
+                <span class="notify-item-title">${escapeHtml(n.title)}</span>
+                ${isDl ? `<span class="notify-tag notify-tag-dl ${n.status || 'downloading'}">${statusLabel}</span>` : ""}
+              </div>
               ${n.text ? `<span class="notify-item-body">${escapeHtml(n.text)}</span>` : ""}
+              ${isDl && n.status === "downloading" ? `
+                <div class="notify-progress-wrap">
+                  <div class="notify-progress-track">
+                    <div class="notify-progress-fill ${n.progress == null ? 'is-indeterminate' : ''}" style="width: ${n.progress != null ? n.progress : 45}%;"></div>
+                  </div>
+                  ${n.progress != null ? `<span class="notify-progress-pct">${n.progress}%</span>` : ''}
+                </div>
+              ` : ""}
               ${
                 n.shareId
                   ? `<div class="notify-actions-row">
@@ -19961,10 +20114,11 @@ function renderNotifications() {
               <span class="notify-time">${formatNotifyTime(n.ts)}</span>
             </div>
             <button type="button" class="notify-dismiss" data-dismiss="${n.id}" aria-label="Quitar notificación">✕</button>
-          </div>`,
+          </div>`;
+          }
         )
         .join("")
-    : `<div class="notify-empty"><svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg><span>No tienes solicitudes pendientes</span></div>`;
+    : `<div class="notify-empty"><svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg><span>No hay notificaciones ni descargas</span></div>`;
 }
 
 function setNotifyPanelOpen(open) {
@@ -20990,16 +21144,51 @@ function showLaunchProgress(instanceName, message, done, total, isError = false)
 }
 
 let lastLaunchStageLogged = "";
+let mcLaunchDlTracker = new Map();
 listen("mc-launch-progress", (event) => {
   const p = event.payload || {};
   const name = getInstanceNameFromPath(p.instance || "") || "Minecraft";
+  const instKey = normInstancePath(p.instance || "");
+  const isDownload = p.stage === "libraries" || p.stage === "assets" || p.stage === "java" || (p.message && /descarg/i.test(p.message));
+
   if (p.stage === "error") {
     showLaunchProgress(name, p.message || "Error", 0, 0, true);
     lastLaunchStageLogged = "";
+    const tracker = mcLaunchDlTracker.get(instKey);
+    if (tracker) {
+      tracker.error(p.message || "Error al descargar recursos");
+      mcLaunchDlTracker.delete(instKey);
+    }
     return;
   }
-  if (p.stage === "done") setGameState(p.instance, "running");
-  else if (p.message) setGameState(p.instance, "preparing", p.message.replace(/\.\.\.$/, ""));
+  if (p.stage === "done") {
+    setGameState(p.instance, "running");
+    const tracker = mcLaunchDlTracker.get(instKey);
+    if (tracker) {
+      tracker.finish("Recursos descargados correctamente");
+      mcLaunchDlTracker.delete(instKey);
+    }
+  } else if (p.message) {
+    setGameState(p.instance, "preparing", p.message.replace(/\.\.\.$/, ""));
+  }
+
+  if (isDownload) {
+    const pct = p.total > 0 ? Math.round((p.done / p.total) * 100) : null;
+    let tracker = mcLaunchDlTracker.get(instKey);
+    const textDesc = p.total > 0 ? `${p.message || "Descargando"} (${p.done}/${p.total})` : (p.message || "Descargando recursos...");
+    if (!tracker) {
+      tracker = startDownloadNotification({
+        id: `mc-dl-${instKey}`,
+        title: `${name} · Recursos`,
+        text: textDesc,
+        progress: pct
+      });
+      mcLaunchDlTracker.set(instKey, tracker);
+    } else {
+      tracker.update(pct, textDesc);
+    }
+  }
+
   const stageKey = `${p.instance}|${p.stage}|${p.message}`;
   if (p.message && stageKey !== lastLaunchStageLogged) {
     lastLaunchStageLogged = stageKey;
@@ -23494,6 +23683,10 @@ const mgr = (() => {
     busy.add(mod.filepath);
     closeMenus();
     refreshCard(i, mod.filepath);
+    const dl = startDownloadNotification({
+      title: mod.display_name || "Mod",
+      text: `Actualizando a ${ver.v}...`
+    });
     let key = mod.filepath;
     try {
       const fresh = await invoke("install_mod_version", { modsDir: i.mods_path, url: ver.url, filename: ver.filename, replacePath: mod.filepath });
@@ -23506,8 +23699,10 @@ const mgr = (() => {
       if (upd) delete upd[mod.sha1];
       versionsCache.delete(mod.sha1);
       say(`${mod.display_name} → ${ver.v}`);
+      dl.finish(`Actualizado a ${ver.v}`);
     } catch (err) {
       say(`No se pudo instalar ${ver.v}: ${err}`);
+      dl.error(`Error: ${err}`);
     }
     busy.delete(mod.filepath);
     refreshCard(i, mod.filepath, key);
@@ -23541,6 +23736,11 @@ const mgr = (() => {
     busy.add(file.name);
     closeMenus();
     render();
+    const kindName = kind === "shaders" ? "Shader" : "Pack";
+    const dl = startDownloadNotification({
+      title: prettyPack(file.name),
+      text: `Actualizando ${kindName} a ${ver.v}...`
+    });
     try {
       const fresh = await invoke("install_instance_file", { instancePath: i.path, folder: SECTIONS[kind].folder, url: ver.url, filename: ver.filename, replaceName: file.name });
       const p = packsCache.get(i.path);
@@ -23550,8 +23750,10 @@ const mgr = (() => {
       }
       if (file.sha1) versionsCache.delete(file.sha1);
       say(`${prettyPack(file.name)} → ${ver.v}`);
+      dl.finish(`Actualizado a ${ver.v}`);
     } catch (err) {
       say(`No se pudo instalar ${ver.v}: ${err}`);
+      dl.error(`Error: ${err}`);
     }
     busy.delete(file.name);
     await reloadPacks(i);
@@ -23730,12 +23932,19 @@ const mgr = (() => {
     if (installing.get(id) === "installing") return;
     installing.set(id, "installing");
     renderBody(i);
+    const kindLabel = kind === "mods" ? "Mod" : kind === "shaders" ? "Shader" : kind === "packs" ? "Resourcepack" : "Contenido";
+    const dl = startDownloadNotification({
+      title: hit.title || "Descarga",
+      text: `Instalando ${kindLabel} en ${nameOf(i)}...`,
+      progress: null
+    });
     try {
       const deps = hit.cf ? await installFromCurseforge(i, hit, kind) : await installFromModrinth(i, hit, kind);
       installing.set(id, "done");
       doneAt.set(id, performance.now());
       const extra = deps.length ? ` (+ ${deps.length === 1 ? "1 dependencia" : `${deps.length} dependencias`})` : "";
       say(`${hit.title} instalado en ${nameOf(i)}${extra}`);
+      dl.finish(`Instalado en ${nameOf(i)}${extra}`);
       if (kind === "mods") {
         updatesCache.delete(i.path);
         loadInstance(i, true);
@@ -23744,7 +23953,9 @@ const mgr = (() => {
       }
     } catch (err) {
       installing.set(id, err.blocked ? "blocked" : "error");
-      say(err.blocked ? `${hit.title}: ${err.message}. Ábrelo en su página.` : `No se pudo instalar ${hit.title}: ${err.message || err}`);
+      const errMsg = err.blocked ? `${hit.title}: ${err.message}. Ábrelo en su página.` : `No se pudo instalar ${hit.title}: ${err.message || err}`;
+      say(errMsg);
+      dl.error(errMsg);
     }
     if (S.sel === i.path && state.currentView === "manager") renderBody(i);
   }
@@ -28161,12 +28372,23 @@ window.ikaShare = ikaShare;
     const update = await check();
     if (!update) return;
 
+    const displayVer = (update.body && update.body.match(/v\d+\.\d+\.\d+\s*·\s*Patch\s*[A-Z]/i))
+      ? update.body.match(/v\d+\.\d+\.\d+\s*·\s*Patch\s*[A-Z]/i)[0]
+      : (update.version === "1.5.4" ? "v1.5.3 · Patch A" : `v${update.version}`);
+
     btn.classList.remove("hidden");
-    if (label) label.textContent = `Actualizar (v${update.version})`;
+    if (label) label.textContent = `Actualizar (${displayVer})`;
 
     btn.addEventListener("click", async () => {
       btn.classList.add("is-downloading");
       if (label) label.textContent = "Descargando...";
+
+      const launcherDl = startDownloadNotification({
+        id: "launcher-update",
+        title: `Ika Launcher ${displayVer}`,
+        text: "Descargando actualización...",
+        progress: 0
+      });
 
       let downloaded = 0;
       let contentLength = 0;
@@ -28179,22 +28401,26 @@ window.ikaShare = ikaShare;
               break;
             case "Progress":
               downloaded += event.data.chunkLength;
-              if (contentLength > 0 && label) {
+              if (contentLength > 0) {
                 const pct = Math.round((downloaded / contentLength) * 100);
-                label.textContent = `Descargando ${pct}%`;
+                if (label) label.textContent = `Descargando ${pct}%`;
+                launcherDl.update(pct, `Descargando actualización ${pct}%`);
               }
               break;
             case "Finished":
               if (label) label.textContent = "Instalando...";
+              launcherDl.update(100, "Instalando actualización...");
               break;
           }
         });
 
+        launcherDl.finish("Actualización descargada e instalada");
         if (label) label.textContent = "Reiniciando...";
         const { relaunch } = await import("@tauri-apps/plugin-process");
         await relaunch();
       } catch (err) {
         console.error("Error al actualizar launcher:", err);
+        launcherDl.error("Error al actualizar launcher");
         btn.classList.remove("is-downloading");
         if (label) label.textContent = "Error al actualizar";
       }
