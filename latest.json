@@ -1,15 +1,15 @@
 {
-  "version": "1.5.3-patch-a",
-  "notes": "Ika Launcher v1.5.3 · Patch A",
-  "pub_date": "2026-10-14T18:51:00.000Z",
+  "version": "1.5.4",
+  "notes": "Actualización Ika Launcher v1.5.4",
+  "pub_date": "2026-10-14T19:05:00.000Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTZlRUZVk2QW5zMFBpT0ZLbS82T3ZSNFpXRWtnRS9wZHNlR3NXSEYyeW1QTll2bmprK1lBdkhEY3BmUkN2Uk9LOUIxZ3ZUd1QrUGNIdVV4c2FlZEc5SWp3VEd4Qk85a0FVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMDAzOTEwCWZpbGU6SWthLkxhdW5jaGVyXzEuNS4zLXBhdGNoLWFfeDY0LXNldHVwLmV4ZQphVjNndFNlNEUybEh3WVJHNW8zVkgvTmVuNWRCeEZiRkZkNkZUdlY1TkVsd1g4clI0UjVTeU9OQmJXY09OYU50YkltZXBmU1hrbWROdjNLN0xBQ2lBdz09Cg==",
-      "url": "https://github.com/Xamply/Ika/releases/download/v1.5.3-patch-a/Ika.Launcher_1.5.3-patch-a_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTZlRUZVk2QW5zMEJ5RzhWcEdGYmpUZ2J4S3VFMDg3eXlMaVdjTytOd0V5S3VjNzNpVjFtMmJCOVNvOW5hdUpqcGxQNk9ERWRpdjhRNFRHUDJZeXFRRnl0M2RxeUh1V0EwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMDA0NzI5CWZpbGU6SWthLkxhdW5jaGVyXzEuNS40X3g2NC1zZXR1cC5leGUKaURBdzZ4NWZNKzM1dGdFQWV4ZnROcXpHN2NsbmNMcnM2NTh2cFNjTmNSQnNENm1nVWJqTDhXUVkyR0l3bWtxUC9DVGUrd2tsS3YyTVNtM2cyODJiREE9PQo=",
+      "url": "https://github.com/Xamply/Ika/releases/download/v1.5.4/Ika.Launcher_1.5.4_x64-setup.exe"
     },
     "windows-x86_64-nsis": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTZlRUZVk2QW5zMFBpT0ZLbS82T3ZSNFpXRWtnRS9wZHNlR3NXSEYyeW1QTll2bmprK1lBdkhEY3BmUkN2Uk9LOUIxZ3ZUd1QrUGNIdVV4c2FlZEc5SWp3VEd4Qk85a0FVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMDAzOTEwCWZpbGU6SWthLkxhdW5jaGVyXzEuNS4zLXBhdGNoLWFfeDY0LXNldHVwLmV4ZQphVjNndFNlNEUybEh3WVJHNW8zVkgvTmVuNWRCeEZiRkZkNkZUdlY1TkVsd1g4clI0UjVTeU9OQmJXY09OYU50YkltZXBmU1hrbWROdjNLN0xBQ2lBdz09Cg==",
-      "url": "https://github.com/Xamply/Ika/releases/download/v1.5.3-patch-a/Ika.Launcher_1.5.3-patch-a_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTZlRUZVk2QW5zMEJ5RzhWcEdGYmpUZ2J4S3VFMDg3eXlMaVdjTytOd0V5S3VjNzNpVjFtMmJCOVNvOW5hdUpqcGxQNk9ERWRpdjhRNFRHUDJZeXFRRnl0M2RxeUh1V0EwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMDA0NzI5CWZpbGU6SWthLkxhdW5jaGVyXzEuNS40X3g2NC1zZXR1cC5leGUKaURBdzZ4NWZNKzM1dGdFQWV4ZnROcXpHN2NsbmNMcnM2NTh2cFNjTmNSQnNENm1nVWJqTDhXUVkyR0l3bWtxUC9DVGUrd2tsS3YyTVNtM2cyODJiREE9PQo=",
+      "url": "https://github.com/Xamply/Ika/releases/download/v1.5.4/Ika.Launcher_1.5.4_x64-setup.exe"
     }
   }
 }
