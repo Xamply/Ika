@@ -1809,7 +1809,32 @@
       <div class="titlebar-right" data-tauri-drag-region>
         <div class="titlebar-window-actions">
           <button id="titlebar-btn-update" class="titlebar-update-btn hidden" title="Actualización disponible" aria-label="Actualizar Launcher">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            <svg class="update-btn-border-svg" aria-hidden="true">
+              <defs>
+                <linearGradient id="updatePillGradCyan" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="260" y2="0" spreadMethod="repeat">
+                  <stop offset="0%" stop-color="#076573" />
+                  <stop offset="18%" stop-color="#00a8b5" />
+                  <stop offset="36%" stop-color="#00f0e6" />
+                  <stop offset="50%" stop-color="#7efcf6" />
+                  <stop offset="64%" stop-color="#00e5df" />
+                  <stop offset="82%" stop-color="#0891b2" />
+                  <stop offset="100%" stop-color="#076573" />
+                  <animateTransform attributeName="gradientTransform" type="translate" from="0 0" to="-260 0" dur="4.2s" repeatCount="indefinite" />
+                </linearGradient>
+              </defs>
+              <rect class="update-pill-hairline-bloom" x="0.5" y="0.5" rx="7" ry="7"
+                    stroke="url(#updatePillGradCyan)" stroke-width="2"
+                    stroke-linecap="round" stroke-linejoin="round"
+                    opacity="0.38" filter="url(#hairlineNeonGlow)" fill="none" />
+              <rect class="update-pill-hairline-core" x="0.5" y="0.5" rx="7" ry="7"
+                    stroke="url(#updatePillGradCyan)" stroke-width="1.1"
+                    stroke-linecap="round" stroke-linejoin="round" fill="none" />
+            </svg>
+            <svg class="update-btn-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M4.5 14.5v3a2.5 2.5 0 0 0 2.5 2.5h10a2.5 2.5 0 0 0 2.5-2.5v-3" />
+              <line x1="12" y1="4.5" x2="12" y2="15" />
+              <polyline points="7.8 10.8 12 15 16.2 10.8" />
+            </svg>
             <span id="titlebar-update-label">Actualizar</span>
           </button>
           <button id="titlebar-btn-notify" class="titlebar-square-btn titlebar-notify-btn" title="Notificaciones" aria-label="Notificaciones" aria-haspopup="true" aria-expanded="false">
