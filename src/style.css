@@ -3319,51 +3319,94 @@ body {
   color: #ffffff !important;
 }
 
-/* ---------- Updater button (Discord/Steam style pill) ---------- */
-.titlebar-update-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 28px;
-  margin: 0 6px 0 0;
-  padding: 0 12px;
-  border-radius: 999px;
-  border: 1px solid rgba(0, 245, 212, 0.4);
-  background: linear-gradient(135deg, rgba(0, 245, 212, 0.18), rgba(123, 44, 191, 0.28));
-  color: #00f5d4;
-  font-family: inherit;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.3px;
-  cursor: pointer;
-  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-  box-shadow: 0 0 12px rgba(0, 245, 212, 0.25);
-  animation: pulse-update-btn 2.4s infinite ease-in-out;
+/* ---------- Updater button (Matching "Exportar Instancia" style, colors & animated neon border) ---------- */
+body .titlebar-update-btn,
+button#titlebar-btn-update {
+  position: relative !important;
+  align-self: center !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 7px !important;
+  height: 28px !important;
+  margin: 0 12px 0 0 !important;
+  padding: 0 12px 0 10px !important;
+  border-radius: 8px !important;
+  border: none !important;
+  outline: none !important;
+  background: linear-gradient(90deg, rgba(0, 155, 165, 0.24) 0%, rgba(5, 32, 48, 0.82) 100%) !important;
+  color: #06f3e8 !important;
+  box-shadow: inset 0 0 16px rgba(0, 240, 230, 0.16) !important;
+  font-family: inherit !important;
+  font-size: 11.5px !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.35px !important;
+  cursor: pointer !important;
+  overflow: hidden !important;
+  z-index: 230 !important;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1) !important;
 }
 
-.titlebar-update-btn:hover {
-  background: linear-gradient(135deg, rgba(0, 245, 212, 0.32), rgba(123, 44, 191, 0.45));
-  border-color: #00f5d4;
-  color: #ffffff;
-  box-shadow: 0 0 18px rgba(0, 245, 212, 0.55);
-  transform: translateY(-1px);
+body .titlebar-update-btn:hover:not(.is-downloading),
+button#titlebar-btn-update:hover:not(.is-downloading) {
+  background: linear-gradient(90deg, rgba(0, 185, 200, 0.38) 0%, rgba(6, 42, 65, 0.92) 100%) !important;
+  color: #ffffff !important;
+  box-shadow: inset 0 0 20px rgba(0, 240, 230, 0.32), 0 0 18px rgba(0, 240, 230, 0.45) !important;
+  transform: translateY(-1px) scale(1.02) !important;
 }
 
-.titlebar-update-btn.is-downloading {
-  pointer-events: none;
-  background: rgba(123, 44, 191, 0.3);
-  border-color: rgba(167, 139, 250, 0.5);
-  color: #e0aaff;
-  box-shadow: none;
+body .titlebar-update-btn:active:not(.is-downloading),
+button#titlebar-btn-update:active:not(.is-downloading) {
+  transform: translateY(0) scale(0.98) !important;
 }
 
-.titlebar-update-btn.hidden {
+body .titlebar-update-btn.is-downloading,
+button#titlebar-btn-update.is-downloading {
+  pointer-events: none !important;
+  opacity: 0.9 !important;
+  background: linear-gradient(90deg, rgba(123, 44, 191, 0.28) 0%, rgba(5, 32, 48, 0.82) 100%) !important;
+  color: #d8b4fe !important;
+}
+
+body .titlebar-update-btn.hidden,
+button#titlebar-btn-update.hidden {
   display: none !important;
 }
 
-@keyframes pulse-update-btn {
-  0%, 100% { box-shadow: 0 0 10px rgba(0, 245, 212, 0.2); }
-  50% { box-shadow: 0 0 18px rgba(0, 245, 212, 0.6); }
+.update-btn-border-svg {
+  position: absolute !important;
+  inset: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  pointer-events: none !important;
+  overflow: visible !important;
+  z-index: 2 !important;
+}
+
+.update-btn-border-svg rect {
+  x: 0.5px;
+  y: 0.5px;
+  width: calc(100% - 1px);
+  height: calc(100% - 1px);
+  rx: 7px;
+  ry: 7px;
+  fill: none;
+}
+
+.update-btn-icon,
+#titlebar-update-label {
+  position: relative !important;
+  z-index: 3 !important;
+  text-shadow: 0 0 10px rgba(6, 243, 232, 0.35) !important;
+}
+
+.update-btn-icon {
+  flex-shrink: 0 !important;
+  transition: transform 0.2s ease !important;
+}
+
+body .titlebar-update-btn:hover .update-btn-icon {
+  transform: translateY(1.5px) !important;
 }
 
 /* ---------- Notification bell + panel ---------- */

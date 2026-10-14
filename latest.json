@@ -1,0 +1,15 @@
+{
+  "version": "1.5.3",
+  "notes": "Actualización Ika Launcher v1.5.3",
+  "pub_date": "2026-10-14T17:46:00.000Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTZlRUZVk2QW5zME1udkY3N25HRDVFNEtrQ2kva1E3UlorVWJnTDUxZmthcnN5K1drcFJqcnRiVlNXU2RYcHErbjhJc1p5VFR4MVdoVk1MSGg1UWl3N2QxaVNXUVh3UHdFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMDAwMDE4CWZpbGU6SWthLkxhdW5jaGVyXzEuNS4zX3g2NC1zZXR1cC5leGUKYnFaZEkwM05yQ2lieWI2endxbFg0Ky8vZ1FWNEVDa2hzSVM5UEZwY0dMMkNEWHRSSkU1alRRMm9vNTEza1VMWlFOb2RjTW9XRGkwb3o2SkVTa1hiQmc9PQo=",
+      "url": "https://github.com/Xamply/Ika/releases/download/v1.5.3/Ika.Launcher_1.5.3_x64-setup.exe"
+    },
+    "windows-x86_64-nsis": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTZlRUZVk2QW5zME1udkY3N25HRDVFNEtrQ2kva1E3UlorVWJnTDUxZmthcnN5K1drcFJqcnRiVlNXU2RYcHErbjhJc1p5VFR4MVdoVk1MSGg1UWl3N2QxaVNXUVh3UHdFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkyMDAwMDE4CWZpbGU6SWthLkxhdW5jaGVyXzEuNS4zX3g2NC1zZXR1cC5leGUKYnFaZEkwM05yQ2lieWI2endxbFg0Ky8vZ1FWNEVDa2hzSVM5UEZwY0dMMkNEWHRSSkU1alRRMm9vNTEza1VMWlFOb2RjTW9XRGkwb3o2SkVTa1hiQmc9PQo=",
+      "url": "https://github.com/Xamply/Ika/releases/download/v1.5.3/Ika.Launcher_1.5.3_x64-setup.exe"
+    }
+  }
+}
