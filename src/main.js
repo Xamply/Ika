@@ -8,6 +8,7 @@ import DOMPurify from "dompurify";
 // user menu with the 3D skin is opened: see loadSkinLibs().
 import modrinthLogo from "./assets/modrinth.png";
 import curseforgeLogo from "./assets/curseforge.png";
+import { DINO_SPRITE_B64 } from "./dino_assets.js";
 
 // Application State
 const state = {
@@ -188,6 +189,7 @@ const el = {
   steamCatalogGrid: document.getElementById("steam-catalog-grid"),
   btnSteamModeOnline: document.getElementById("btn-steam-mode-online"),
   btnSteamModeLocal: document.getElementById("btn-steam-mode-local"),
+  steamOnlineBanner: document.getElementById("steam-online-banner"),
   steamLocalCount: document.getElementById("steam-local-count"),
   selectSteamSort: document.getElementById("select-steam-sort"),
   steamSortWrap: document.getElementById("steam-sort-wrap"),
@@ -203,7 +205,6 @@ const el = {
   btnSteamDirectDownload: document.getElementById("btn-steam-direct-download"),
   btnSteamDirectClear: document.getElementById("btn-steam-direct-clear"),
   steamDirectPreviewWrap: document.getElementById("steam-direct-preview-wrap"),
-  btnSteamAuthStatus: document.getElementById("btn-steam-auth-status"),
   steamBodyScroll: document.getElementById("steam-body-scroll"),
   chkPlaylistActive: document.getElementById("chk-playlist-active"),
   btnPlaylistTogglePower: document.getElementById("btn-playlist-toggle-power"),
@@ -906,6 +907,10 @@ function makeDraggable(element, handle, options = {}) {
       if (dragMoved) {
         element.dataset.justDragged = "true";
         setTimeout(() => { element.dataset.justDragged = "false"; }, 250);
+        if (element.classList.contains("is-minimized")) {
+          element.dataset.sqLeft = `${parseFloat(element.style.left) || 0}`;
+          element.dataset.sqTop = `${parseFloat(element.style.top) || 0}`;
+        }
         if (isCyberWin) saveWindowsLayout();
       }
       try {
@@ -1204,6 +1209,13 @@ function makeResizable(element, options = {}) {
               }));
             } catch (_) {}
           }
+        } else if (element.classList.contains("modal-profile-settings") || element.id === "modal-settings-box") {
+          try {
+            if (element.dataset.openWidth) localStorage.setItem("ika_pref_width", element.dataset.openWidth);
+            if (element.dataset.openHeight) localStorage.setItem("ika_pref_height", element.dataset.openHeight);
+            if (element.style.left) localStorage.setItem("ika_pref_pos_left", element.style.left.replace("px", ""));
+            if (element.style.top) localStorage.setItem("ika_pref_pos_top", element.style.top.replace("px", ""));
+          } catch (_) {}
         }
       };
 
@@ -1477,6 +1489,7 @@ function restoreWindowsLayout() {
   } catch (_) {}
   restoringWindowsLayout = false;
   placeDockedWelcome?.();
+  placeDockedPixelClock?.();
 }
 
 let refitCyberWindowsFrame = 0;
@@ -1953,11 +1966,11 @@ function setupCyberWindow(dock, minBtn, closeBtn, windowTitle) {
   }
   makeResizable(dock);
 
-  // Minimize to 48x48 floating cyber square with cursor hold & bouncing physics!
+  // Minimize to 48x48 floating cyber square with elegant transition animation!
   if (minBtn) {
     minBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      startHoldingAndBouncingCyberWindow(dock, minBtn, windowTitle, e);
+      minimizeCyberWindowWithAnimation(dock, windowTitle, minBtn);
     });
   }
 
@@ -1972,8 +1985,86 @@ function setupCyberWindow(dock, minBtn, closeBtn, windowTitle) {
   });
 }
 
+function minimizeCyberWindowWithAnimation(dock, windowTitle, triggerBtn = null) {
+  if (!dock || dock.classList.contains("is-minimized") || dock.classList.contains("is-minimizing-anim")) return;
+
+  bringCyberWindowToFront(dock);
+
+  const container = dock.offsetParent || document.body;
+  const cRect = container.getBoundingClientRect();
+  const dRect = dock.getBoundingClientRect();
+
+  const dockLeft = dRect.left - cRect.left;
+  const dockTop = dRect.top - cRect.top;
+  const openW = dRect.width;
+  const openH = dRect.height;
+
+  dock.dataset.openLeft = `${dockLeft}`;
+  dock.dataset.openTop = `${dockTop}`;
+  dock.dataset.openWidth = `${openW}`;
+  dock.dataset.openHeight = `${openH}`;
+  dock.dataset.customFloatingWidth = `${openW}`;
+  dock.dataset.customFloatingHeight = `${openH}`;
+
+  // Center 48x48 square directly where the minimize button is located
+  const btn = triggerBtn || dock.querySelector(".hw-btn-minimize, .hcp-win-btn");
+  let targetLeft, targetTop;
+
+  if (btn) {
+    const bRect = btn.getBoundingClientRect();
+    targetLeft = Math.round((bRect.left - cRect.left) + (bRect.width / 2) - 24);
+    targetTop = Math.round((bRect.top - cRect.top) + (bRect.height / 2) - 24);
+  } else {
+    targetLeft = Math.round(dockLeft + openW - 48 - 14);
+    targetTop = Math.round(dockTop + 8);
+  }
+
+  // Keep within safe viewport boundaries
+  targetLeft = Math.max(10, Math.min(targetLeft, window.innerWidth - 58));
+  targetTop = Math.max(48, Math.min(targetTop, window.innerHeight - 58 - 120));
+
+  dock.dataset.sqLeft = `${targetLeft}`;
+  dock.dataset.sqTop = `${targetTop}`;
+
+  dock.style.position = "absolute";
+  dock.style.left = `${dockLeft}px`;
+  dock.style.top = `${dockTop}px`;
+  dock.style.setProperty("width", `${openW}px`, "important");
+  dock.style.setProperty("height", `${openH}px`, "important");
+  dock.style.borderRadius = "18px";
+  dock.style.transform = "none";
+
+  void dock.offsetWidth;
+
+  if (dock.id === "home-console-preview-dock") {
+    stopHcpDinoGame();
+  }
+
+  dock.classList.add("is-minimizing-anim");
+
+  requestAnimationFrame(() => {
+    dock.style.left = `${targetLeft}px`;
+    dock.style.top = `${targetTop}px`;
+    dock.style.setProperty("width", "48px", "important");
+    dock.style.setProperty("height", "48px", "important");
+    dock.style.borderRadius = "14px";
+  });
+
+  setTimeout(() => {
+    dock.classList.remove("is-minimizing-anim");
+    dock.classList.add("is-minimized");
+    dock.setAttribute("title", `${windowTitle} (haz clic para abrir o arrastra para mover)`);
+    dock.style.left = `${targetLeft}px`;
+    dock.style.top = `${targetTop}px`;
+    dock.style.setProperty("width", "48px", "important");
+    dock.style.setProperty("height", "48px", "important");
+    dock.style.borderRadius = "";
+    saveWindowsLayout();
+  }, 340);
+}
+
 function restoreCyberWindow(dock) {
-  if (!dock) return;
+  if (!dock || dock.classList.contains("is-restoring-anim") || dock.classList.contains("is-minimizing-anim")) return;
   bringCyberWindowToFront(dock);
 
   const currentLeft = parseFloat(dock.style.left) || 0;
@@ -2017,25 +2108,49 @@ function restoreCyberWindow(dock) {
   targetTop = Math.max(topBarHeight, Math.min(targetTop, cHeight - openHeight - bottomBarHeight));
 
   dock.classList.remove("is-minimized");
-  dock.classList.remove("hidden");
-  dock.classList.remove("no-minimize-btn");
-  delete dock.dataset.noMinimize;
-  const colBtn = dock.querySelector(".hw-btn-collapse");
-  if (colBtn) {
-    colBtn.remove();
-  }
-  dock.removeAttribute("title");
-  dock.style.left = `${targetLeft}px`;
-  dock.style.top = `${targetTop}px`;
-  dock.style.setProperty("width", `${openWidth}px`, "important");
-  dock.style.setProperty("height", `${openHeight}px`, "important");
-  dock.dataset.openWidth = `${openWidth}`;
-  dock.dataset.openHeight = `${openHeight}`;
-  dock.dataset.customFloatingWidth = `${openWidth}`;
-  dock.dataset.customFloatingHeight = `${openHeight}`;
-  dock.style.right = "auto";
-  dock.style.bottom = "auto";
-  saveWindowsLayout();
+  dock.classList.add("is-restoring-anim");
+  dock.style.left = `${currentLeft}px`;
+  dock.style.top = `${currentTop}px`;
+  dock.style.setProperty("width", "48px", "important");
+  dock.style.setProperty("height", "48px", "important");
+  dock.style.borderRadius = "14px";
+
+  void dock.offsetWidth;
+
+  requestAnimationFrame(() => {
+    dock.style.left = `${targetLeft}px`;
+    dock.style.top = `${targetTop}px`;
+    dock.style.setProperty("width", `${openWidth}px`, "important");
+    dock.style.setProperty("height", `${openHeight}px`, "important");
+    dock.style.borderRadius = "18px";
+  });
+
+  setTimeout(() => {
+    dock.classList.remove("is-restoring-anim");
+    dock.classList.remove("hidden");
+    dock.classList.remove("no-minimize-btn");
+    delete dock.dataset.noMinimize;
+    const colBtn = dock.querySelector(".hw-btn-collapse");
+    if (colBtn) {
+      colBtn.remove();
+    }
+    dock.removeAttribute("title");
+    dock.style.left = `${targetLeft}px`;
+    dock.style.top = `${targetTop}px`;
+    dock.style.setProperty("width", `${openWidth}px`, "important");
+    dock.style.setProperty("height", `${openHeight}px`, "important");
+    dock.style.borderRadius = "";
+    dock.dataset.openWidth = `${openWidth}`;
+    dock.dataset.openHeight = `${openHeight}`;
+    dock.dataset.customFloatingWidth = `${openWidth}`;
+    dock.dataset.customFloatingHeight = `${openHeight}`;
+    dock.style.right = "auto";
+    dock.style.bottom = "auto";
+    if (dock.id === "home-console-preview-dock") {
+      updateHomeConsolePreview();
+    }
+    saveWindowsLayout();
+  }, 340);
 }
 
 const coleccionFilterState = {
@@ -2283,6 +2398,129 @@ function closeColeccionContextMenu() {
   if (menu && !menu.classList.contains("hidden")) {
     menu.classList.add("hidden");
   }
+}
+
+let carouselContextMenuTargetInst = null;
+let carouselMenuCloseTimer = null;
+
+function openCarouselInstanceContextMenu(x, y, inst, idx) {
+  const menu = document.getElementById("carousel-context-menu");
+  if (!menu || !inst) return;
+
+  if (carouselMenuCloseTimer) {
+    clearTimeout(carouselMenuCloseTimer);
+    carouselMenuCloseTimer = null;
+  }
+
+  carouselContextMenuTargetInst = inst;
+
+  const customNames = getCustomInstanceNamesMap();
+  const rawCustom = customNames[inst.path];
+  const displayName = rawCustom ? rawCustom.toUpperCase() : formatInstanceDisplayName(inst.name);
+  const mcVer = inst.mc_version || "1.20.1";
+  const loader = inst.loader || "Forge";
+
+  const titleEl = document.getElementById("ctx-carousel-title");
+  const subEl = document.getElementById("ctx-carousel-subtitle");
+  if (titleEl) titleEl.textContent = displayName;
+  if (subEl) subEl.textContent = `Minecraft ${mcVer} · ${loader}`;
+
+  menu.classList.remove("is-closing");
+  menu.classList.remove("hidden");
+
+  // Force reflow so opening animation plays fresh every time
+  void menu.offsetWidth;
+
+  // Adjust for viewport boundaries
+  const rect = menu.getBoundingClientRect();
+  const winWidth = window.innerWidth;
+  const winHeight = window.innerHeight;
+
+  let left = x;
+  let top = y;
+
+  if (left + rect.width > winWidth - 10) {
+    left = Math.max(10, x - rect.width);
+  }
+  if (top + rect.height > winHeight - 10) {
+    top = Math.max(10, winHeight - rect.height - 10);
+  }
+
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+}
+
+function closeCarouselContextMenu() {
+  const menu = document.getElementById("carousel-context-menu");
+  if (menu && !menu.classList.contains("hidden") && !menu.classList.contains("is-closing")) {
+    menu.classList.add("is-closing");
+    if (carouselMenuCloseTimer) clearTimeout(carouselMenuCloseTimer);
+    carouselMenuCloseTimer = setTimeout(() => {
+      menu.classList.add("hidden");
+      menu.classList.remove("is-closing");
+      carouselContextMenuTargetInst = null;
+      carouselMenuCloseTimer = null;
+    }, 180);
+  }
+}
+
+function initCarouselContextMenu() {
+  document.getElementById("ctx-carousel-btn-play")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const inst = carouselContextMenuTargetInst;
+    closeCarouselContextMenu();
+    if (!inst) return;
+    const idx = homeInstancesList.indexOf(inst);
+    if (idx !== -1 && idx !== homeCurrentInstanceIndex) {
+      switchHomeInstance(idx);
+    }
+    handlePlayGame(inst);
+  });
+
+  document.getElementById("ctx-carousel-btn-edit")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const inst = carouselContextMenuTargetInst;
+    closeCarouselContextMenu();
+    if (!inst) return;
+    if (window.ikaOpenEditInstance) window.ikaOpenEditInstance(inst.path);
+    else openEditActiveInstance();
+  });
+
+  document.getElementById("ctx-carousel-btn-explorer")?.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    const inst = carouselContextMenuTargetInst;
+    closeCarouselContextMenu();
+    if (!inst || !inst.path) {
+      showToast("Ruta no disponible para esta instancia");
+      return;
+    }
+    try {
+      await invoke("open_browser", { url: inst.path });
+      showToast("Carpeta abierta en el explorador");
+    } catch {
+      showToast("Error al abrir el explorador");
+    }
+  });
+
+  document.getElementById("ctx-carousel-btn-duplicate")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const inst = carouselContextMenuTargetInst;
+    closeCarouselContextMenu();
+    if (inst) duplicateHomeInstance(inst);
+  });
+
+  document.getElementById("ctx-carousel-btn-delete")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const inst = carouselContextMenuTargetInst;
+    closeCarouselContextMenu();
+    if (inst) deleteHomeInstance(inst);
+  });
+
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest("#carousel-context-menu")) {
+      closeCarouselContextMenu();
+    }
+  });
 }
 
 function renderMiColeccionGrid() {
@@ -3344,6 +3582,9 @@ function init() {
     if (modalBox.classList.contains("modal-create-inst-modern")) {
       makeResizable(modalBox, { minWidth: 780, minHeight: 500 });
     }
+    if (modalBox.classList.contains("modal-profile-settings")) {
+      makeResizable(modalBox, { minWidth: 480, minHeight: 480 });
+    }
   });
 
   // Keep Profile Button length strictly identical to Animated Wallpaper Button
@@ -3419,6 +3660,7 @@ function init() {
   });
 
   initContextMenu();
+  initCarouselContextMenu();
   initNativeContextMenuBlock();
   initNotificationCenter();
   initEscapeToHome();
@@ -3428,9 +3670,15 @@ function init() {
     btn.addEventListener("click", () => {
       el.viewSwitcher.querySelectorAll(".view-btn").forEach((b) => b.classList.remove("active"));
       btn.classList.add("active");
+      updateViewSwitcherGlider(btn);
       switchView(btn.dataset.view);
     });
   });
+  window.addEventListener("resize", () => updateViewSwitcherGlider());
+  requestAnimationFrame(() => updateViewSwitcherGlider());
+  if (document.fonts?.ready) {
+    document.fonts.ready.then(() => updateViewSwitcherGlider());
+  }
 
   // Comparador Subview Switcher (Lo que me falta vs Vista en Lista)
   if (el.btnSubviewMissing) {
@@ -3630,8 +3878,14 @@ function init() {
   const btnPlayMore = document.getElementById("btn-play-more");
   const moreMenu = document.getElementById("cyber-play-more-menu");
   if (btnPlayMore && moreMenu) {
+    const hideDockTip = () => {
+      const tip = document.getElementById("cyber-dock-tip");
+      if (tip) tip.classList.remove("is-visible");
+    };
+    btnPlayMore.addEventListener("pointerdown", hideDockTip);
     btnPlayMore.addEventListener("click", (e) => {
       e.stopPropagation();
+      hideDockTip();
       moreMenu.classList.toggle("hidden");
       if (moreMenu.classList.contains("hidden")) return;
       // "Detener juego" only while this instance's game is running: what the page knows right
@@ -3818,6 +4072,7 @@ function saveUsersToStorage() {
 // Set by initDraggableWelcomeDock: puts the welcome message back in its edge panel, at its place
 // among the windows docked there (called again once those are back, see restoreWindowsLayout).
 let placeDockedWelcome = null;
+let placeDockedPixelClock = null;
 
 // The welcome message can be dragged anywhere in Inicio and, like the windows, dropped on an edge
 // panel: there it is one more card of the panel's column (the docked windows can be reordered
@@ -3997,20 +4252,82 @@ function initFloatingPixelClock() {
   const modeBtn = document.getElementById("pixel-clock-mode-btn");
   if (!clock || !timeEl) return;
 
-  // Restore saved position
-  try {
-    const savedPos = localStorage.getItem("ika_pixel_clock_pos");
-    if (savedPos) {
-      const pos = JSON.parse(savedPos);
-      if (typeof pos.left === "number" && typeof pos.top === "number") {
-        clock.style.left = `${pos.left}px`;
-        clock.style.top = `${pos.top}px`;
-        clock.style.right = "auto";
-      }
+  const STORAGE_KEY = "ika_pixel_clock_pos";
+
+  // Stage slot comment to remember position when returning from edge panel
+  const stageSlot = document.createComment("home-pixel-clock");
+  clock.after(stageSlot);
+
+  const zoneOf = (side) => document.getElementById(side === "right" ? "edge-dock-zone-right" : "edge-dock-zone-left");
+  const dockedSide = () => (clock.classList.contains("is-docked-in-panel") ? clock.dataset.dockedSide : null);
+  const readSaved = () => {
+    try {
+      return JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}") || {};
+    } catch (err) {
+      console.warn("Could not restore pixel clock position:", err);
+      return {};
     }
-  } catch (err) {
-    console.warn("Could not restore pixel clock position:", err);
+  };
+
+  // last position as a floating block (kept while it is docked)
+  let floatPos = null;
+
+  function save() {
+    const side = dockedSide();
+    const state = {
+      ...(floatPos || {}),
+      dockedSide: side,
+      dockedIndex: side && clock.parentElement ? Array.from(clock.parentElement.children).indexOf(clock) : -1,
+    };
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    } catch (_) {}
+    saveHomeLayoutFile();
   }
+
+  function dockIntoPanel(side, before = null) {
+    const zone = zoneOf(side);
+    if (!zone) return;
+    clock.classList.add("is-docked-in-panel");
+    clock.dataset.dockedSide = side;
+    clock.style.left = "";
+    clock.style.top = "";
+    clock.style.right = "";
+    zone.insertBefore(clock, before);
+  }
+
+  function undock() {
+    clock.classList.remove("is-docked-in-panel");
+    delete clock.dataset.dockedSide;
+    stageSlot.before(clock);
+  }
+
+  // The card the pointer is above, among the others in the panel (null = after the last one).
+  const cardBelowPointer = (zone, clientY) =>
+    Array.from(zone.children)
+      .filter((c) => c !== clock)
+      .find((c) => {
+        const r = c.getBoundingClientRect();
+        return clientY < r.top + r.height / 2;
+      }) || null;
+
+  // Restore saved position or docked state
+  const saved = readSaved();
+  if (typeof saved.left === "number" && typeof saved.top === "number") {
+    floatPos = { left: saved.left, top: saved.top };
+    clock.style.left = `${floatPos.left}px`;
+    clock.style.top = `${floatPos.top}px`;
+    clock.style.right = "auto";
+  }
+
+  placeDockedPixelClock = () => {
+    const state = readSaved();
+    const zone = state.dockedSide ? zoneOf(state.dockedSide) : null;
+    if (!zone) return;
+    const others = Array.from(zone.children).filter((c) => c !== clock);
+    dockIntoPanel(state.dockedSide, others[state.dockedIndex] || null);
+  };
+  placeDockedPixelClock();
 
   let use24h = localStorage.getItem("ika_clock_24h") === "true";
 
@@ -4061,10 +4378,6 @@ function initFloatingPixelClock() {
 
   let isDragging = false;
   let dragMoved = false;
-  let startX = 0;
-  let startY = 0;
-  let initialLeft = 0;
-  let initialTop = 0;
 
   // Toggle 12h / 24h on click
   const toggleTimeFormat = (e) => {
@@ -4085,63 +4398,95 @@ function initFloatingPixelClock() {
     // Don't drag if clicking mode button
     if (e.target.closest("#pixel-clock-mode-btn")) return;
 
-    isDragging = true;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    let moved = false;
     dragMoved = false;
+    isDragging = true;
+
+    // where inside the block the pointer holds it while it floats
+    let grabX = 0;
+    let grabY = 0;
+    if (!dockedSide()) {
+      const rect = clock.getBoundingClientRect();
+      grabX = e.clientX - rect.left;
+      grabY = e.clientY - rect.top;
+    }
     clock.classList.add("is-dragging");
-    try {
-      clock.setPointerCapture(e.pointerId);
-    } catch (_) {}
 
-    const rect = clock.getBoundingClientRect();
-    const parentRect = clock.offsetParent ? clock.offsetParent.getBoundingClientRect() : { left: 0, top: 0 };
-    initialLeft = rect.left - parentRect.left;
-    initialTop = rect.top - parentRect.top;
-    startX = e.clientX;
-    startY = e.clientY;
-  });
-
-  clock.addEventListener("pointermove", (e) => {
-    if (!isDragging) return;
-    const dx = e.clientX - startX;
-    const dy = e.clientY - startY;
-
-    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+    const onPointerMove = (ev) => {
+      if (!moved && Math.abs(ev.clientX - startX) <= 3 && Math.abs(ev.clientY - startY) <= 3) return;
+      moved = true;
       dragMoved = true;
-    }
 
-    let newLeft = Math.round(initialLeft + dx);
-    let newTop = Math.round(initialTop + dy);
-
-    const maxLeft = Math.max(10, window.innerWidth - clock.offsetWidth - 20);
-    const maxTop = Math.max(56, window.innerHeight - clock.offsetHeight - 140);
-    newLeft = Math.max(10, Math.min(newLeft, maxLeft));
-    newTop = Math.max(56, Math.min(newTop, maxTop));
-
-    clock.style.left = `${newLeft}px`;
-    clock.style.top = `${newTop}px`;
-    clock.style.right = "auto";
-  });
-
-  const onClockPointerUp = (e) => {
-    if (!isDragging) return;
-    isDragging = false;
-    clock.classList.remove("is-dragging");
-    try {
-      clock.releasePointerCapture(e.pointerId);
-    } catch (_) {}
-
-    if (dragMoved) {
-      const curLeft = parseInt(clock.style.left, 10);
-      const curTop = parseInt(clock.style.top, 10);
-      if (!isNaN(curLeft) && !isNaN(curTop)) {
-        localStorage.setItem("ika_pixel_clock_pos", JSON.stringify({ left: curLeft, top: curTop }));
-        saveHomeLayoutFile();
+      if (dockedSide()) {
+        const panel = clock.closest(".home-edge-panel");
+        const panelRect = panel ? panel.getBoundingClientRect() : null;
+        const pulledOut = dockedSide() === "left"
+          ? (panelRect && ev.clientX > panelRect.right + 30)
+          : (panelRect && ev.clientX < panelRect.left - 30);
+        if (!pulledOut) {
+          // reorder inside the panel
+          const zone = clock.parentElement;
+          if (zone) {
+            const next = cardBelowPointer(zone, ev.clientY);
+            if (clock.nextElementSibling !== next) zone.insertBefore(clock, next);
+          }
+          return;
+        }
+        undock();
+        grabX = clock.offsetWidth / 2;
+        grabY = clock.offsetHeight / 2;
       }
-    }
-  };
 
-  clock.addEventListener("pointerup", onClockPointerUp);
-  clock.addEventListener("pointercancel", onClockPointerUp);
+      const parentRect = clock.offsetParent ? clock.offsetParent.getBoundingClientRect() : { left: 0, top: 0 };
+      const style = getComputedStyle(clock);
+      let newLeft = Math.round(ev.clientX - grabX - parentRect.left - parseFloat(style.marginLeft || 0));
+      let newTop = Math.round(ev.clientY - grabY - parentRect.top - parseFloat(style.marginTop || 0));
+
+      // Keep comfortably inside viewport
+      const maxLeft = Math.max(10, window.innerWidth - clock.offsetWidth - 20);
+      const maxTop = Math.max(56, window.innerHeight - clock.offsetHeight - 140);
+      newLeft = Math.max(10, Math.min(newLeft, maxLeft));
+      newTop = Math.max(56, Math.min(newTop, maxTop));
+
+      clock.style.left = `${newLeft}px`;
+      clock.style.top = `${newTop}px`;
+      clock.style.right = "auto";
+      updateEdgePanelsDragOver(ev.clientX, ev.clientY);
+    };
+
+    const onPointerUp = (ev) => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+      isDragging = false;
+      clock.classList.remove("is-dragging");
+      clearEdgePanelsDragOver();
+
+      if (!moved) return;
+
+      if (!dockedSide()) {
+        const dropSide = ev.type === "pointerup" ? checkDropOnEdgePanel(ev.clientX, ev.clientY) : null;
+        if (dropSide) {
+          dockIntoPanel(dropSide, cardBelowPointer(zoneOf(dropSide), ev.clientY));
+          document.getElementById(`home-edge-panel-${dropSide}`)?.classList.add("is-visible");
+        } else {
+          const curLeft = parseInt(clock.style.left, 10);
+          const curTop = parseInt(clock.style.top, 10);
+          if (!isNaN(curLeft) && !isNaN(curTop)) floatPos = { left: curLeft, top: curTop };
+        }
+      }
+      save();
+      // the windows docked in that panel may have a new place in it
+      saveWindowsLayout();
+    };
+
+    // On the window, not with pointer capture: moving between stage and panel releases capture
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerUp);
+  });
 }
 
 function updateHomeWelcomeUser() {
@@ -4171,10 +4516,13 @@ function renderUserBadge() {
       </div>
       <div class="user-badge-gear-wrap">
         <button type="button" class="user-badge-gear-btn" title="Configuración del Launcher">
-          <svg class="user-badge-gear-icon" viewBox="-13 -13 26 26" width="29" height="29" fill="none">
-            <path d="M -3.80,-6.58 Q -2.88,-7.12 -2.48,-9.25 Q -1.73,-10.95 0.00,-11.31 Q 1.73,-10.95 2.48,-9.25 Q 2.88,-7.12 3.80,-6.58 Q 4.73,-6.05 6.77,-6.77 Q 8.62,-6.98 9.80,-5.66 Q 10.35,-3.97 9.25,-2.48 Q 7.60,-1.07 7.60,0.00 Q 7.60,1.07 9.25,2.48 Q 10.35,3.97 9.80,5.66 Q 8.62,6.98 6.77,6.77 Q 4.73,6.05 3.80,6.58 Q 2.88,7.12 2.48,9.25 Q 1.73,10.95 0.00,11.31 Q -1.73,10.95 -2.48,9.25 Q -2.88,7.12 -3.80,6.58 Q -4.73,6.05 -6.77,6.77 Q -8.62,6.98 -9.80,5.66 Q -10.35,3.97 -9.25,2.48 Q -7.60,1.07 -7.60,0.00 Q -7.60,-1.07 -9.25,-2.48 Q -10.35,-3.97 -9.80,-5.66 Q -8.62,-6.98 -6.77,-6.77 Q -4.73,-6.05 -3.80,-6.58 Z"
-                  stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" stroke-linecap="round" />
-            <circle cx="0" cy="0" r="2.6" stroke="currentColor" stroke-width="1.7" />
+          <svg class="user-badge-gear-icon" viewBox="0 0 24 24" width="23" height="23" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="3" y1="6" x2="21" y2="6"></line>
+            <circle cx="8" cy="6" r="2.4" fill="currentColor"></circle>
+            <line x1="3" y1="12" x2="21" y2="12"></line>
+            <circle cx="16" cy="12" r="2.4" fill="currentColor"></circle>
+            <line x1="3" y1="18" x2="21" y2="18"></line>
+            <circle cx="10" cy="18" r="2.4" fill="currentColor"></circle>
           </svg>
         </button>
       </div>
@@ -4210,10 +4558,13 @@ function renderUserBadge() {
       </div>
       <div class="user-badge-gear-wrap">
         <button type="button" class="user-badge-gear-btn" title="Configuración del Launcher">
-          <svg class="user-badge-gear-icon" viewBox="-13 -13 26 26" width="29" height="29" fill="none">
-            <path d="M -3.80,-6.58 Q -2.88,-7.12 -2.48,-9.25 Q -1.73,-10.95 0.00,-11.31 Q 1.73,-10.95 2.48,-9.25 Q 2.88,-7.12 3.80,-6.58 Q 4.73,-6.05 6.77,-6.77 Q 8.62,-6.98 9.80,-5.66 Q 10.35,-3.97 9.25,-2.48 Q 7.60,-1.07 7.60,0.00 Q 7.60,1.07 9.25,2.48 Q 10.35,3.97 9.80,5.66 Q 8.62,6.98 6.77,6.77 Q 4.73,6.05 3.80,6.58 Q 2.88,7.12 2.48,9.25 Q 1.73,10.95 0.00,11.31 Q -1.73,10.95 -2.48,9.25 Q -2.88,7.12 -3.80,6.58 Q -4.73,6.05 -6.77,6.77 Q -8.62,6.98 -9.80,5.66 Q -10.35,3.97 -9.25,2.48 Q -7.60,1.07 -7.60,0.00 Q -7.60,-1.07 -9.25,-2.48 Q -10.35,-3.97 -9.80,-5.66 Q -8.62,-6.98 -6.77,-6.77 Q -4.73,-6.05 -3.80,-6.58 Z"
-                  stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" stroke-linecap="round" />
-            <circle cx="0" cy="0" r="2.6" stroke="currentColor" stroke-width="1.7" />
+          <svg class="user-badge-gear-icon" viewBox="0 0 24 24" width="23" height="23" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="3" y1="6" x2="21" y2="6"></line>
+            <circle cx="8" cy="6" r="2.4" fill="currentColor"></circle>
+            <line x1="3" y1="12" x2="21" y2="12"></line>
+            <circle cx="16" cy="12" r="2.4" fill="currentColor"></circle>
+            <line x1="3" y1="18" x2="21" y2="18"></line>
+            <circle cx="10" cy="18" r="2.4" fill="currentColor"></circle>
           </svg>
         </button>
       </div>
@@ -4242,21 +4593,49 @@ function applyProfileCover(dataUrl) {
   const header = document.querySelector(".profile-settings-header");
   if (!header) return;
   if (dataUrl) {
-    header.style.backgroundImage = `url("${dataUrl}")`;
-    header.style.backgroundRepeat = "no-repeat";
-    header.style.backgroundSize = "cover";
-    header.style.backgroundPosition = "center";
+    header.style.setProperty("background-image", `url("${dataUrl}")`, "important");
+    header.style.setProperty("background-repeat", "no-repeat", "important");
+    header.style.setProperty("background-size", "cover", "important");
+    header.style.setProperty("background-position", "center", "important");
   } else {
-    header.style.backgroundImage = 'url("/cyber_doodle_pattern.svg")';
-    header.style.backgroundRepeat = "repeat";
-    header.style.backgroundSize = "220px 220px";
-    header.style.backgroundPosition = "center";
+    header.style.setProperty("background-image", 'url("/cyber_doodle_pattern.svg")', "important");
+    header.style.setProperty("background-repeat", "repeat", "important");
+    header.style.setProperty("background-size", "220px 220px", "important");
+    header.style.setProperty("background-position", "center", "important");
   }
 }
+
+let isClosingLauncherSettingsModal = false;
 
 function openLauncherSettingsModal() {
   const modal = document.getElementById("modal-launcher-settings");
   if (!modal) return;
+  isClosingLauncherSettingsModal = false;
+
+  // Ensure modal box opens at its saved position without jumping
+  const modalBox = document.getElementById("modal-settings-box") || modal.querySelector(".modal-settings-box");
+  if (modalBox) {
+    modalBox.style.transition = "none";
+    const savedLeft = localStorage.getItem("ika_pref_pos_left");
+    const savedTop = localStorage.getItem("ika_pref_pos_top");
+    const savedW = localStorage.getItem("ika_pref_width");
+    const savedH = localStorage.getItem("ika_pref_height");
+    if (savedW) modalBox.style.setProperty("width", `${savedW}px`, "important");
+    if (savedH) modalBox.style.setProperty("height", `${savedH}px`, "important");
+    if (savedLeft !== null && savedTop !== null) {
+      modalBox.style.position = "absolute";
+      modalBox.style.left = `${savedLeft}px`;
+      modalBox.style.top = `${savedTop}px`;
+      modalBox.style.transform = "none";
+      modalBox.style.margin = "0";
+    } else {
+      const savedX = parseFloat(localStorage.getItem("ika_pref_pos_x") || "0") || 0;
+      const savedY = parseFloat(localStorage.getItem("ika_pref_pos_y") || "0") || 0;
+      modalBox.style.transform = (savedX !== 0 || savedY !== 0) ? `translate(${savedX}px, ${savedY}px)` : "";
+      modalBox.style.left = "";
+      modalBox.style.top = "";
+    }
+  }
 
   // Apply custom cover if saved
   applyProfileCover(localStorage.getItem("ika_custom_cover_bg"));
@@ -4295,9 +4674,19 @@ function openLauncherSettingsModal() {
   if (listView) listView.classList.remove("hidden");
   if (detailView) detailView.classList.add("hidden");
   if (accountDropdown) accountDropdown.classList.add("hidden");
+  const appMainInit = document.getElementById("appearance-main-view");
+  const appDetailInit = document.getElementById("appearance-section-detail-view");
+  if (appMainInit) appMainInit.classList.remove("hidden");
+  if (appDetailInit) appDetailInit.classList.add("hidden");
   if (searchInput) {
     searchInput.value = "";
     document.querySelectorAll(".settings-nav-row").forEach((row) => row.classList.remove("hidden"));
+  }
+
+  // Populate Extras: Hide welcome text
+  const hideWelcomeCb = document.getElementById("setting-hide-welcome-text");
+  if (hideWelcomeCb) {
+    hideWelcomeCb.checked = localStorage.getItem("ika_hide_welcome_text") === "true";
   }
 
   // 3. Populate Settings Values
@@ -4351,75 +4740,93 @@ function openLauncherSettingsModal() {
     arcadeSounds.checked = localStorage.getItem("ika_launcher_arcade_sounds") !== "false";
   }
 
-  modal.classList.remove("hidden");
+  modal.classList.remove("hidden", "is-closing");
+  modal.classList.add("is-opening");
+  void modal.offsetWidth;
 }
 
-function closeLauncherSettingsModal() {
+function closeLauncherSettingsModal(immediate = false) {
   const modal = document.getElementById("modal-launcher-settings");
-  if (modal) {
-    // Auto-save modified settings on close
-    try {
-      const ramInputLauncher = document.getElementById("setting-global-ram");
-      if (ramInputLauncher) localStorage.setItem("ika_launcher_ram", ramInputLauncher.value);
+  if (!modal || modal.classList.contains("hidden")) return;
 
-      const closeAction = document.getElementById("setting-launcher-close-action");
-      if (closeAction) localStorage.setItem("ika_launcher_close_action", closeAction.value);
+  // Auto-save modified settings on close
+  try {
+    const ramInputLauncher = document.getElementById("setting-global-ram");
+    if (ramInputLauncher) localStorage.setItem("ika_launcher_ram", ramInputLauncher.value);
 
-      const langSelect = document.getElementById("setting-launcher-language");
-      if (langSelect) localStorage.setItem("ika_launcher_language", langSelect.value);
+    const closeAction = document.getElementById("setting-launcher-close-action");
+    if (closeAction) localStorage.setItem("ika_launcher_close_action", closeAction.value);
 
-      const javaPathInput = document.getElementById("setting-global-java-path");
-      if (javaPathInput) localStorage.setItem("ika_launcher_java_path", javaPathInput.value.trim());
+    const langSelect = document.getElementById("setting-launcher-language");
+    if (langSelect) localStorage.setItem("ika_launcher_language", langSelect.value);
 
-      const jvmArgsInput = document.getElementById("setting-global-jvm-args");
-      if (jvmArgsInput) localStorage.setItem("ika_launcher_jvm_args", jvmArgsInput.value.trim());
+    const javaPathInput = document.getElementById("setting-global-java-path");
+    if (javaPathInput) localStorage.setItem("ika_launcher_java_path", javaPathInput.value.trim());
 
-      const hudGlow = document.getElementById("setting-hud-glow-intensity");
-      if (hudGlow) localStorage.setItem("ika_launcher_hud_glow", hudGlow.value);
+    const jvmArgsInput = document.getElementById("setting-global-jvm-args");
+    if (jvmArgsInput) localStorage.setItem("ika_launcher_jvm_args", jvmArgsInput.value.trim());
 
-      const clockTheme = document.getElementById("setting-clock-theme");
-      if (clockTheme) localStorage.setItem("ika_launcher_clock_theme", clockTheme.value);
+    const hudGlow = document.getElementById("setting-hud-glow-intensity");
+    if (hudGlow) localStorage.setItem("ika_launcher_hud_glow", hudGlow.value);
 
-      const hwAccel = document.getElementById("setting-hw-accel");
-      if (hwAccel) localStorage.setItem("ika_launcher_hw_accel", hwAccel.checked ? "true" : "false");
+    const clockTheme = document.getElementById("setting-clock-theme");
+    if (clockTheme) localStorage.setItem("ika_launcher_clock_theme", clockTheme.value);
 
-      const arcadeSounds = document.getElementById("setting-arcade-sounds");
-      if (arcadeSounds) localStorage.setItem("ika_launcher_arcade_sounds", arcadeSounds.checked ? "true" : "false");
+    const hwAccel = document.getElementById("setting-hw-accel");
+    if (hwAccel) localStorage.setItem("ika_launcher_hw_accel", hwAccel.checked ? "true" : "false");
 
-      const editNameInput = document.getElementById("input-profile-edit-name");
-      const editHandleInput = document.getElementById("input-profile-edit-handle");
-      const editQuoteInput = document.getElementById("input-profile-edit-quote");
+    const arcadeSounds = document.getElementById("setting-arcade-sounds");
+    if (arcadeSounds) localStorage.setItem("ika_launcher_arcade_sounds", arcadeSounds.checked ? "true" : "false");
 
-      if (editNameInput && editNameInput.value.trim()) {
-        const newName = editNameInput.value.trim();
-        localStorage.setItem("ika_user_display_name", newName);
-        const dNameEl = document.getElementById("profile-display-name");
-        if (dNameEl) dNameEl.textContent = newName;
-        if (state.activeUser) state.activeUser.displayName = newName;
-      }
-      if (editHandleInput && editHandleInput.value.trim()) {
-        const newHandle = editHandleInput.value.trim().replace(/^@/, '');
-        localStorage.setItem("ika_user_handle", newHandle);
-        const hEl = document.getElementById("profile-handle");
-        if (hEl) hEl.textContent = `@${newHandle}`;
-        if (state.activeUser) state.activeUser.username = newHandle;
-      }
-      if (editQuoteInput && editQuoteInput.value.trim()) {
-        const newQuote = editQuoteInput.value.trim();
-        localStorage.setItem("ika_user_status_quote", newQuote);
-        if (state.activeUser) state.activeUser.statusQuote = newQuote;
-      }
-      if (state.activeUser) saveUsersToStorage();
-      renderUserBadge();
-    } catch (e) {
-      console.warn("Auto-save on settings close:", e);
+    const editNameInput = document.getElementById("input-profile-edit-name");
+    const editHandleInput = document.getElementById("input-profile-edit-handle");
+    const editQuoteInput = document.getElementById("input-profile-edit-quote");
+
+    if (editNameInput && editNameInput.value.trim()) {
+      const newName = editNameInput.value.trim();
+      localStorage.setItem("ika_user_display_name", newName);
+      const dNameEl = document.getElementById("profile-display-name");
+      if (dNameEl) dNameEl.textContent = newName;
+      if (state.activeUser) state.activeUser.displayName = newName;
     }
-
-    modal.classList.add("hidden");
-    modal.classList.remove("preview-appearance");
-    const accountDropdown = document.getElementById("profile-account-dropdown");
-    if (accountDropdown) accountDropdown.classList.add("hidden");
+    if (editHandleInput && editHandleInput.value.trim()) {
+      const newHandle = editHandleInput.value.trim().replace(/^@/, '');
+      localStorage.setItem("ika_user_handle", newHandle);
+      const hEl = document.getElementById("profile-handle");
+      if (hEl) hEl.textContent = `@${newHandle}`;
+      if (state.activeUser) state.activeUser.username = newHandle;
+    }
+    if (editQuoteInput && editQuoteInput.value.trim()) {
+      const newQuote = editQuoteInput.value.trim();
+      localStorage.setItem("ika_user_status_quote", newQuote);
+      if (state.activeUser) state.activeUser.statusQuote = newQuote;
+    }
+    if (state.activeUser) saveUsersToStorage();
+    renderUserBadge();
+  } catch (e) {
+    console.warn("Auto-save on settings close:", e);
   }
+
+  const accountDropdown = document.getElementById("profile-account-dropdown");
+  if (accountDropdown) accountDropdown.classList.add("hidden");
+
+  if (immediate) {
+    modal.classList.add("hidden");
+    modal.classList.remove("is-closing", "is-opening", "preview-appearance");
+    isClosingLauncherSettingsModal = false;
+    return;
+  }
+
+  if (isClosingLauncherSettingsModal) return;
+  isClosingLauncherSettingsModal = true;
+  modal.classList.add("is-closing");
+  modal.classList.remove("is-opening");
+
+  setTimeout(() => {
+    modal.classList.add("hidden");
+    modal.classList.remove("is-closing", "preview-appearance");
+    isClosingLauncherSettingsModal = false;
+  }, 240);
 }
 
 let isClosingInstanceSettingsModal = false;
@@ -4569,12 +4976,12 @@ function initSettingsModals() {
     appearance: "Aspecto Visual",
     system: "Sistema",
     language: "Idioma",
-    update: "Actualizar",
+    update: "Acerca de Ika Launcher",
   };
 
   const modalBoxEl = modalLauncher ? (document.getElementById("modal-settings-box") || modalLauncher.querySelector(".modal-settings-box")) : null;
-  let modalCurrentX = 0;
-  let modalCurrentY = 0;
+  let modalCurrentX = parseFloat(localStorage.getItem("ika_pref_pos_x") || "0") || 0;
+  let modalCurrentY = parseFloat(localStorage.getItem("ika_pref_pos_y") || "0") || 0;
   let modalHasBeenDragged = false;
 
   function setModalBoxPosition(x, y, animate = false) {
@@ -4611,8 +5018,24 @@ function initSettingsModals() {
       modalBoxEl.classList.add("is-dragging");
       startMouseX = e.clientX;
       startMouseY = e.clientY;
-      startBoxX = modalCurrentX;
-      startBoxY = modalCurrentY;
+
+      const container = modalBoxEl.offsetParent || document.body;
+      const containerRect = container.getBoundingClientRect();
+      const elemRect = modalBoxEl.getBoundingClientRect();
+
+      modalBoxEl.style.position = "absolute";
+      modalBoxEl.style.right = "auto";
+      modalBoxEl.style.bottom = "auto";
+      modalBoxEl.style.transform = "none";
+      modalBoxEl.style.margin = "0";
+
+      const currentLeft = elemRect.left - containerRect.left;
+      const currentTop = elemRect.top - containerRect.top;
+      modalBoxEl.style.left = `${currentLeft}px`;
+      modalBoxEl.style.top = `${currentTop}px`;
+
+      startBoxX = currentLeft;
+      startBoxY = currentTop;
       document.body.style.userSelect = "none";
     });
 
@@ -4620,15 +5043,22 @@ function initSettingsModals() {
       if (!isDragging) return;
       const dx = e.clientX - startMouseX;
       const dy = e.clientY - startMouseY;
-      let newX = startBoxX + dx;
-      let newY = startBoxY + dy;
+      const container = modalBoxEl.offsetParent || document.body;
+      const cWidth = container.clientWidth || window.innerWidth;
+      const cHeight = container.clientHeight || window.innerHeight;
+      const eWidth = modalBoxEl.offsetWidth;
+      const eHeight = modalBoxEl.offsetHeight;
 
-      const maxOffX = Math.max(100, (window.innerWidth / 2) - 100);
-      const maxOffY = Math.max(80, (window.innerHeight / 2) - 60);
-      newX = Math.max(-maxOffX, Math.min(maxOffX, newX));
-      newY = Math.max(-maxOffY, Math.min(maxOffY, newY));
+      const minLeft = 6;
+      const maxLeft = Math.max(minLeft, cWidth - eWidth - 6);
+      const minTop = 6;
+      const maxTop = Math.max(minTop, cHeight - eHeight - 6);
 
-      setModalBoxPosition(newX, newY, false);
+      let newLeft = Math.max(minLeft, Math.min(startBoxX + dx, maxLeft));
+      let newTop = Math.max(minTop, Math.min(startBoxY + dy, maxTop));
+
+      modalBoxEl.style.left = `${newLeft}px`;
+      modalBoxEl.style.top = `${newTop}px`;
     });
 
     const stopDragging = () => {
@@ -4636,13 +5066,96 @@ function initSettingsModals() {
         isDragging = false;
         if (modalBoxEl) modalBoxEl.classList.remove("is-dragging");
         document.body.style.userSelect = "";
+        if (modalBoxEl && modalBoxEl.style.left) {
+          localStorage.setItem("ika_pref_pos_left", modalBoxEl.style.left.replace("px", ""));
+          localStorage.setItem("ika_pref_pos_top", modalBoxEl.style.top.replace("px", ""));
+        }
       }
     };
     window.addEventListener("mouseup", stopDragging);
   }
 
+  let currentAppearanceSec = null;
+  let currentDetailPanelKey = null;
+
+  const APPEARANCE_SEC_TITLES = {
+    inicio: "Inicio",
+    consola: "Consola",
+    comparador: "Comparador",
+    gestor: "Gestor de instancias",
+    servidores: "Servidores",
+    extras: "Extras"
+  };
+
+  function renderSettingsBreadcrumb(panelKey, subSecKey = null) {
+    const trail = document.getElementById("settings-breadcrumb-trail");
+    if (!trail) return;
+
+    const panelName = panelTitles[panelKey] || (panelKey ? (panelKey.charAt(0).toUpperCase() + panelKey.slice(1)) : "Configuración");
+
+    if (!subSecKey) {
+      trail.innerHTML = `
+        <button type="button" class="settings-bc-item settings-bc-link" id="settings-bc-root">Ajustes</button>
+        <span class="settings-bc-sep">\\</span>
+        <span class="settings-bc-item settings-bc-current" id="settings-subview-heading">${panelName}</span>
+      `;
+    } else {
+      const secTitle = APPEARANCE_SEC_TITLES[subSecKey] || subSecKey;
+      trail.innerHTML = `
+        <button type="button" class="settings-bc-item settings-bc-link" id="settings-bc-root">Ajustes</button>
+        <span class="settings-bc-sep">\\</span>
+        <button type="button" class="settings-bc-item settings-bc-link" id="settings-bc-panel">${panelName}</button>
+        <span class="settings-bc-sep">\\</span>
+        <span class="settings-bc-item settings-bc-current" id="settings-subview-heading">${secTitle}</span>
+      `;
+      const btnPanel = document.getElementById("settings-bc-panel");
+      if (btnPanel) {
+        btnPanel.addEventListener("click", (e) => {
+          e.stopPropagation();
+          if (panelKey === "appearance") {
+            showAppearanceMainView();
+          }
+        });
+      }
+    }
+
+    const btnRoot = document.getElementById("settings-bc-root");
+    if (btnRoot) {
+      btnRoot.addEventListener("click", (e) => {
+        e.stopPropagation();
+        showListView();
+      });
+    }
+  }
+
+  function showAppearanceMainView() {
+    currentAppearanceSec = null;
+    const appMain = document.getElementById("appearance-main-view");
+    const appDetail = document.getElementById("appearance-section-detail-view");
+    if (appMain) appMain.classList.remove("hidden");
+    if (appDetail) appDetail.classList.add("hidden");
+
+    renderSettingsBreadcrumb("appearance", null);
+  }
+
+  function showAppearanceSectionDetail(secKey) {
+    currentAppearanceSec = secKey;
+    const appMain = document.getElementById("appearance-main-view");
+    const appDetail = document.getElementById("appearance-section-detail-view");
+    if (appMain) appMain.classList.add("hidden");
+    if (appDetail) appDetail.classList.remove("hidden");
+
+    const panels = document.querySelectorAll("#appearance-section-detail-view .appearance-sec-detail-panel");
+    panels.forEach((p) => {
+      p.classList.toggle("hidden", p.dataset.appearancePanel !== secKey);
+    });
+
+    renderSettingsBreadcrumb("appearance", secKey);
+  }
+
   function showDetailPanel(targetKey) {
     if (!listView || !detailView) return;
+    currentDetailPanelKey = targetKey;
     listView.classList.add("hidden");
     detailView.classList.remove("hidden");
 
@@ -4653,17 +5166,15 @@ function initSettingsModals() {
     const targetEl = document.getElementById(`settings-panel-${targetKey}`);
     if (targetEl) targetEl.classList.remove("hidden");
 
-    if (subviewHeading) {
-      subviewHeading.textContent = panelTitles[targetKey] || "Configuración";
+    if (targetKey === "appearance") {
+      showAppearanceMainView();
+    } else {
+      currentAppearanceSec = null;
+      renderSettingsBreadcrumb(targetKey, null);
     }
 
     if (targetKey === "appearance" && modalLauncher) {
       modalLauncher.classList.add("preview-appearance");
-      // If user hasn't manually moved the modal yet, auto-shift it slightly to the right so center is visible
-      if (!modalHasBeenDragged && window.innerWidth >= 1000) {
-        const autoShift = Math.min(260, Math.floor((window.innerWidth - 640) / 2));
-        setModalBoxPosition(autoShift, 0, true);
-      }
     } else if (modalLauncher) {
       modalLauncher.classList.remove("preview-appearance");
     }
@@ -4671,12 +5182,88 @@ function initSettingsModals() {
 
   function showListView() {
     if (!listView || !detailView) return;
+    currentAppearanceSec = null;
     detailView.classList.add("hidden");
     listView.classList.remove("hidden");
     if (modalLauncher) {
       modalLauncher.classList.remove("preview-appearance");
     }
   }
+
+  // ==========================================
+  // Aspecto Visual: Carousel & Sections
+  // ==========================================
+  const themeScroller = document.getElementById("theme-carousel-scroller");
+  const btnThemePrev = document.getElementById("btn-theme-prev");
+  const btnThemeNext = document.getElementById("btn-theme-next");
+
+  if (btnThemePrev && themeScroller) {
+    btnThemePrev.addEventListener("click", () => {
+      const step = (themeScroller.firstElementChild ? themeScroller.firstElementChild.offsetWidth : 160) + 10;
+      themeScroller.scrollBy({ left: -step, behavior: "smooth" });
+    });
+  }
+
+  if (btnThemeNext && themeScroller) {
+    btnThemeNext.addEventListener("click", () => {
+      const step = (themeScroller.firstElementChild ? themeScroller.firstElementChild.offsetWidth : 160) + 10;
+      themeScroller.scrollBy({ left: step, behavior: "smooth" });
+    });
+  }
+
+  // Extras: Ocultar / Mostrar texto de bienvenida
+  const hideWelcomeCb = document.getElementById("setting-hide-welcome-text");
+  const homeWelcomeDock = document.getElementById("home-welcome-dock");
+  const applyWelcomeDockVisibility = (hide) => {
+    if (homeWelcomeDock) {
+      homeWelcomeDock.classList.toggle("hidden", !!hide);
+    }
+  };
+
+  const initialHideWelcome = localStorage.getItem("ika_hide_welcome_text") === "true";
+  applyWelcomeDockVisibility(initialHideWelcome);
+  if (hideWelcomeCb) {
+    hideWelcomeCb.checked = initialHideWelcome;
+    hideWelcomeCb.addEventListener("change", (e) => {
+      const hide = e.target.checked;
+      localStorage.setItem("ika_hide_welcome_text", hide ? "true" : "false");
+      applyWelcomeDockVisibility(hide);
+    });
+  }
+
+  // Switches de personalización por sección
+  const SECTION_SWITCH_KEYS = [
+    { id: "setting-ui-show-clock", key: "ika_ui_show_clock", targetId: "pixel-clock-container" },
+    { id: "setting-ui-hud-glow", key: "ika_ui_hud_glow" },
+    { id: "setting-ui-console-autoscroll", key: "ika_ui_console_autoscroll" },
+    { id: "setting-ui-console-colors", key: "ika_ui_console_colors" },
+    { id: "setting-ui-diff-glow", key: "ika_ui_diff_glow" },
+    { id: "setting-ui-diff-compact", key: "ika_ui_diff_compact" },
+    { id: "setting-ui-inst-badges", key: "ika_ui_inst_badges" },
+    { id: "setting-ui-inst-tilt", key: "ika_ui_inst_tilt" },
+    { id: "setting-ui-server-ping", key: "ika_ui_server_ping" },
+    { id: "setting-ui-server-motd", key: "ika_ui_server_motd" }
+  ];
+
+  SECTION_SWITCH_KEYS.forEach(({ id, key, targetId }) => {
+    const cb = document.getElementById(id);
+    if (!cb) return;
+    const saved = localStorage.getItem(key);
+    if (saved !== null) {
+      cb.checked = saved === "true";
+    }
+    if (targetId) {
+      const targetEl = document.getElementById(targetId);
+      if (targetEl) targetEl.classList.toggle("hidden", !cb.checked);
+    }
+    cb.addEventListener("change", () => {
+      localStorage.setItem(key, cb.checked ? "true" : "false");
+      if (targetId) {
+        const targetEl = document.getElementById(targetId);
+        if (targetEl) targetEl.classList.toggle("hidden", !cb.checked);
+      }
+    });
+  });
 
   if (modalLauncher) {
     modalLauncher.querySelectorAll(".settings-nav-row").forEach((row) => {
@@ -4687,8 +5274,23 @@ function initSettingsModals() {
     });
   }
 
+  // Wire up Aspecto Visual section drilldown rows & breadcrumb
+  const appearanceSecRows = document.querySelectorAll(".appearance-section-row");
+  appearanceSecRows.forEach((row) => {
+    row.addEventListener("click", () => {
+      const sec = row.dataset.appearanceSec;
+      if (sec) showAppearanceSectionDetail(sec);
+    });
+  });
+
   if (btnSubviewBack) {
-    btnSubviewBack.addEventListener("click", showListView);
+    btnSubviewBack.addEventListener("click", () => {
+      if (currentAppearanceSec) {
+        showAppearanceMainView();
+      } else {
+        showListView();
+      }
+    });
   }
 
   // Search Toggle & Live Filtering
@@ -4890,8 +5492,8 @@ function initSettingsModals() {
     inputProfileCoverFile.addEventListener("change", (e) => {
       const file = e.target.files && e.target.files[0];
       if (!file) return;
-      if (!file.type.startsWith("image/")) {
-        showToast("Por favor selecciona un archivo de imagen (.png, .jpg, .webp)");
+      if (!file.type.startsWith("image/") && !file.name.match(/\.(png|jpe?g|webp|jfif|bmp|gif|avif)$/i)) {
+        showToast("Por favor selecciona un archivo de imagen válido");
         return;
       }
       const reader = new FileReader();
@@ -5011,14 +5613,15 @@ function initSettingsModals() {
       if (!loadedCoverImg) return;
       try {
         const { w: Vw, h: Vh } = getCoverViewportSize();
-        const srcX = Math.max(0, -coverPanX / coverScale);
-        const srcY = Math.max(0, -coverPanY / coverScale);
-        const srcW = Math.min(loadedCoverImg.naturalWidth - srcX, Vw / coverScale);
-        const srcH = Math.min(loadedCoverImg.naturalHeight - srcY, Vh / coverScale);
+        const curScale = coverScale || 1;
+        const srcX = Math.max(0, -coverPanX / curScale);
+        const srcY = Math.max(0, -coverPanY / curScale);
+        const srcW = Math.max(10, Math.min(loadedCoverImg.naturalWidth - srcX, Vw / curScale));
+        const srcH = Math.max(10, Math.min(loadedCoverImg.naturalHeight - srcY, Vh / curScale));
 
         const canvas = document.createElement("canvas");
-        const targetW = 1200;
-        const targetH = Math.round(targetW * (Vh / Vw));
+        const targetW = 1000;
+        const targetH = Math.round(targetW * (Vh / Vw)) || 375;
         canvas.width = targetW;
         canvas.height = targetH;
 
@@ -5027,9 +5630,20 @@ function initSettingsModals() {
         ctx.imageSmoothingQuality = "high";
         ctx.drawImage(loadedCoverImg, srcX, srcY, srcW, srcH, 0, 0, targetW, targetH);
 
-        const finalDataUrl = canvas.toDataURL("image/jpeg", 0.90);
-        localStorage.setItem("ika_custom_cover_bg", finalDataUrl);
+        const finalDataUrl = canvas.toDataURL("image/jpeg", 0.85);
+
+        // Apply immediately to header in DOM
         applyProfileCover(finalDataUrl);
+
+        try {
+          localStorage.setItem("ika_custom_cover_bg", finalDataUrl);
+        } catch (storageErr) {
+          console.warn("Storage quota exceeded, trying lower quality:", storageErr);
+          try {
+            const smallerDataUrl = canvas.toDataURL("image/jpeg", 0.65);
+            localStorage.setItem("ika_custom_cover_bg", smallerDataUrl);
+          } catch (_) {}
+        }
 
         closeCoverAdjusterModal();
         showToast("¡Portada de perfil actualizada con éxito!");
@@ -5277,7 +5891,16 @@ function initSettingsModals() {
   const btnCheckUpdates = document.getElementById("btn-check-updates");
   if (btnCheckUpdates) {
     btnCheckUpdates.addEventListener("click", () => {
-      showToast("Comprobando actualizaciones... Tienes la versión más reciente (v0.1.0 Cyber Edition).");
+      showToast("Comprobando actualizaciones... Tienes la versión más reciente (v1.5.5 Cyber Edition).");
+    });
+  }
+
+  const btnOpenGithub = document.getElementById("btn-open-github-repo");
+  if (btnOpenGithub) {
+    btnOpenGithub.addEventListener("click", () => {
+      invoke("open_browser", { url: "https://github.com/Xamply/Ika" }).catch(() => {
+        window.open("https://github.com/Xamply/Ika", "_blank");
+      });
     });
   }
 
@@ -11841,11 +12464,14 @@ function renderHomeInstanceCarousel() {
     const javaVer = javaInfo.version;
     const coverUrl = getInstanceCoverUrl(inst, idx);
     const isActive = offset === 0;
+    const isNear = Math.abs(offset) === 1;
+    const isFar = Math.abs(offset) === 2;
     const isFav = favoriteInstances.has(inst.path);
 
     const cardItem = document.createElement("div");
-    cardItem.className = `carousel-card-item ${isActive ? "is-active" : "is-side"}`;
+    cardItem.className = `carousel-card-item ${isActive ? "is-active" : "is-side"} ${isNear ? "is-side-near" : ""} ${isFar ? "is-side-far" : ""}`;
     cardItem.dataset.instanceIndex = idx;
+    cardItem.dataset.offset = offset;
     cardItem.title = isActive ? `${displayName} (Activa)` : `Seleccionar: ${displayName}`;
 
     const cardBody = document.createElement("div");
@@ -11973,11 +12599,9 @@ function renderHomeInstanceCarousel() {
       badgesRow.innerHTML = `
         <span class="card-badge-item badge-mc-ver">${mcVer}</span>
         <span class="card-badge-item badge-loader">
-          ${getLoaderIconSvg(loader)}
           <span>${loader}</span>
         </span>
         <span class="card-badge-item badge-mods">
-          ${getModsIconSvg()}
           <span>${modCount} mods</span>
         </span>
         <span class="card-badge-item badge-java" title="${javaInfo.version} (${javaInfo.vendorTitle})">
@@ -12005,12 +12629,12 @@ function renderHomeInstanceCarousel() {
       const svgNS = "http://www.w3.org/2000/svg";
       const svg = document.createElementNS(svgNS, "svg");
       svg.setAttribute("class", "card-border-svg");
-      svg.setAttribute("viewBox", "0 0 320 192");
+      svg.setAttribute("viewBox", "0 0 364 218");
       svg.setAttribute("preserveAspectRatio", "none");
       svg.setAttribute("fill", "none");
       svg.setAttribute("aria-hidden", "true");
       svg.innerHTML = `
-        <rect x="1" y="1" width="318" height="190" rx="16" ry="16"
+        <rect x="1" y="1" width="362" height="216" rx="16" ry="16"
               fill="none"
               stroke="url(#cardGodStrokeGrad)"
               stroke-width="2"
@@ -12033,6 +12657,14 @@ function renderHomeInstanceCarousel() {
         switchHomeInstance(idx, dir);
       });
     }
+
+    // Right-click context menu (supports deleting or managing any instance on the carousel)
+    cardItem.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      closeColeccionContextMenu();
+      openCarouselInstanceContextMenu(e.clientX, e.clientY, inst, idx);
+    });
 
     el.instanceCarouselTrack.appendChild(cardItem);
   });
@@ -12201,7 +12833,7 @@ function updateInstanceSpecsBar(inst, skipLiveFetch = false) {
   const elIconContainer = document.getElementById("spec-jvm-icon-container");
   if (elIconContainer) {
     elIconContainer.innerHTML = javaInfo.iconHtml;
-    elIconContainer.style.filter = `drop-shadow(0 0 7px ${javaInfo.color}88)`;
+    elIconContainer.style.filter = "none";
   }
 
   const specItemJvm = document.getElementById("spec-item-jvm");
@@ -12288,21 +12920,34 @@ const gameLogTotals = new Map(); // normalized instance path -> lines received s
 
 // Launch state of each instance, shown in the console window header.
 const gameStates = new Map(); // normalized instance path -> { state, detail }
+const gameSessionStartTimes = new Map(); // normalized instance path -> launch timestamp ms
 const HCP_STATE_TEXT = {
   idle: "Listo para jugar",
-  preparing: "Preparando",
+  preparing: "Iniciando...",
   running: "Cargando Minecraft",
   menu: "Listo",
   world: "Cargando el mundo",
   connecting: "Conectando",
   ingame: "Jugando",
-  closed: "Cierre correcto",
+  closed: "Sesión terminada",
   crashed: "Crasheó",
   failed: "No se pudo iniciar",
 };
 
+function formatSessionDuration(ms) {
+  const totalSec = Math.max(1, Math.round(ms / 1000));
+  const hrs = Math.floor(totalSec / 3600);
+  const mins = Math.floor((totalSec % 3600) / 60);
+  const secs = totalSec % 60;
+  const pad = (n) => String(n).padStart(2, "0");
+  if (hrs > 0) {
+    return `${pad(hrs)} h ${pad(mins)} min ${pad(secs)} s`;
+  }
+  return `${pad(mins)} min ${pad(secs)} s`;
+}
+
 function currentHomeInstance() {
-  return (homeInstancesList && homeInstancesList[homeCurrentInstanceIndex]) || null;
+  return (homeInstancesList && homeInstancesList[homeCurrentInstanceIndex]) || (homeInstancesAll && homeInstancesAll[0]) || null;
 }
 
 function resolveDockActiveInstance() {
@@ -12384,10 +13029,14 @@ function syncPlayButtonLock() {
 
 function renderHcpState(fileState) {
   const box = document.getElementById("hcp-state");
-  const inst = currentHomeInstance();
+  const inst = resolveDockActiveInstance() || currentHomeInstance();
   const st = inst ? gameStates.get(normInstancePath(inst.path)) : null;
-  const state = st?.state || (fileState === "running" ? "running" : (fileState === "closed" ? "closed" : "idle"));
-  const text = st?.detail ? `${HCP_STATE_TEXT[state]} · ${st.detail}` : (HCP_STATE_TEXT[state] || "Cierre correcto");
+  const state = st?.state || (fileState === "running" ? "running" : (fileState === "closed" ? "closed" : (fileState === "preparing" ? "preparing" : "idle")));
+  const text = (state === "preparing")
+    ? (HCP_STATE_TEXT.preparing || "Iniciando...")
+    : (st?.detail && state !== "running" && state !== "idle"
+        ? `${HCP_STATE_TEXT[state] || state} · ${st.detail}`
+        : (HCP_STATE_TEXT[state] || "Sesión terminada"));
   if (box) {
     box.dataset.state = state;
     box.title = text;
@@ -12408,7 +13057,7 @@ function renderHcpState(fileState) {
     footerText.textContent = text;
   }
   if (footerIcon) {
-    if (state === "closed" || state === "idle") {
+    if (state === "closed" || state === "idle" || state === "menu") {
       footerIcon.innerHTML = `<svg viewBox="0 0 24 24" width="22" height="22" fill="none">
         <circle cx="12" cy="12" r="10" stroke="#34d399" stroke-width="2.2" />
         <polyline points="7.5 12 10.5 15 16.5 9" stroke="#34d399" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
@@ -12419,10 +13068,10 @@ function renderHcpState(fileState) {
         <line x1="12" y1="8" x2="12" y2="13" stroke="#ef4444" stroke-width="2.2" stroke-linecap="round"/>
         <circle cx="12" cy="16.5" r="1" fill="#ef4444" />
       </svg>`;
-    } else if (state === "running" || state === "world" || state === "connecting" || state === "menu" || state === "ingame") {
+    } else if (state === "preparing" || state === "running" || state === "world" || state === "connecting" || state === "ingame") {
       footerIcon.innerHTML = `<svg viewBox="0 0 24 24" width="22" height="22" fill="none">
-        <circle cx="12" cy="12" r="10" stroke="#38bdf8" stroke-width="2.2" stroke-dasharray="16 8" class="hcp-spin" />
-        <polygon points="10 8 16 12 10 16" fill="#38bdf8" />
+        <circle cx="12" cy="12" r="10" stroke="#e879f9" stroke-width="2.2" stroke-dasharray="16 8" class="hcp-spin" />
+        <polygon points="10 8 16 12 10 16" fill="#e879f9" />
       </svg>`;
     } else {
       footerIcon.innerHTML = `<svg viewBox="0 0 24 24" width="22" height="22" fill="none">
@@ -12432,23 +13081,91 @@ function renderHcpState(fileState) {
     }
   }
   if (footerRuntime) {
-    footerRuntime.textContent = `Runtime: ${inst?.version || "1.20.1"}`;
+    let ver = (inst?.mc_version || inst?.mc || inst?.version || "").trim();
+    if (!ver && inst?.path) {
+      const match = (homeInstancesAll || homeInstancesList || []).find(
+        (i) => normInstancePath(i.path) === normInstancePath(inst.path)
+      );
+      if (match?.mc_version) ver = match.mc_version.trim();
+    }
+    if (!ver) {
+      const nameMatch = ((inst?.name || inst?.folder_name || inst?.path || "").match(/\b1\.\d+(\.\d+)?\b/) || [])[0];
+      if (nameMatch) ver = nameMatch.trim();
+    }
+    footerRuntime.textContent = ver ? `Runtime: ${ver}` : "Runtime: Minecraft";
   }
 }
 
-// Console window terminal: up to HCP_MAX_LINES lines (exactly 4 lines requested for clean preview), new ones appended (no full
+// Console window terminal: up to HCP_MAX_LINES lines, new ones appended (no full
 // re-render), auto-scroll only while the view is at the bottom, so it can be scrolled
 // and its text selected while the game writes.
-const HCP_MAX_LINES = 4;
+const HCP_MAX_LINES = 300;
 let hcpRenderedKey = "";
 let hcpRenderedTotal = 0;
 let hcpRenderedFileSig = "";
 
 const HCP_LEVEL_LABEL = { INFO: "INFO", WARN: "AVISO", ERROR: "ERROR", FATAL: "ERROR", DEBUG: "DEBUG" };
 
+// Parse Java stack trace lines (at ..., Caused by: ..., ... X more, Suppressed: ...)
+function parseStackTraceLine(str) {
+  if (!str) return null;
+  const trimmed = String(str).trim();
+
+  // 1. "at com.package.Class.method(File.java:123)"
+  const atMatch = trimmed.match(/^at\s+(.+)$/);
+  if (atMatch) {
+    const full = atMatch[1].trim();
+    const locMatch = full.match(/^(.*?)\s*(\([^)]+\))$/);
+    if (locMatch) {
+      return {
+        type: "at",
+        call: locMatch[1].trim(),
+        loc: locMatch[2].trim(),
+        raw: trimmed,
+      };
+    }
+    return {
+      type: "at",
+      call: full,
+      loc: "",
+      raw: trimmed,
+    };
+  }
+
+  // 2. "Caused by: java.lang.Exception: message"
+  const causedMatch = trimmed.match(/^Caused by:\s*(.+)$/i);
+  if (causedMatch) {
+    return {
+      type: "caused",
+      message: causedMatch[1].trim(),
+      raw: trimmed,
+    };
+  }
+
+  // 3. "... 32 more" or "... 15 common frames omitted"
+  if (/^\.\.\.\s*\d+\s+(?:more|common frames omitted)/i.test(trimmed)) {
+    return {
+      type: "more",
+      message: trimmed,
+      raw: trimmed,
+    };
+  }
+
+  // 4. "Suppressed: java.lang.Exception: ..."
+  const suppMatch = trimmed.match(/^Suppressed:\s*(.+)$/i);
+  if (suppMatch) {
+    return {
+      type: "suppressed",
+      message: suppMatch[1].trim(),
+      raw: trimmed,
+    };
+  }
+
+  return null;
+}
+
 // One log entry: dim time, colored level badge, thread in small grey, then the message.
-// Launcher steps get their own badge and milestones (game ready, in world...) a green
-// banner. Spaces between the parts keep copied text readable.
+// Stack traces are rendered cleanly without repeating badges or timestamps on every frame.
 function hcpLineElement(text, level, ts) {
   const line = document.createElement("div");
   let lvl = String(level || "").toUpperCase();
@@ -12477,27 +13194,104 @@ function hcpLineElement(text, level, ts) {
       rest = rest.slice(th[0].length);
     }
   }
+
+  // Detect stack trace lines (at ..., Caused by: ..., etc.)
+  const trace = parseStackTraceLine(rest);
+  if (trace) {
+    line.className = "hcp-log-line hcp-log-trace sev-error";
+    if (trace.type === "at") {
+      const bullet = document.createElement("span");
+      bullet.className = "hcp-trace-bullet";
+      bullet.textContent = "↳";
+      bullet.setAttribute("aria-hidden", "true");
+
+      const atSpan = document.createElement("span");
+      atSpan.className = "hcp-trace-at";
+      atSpan.textContent = "at";
+
+      const callSpan = document.createElement("span");
+      callSpan.className = "hcp-trace-call";
+      callSpan.textContent = trace.call;
+
+      line.append(bullet, atSpan, " ", callSpan);
+      if (trace.loc) {
+        const locSpan = document.createElement("span");
+        locSpan.className = "hcp-trace-loc";
+        locSpan.textContent = trace.loc;
+        line.append(" ", locSpan);
+      }
+    } else if (trace.type === "caused") {
+      const badge = document.createElement("span");
+      badge.className = "hcp-trace-caused-badge";
+      badge.textContent = "CAUSED BY";
+
+      const msg = document.createElement("span");
+      msg.className = "hcp-trace-caused-msg";
+      msg.textContent = trace.message;
+
+      line.append(badge, " ", msg);
+    } else if (trace.type === "suppressed") {
+      const badge = document.createElement("span");
+      badge.className = "hcp-trace-suppressed-badge";
+      badge.textContent = "SUPPRESSED";
+
+      const msg = document.createElement("span");
+      msg.className = "hcp-trace-caused-msg";
+      msg.textContent = trace.message;
+
+      line.append(badge, " ", msg);
+    } else {
+      const more = document.createElement("span");
+      more.className = "hcp-trace-more";
+      more.textContent = trace.message;
+      line.append(more);
+    }
+    return line;
+  }
+
   if (!lvl) {
     const lower = rest.toLowerCase();
     lvl = lower.includes("exception") || lower.includes("error") ? "ERROR" : lower.includes("warn") ? "WARN" : "INFO";
   }
   const sev = lvl === "ERROR" || lvl === "FATAL" ? "error" : lvl === "WARN" ? "warn" : "info";
-  line.className = `hcp-log-line kind-${kind} sev-${sev}`;
+  const isSessionTime = kind === "milestone" && rest.includes("Tiempo de ejecución");
+  line.className = `hcp-log-line kind-${kind} sev-${sev}${isSessionTime ? " is-session-time" : ""}`;
 
-  const add = (cls, txt) => {
-    const sp = document.createElement("span");
-    sp.className = cls;
-    sp.textContent = txt;
-    line.append(sp, " ");
-  };
-  if (time) add("hcp-time", time);
-  if (kind === "milestone") add("hcp-badge badge-milestone", "✓");
-  else if (kind === "launcher") add("hcp-badge badge-launcher", "IKA");
-  else add(`hcp-badge badge-${sev}`, HCP_LEVEL_LABEL[lvl] || lvl);
-  if (thread) add("hcp-thread", thread);
+  const metaWrap = document.createElement("span");
+  metaWrap.className = "hcp-line-meta";
+
+  if (time) {
+    const spTime = document.createElement("span");
+    spTime.className = "hcp-time";
+    spTime.textContent = time;
+    metaWrap.append(spTime, " ");
+  }
+
+  const spBadge = document.createElement("span");
+  if (kind === "milestone") {
+    spBadge.className = `hcp-badge badge-milestone${isSessionTime ? " badge-session-time" : ""}`;
+    spBadge.textContent = isSessionTime ? "⏱" : "✓";
+  } else if (kind === "launcher") {
+    spBadge.className = "hcp-badge badge-launcher";
+    spBadge.textContent = "IKA";
+  } else {
+    spBadge.className = `hcp-badge badge-${sev}`;
+    spBadge.textContent = HCP_LEVEL_LABEL[lvl] || lvl;
+  }
+  metaWrap.append(spBadge);
+
+  if (thread) {
+    const spThread = document.createElement("span");
+    spThread.className = "hcp-thread";
+    spThread.textContent = thread;
+    metaWrap.append(" ", spThread);
+  }
+
+  line.append(metaWrap, " ");
+
   const msg = document.createElement("span");
   msg.className = "hcp-msg";
-  msg.textContent = rest;
+  msg.textContent = rest.trimStart();
   line.appendChild(msg);
   return line;
 }
@@ -12553,16 +13347,1310 @@ function detectGameMilestones(instance, lines) {
   }
 }
 
+// =========================================================
+// RETRO DINO RUNNER (MINIJUEGO EN CONSOLA CUANDO ESTÁ INACTIVA)
+// =========================================================
+let hcpDinoAnimId = null;
+let hcpDinoActive = false;
+let hcpDinoWrapEl = null;
+let hcpDinoCanvasEl = null;
+let hcpDinoCleanup = null;
+
+function stopHcpDinoGame() {
+  if (hcpDinoAnimId) {
+    cancelAnimationFrame(hcpDinoAnimId);
+    hcpDinoAnimId = null;
+  }
+  hcpDinoActive = false;
+  if (hcpDinoCleanup) {
+    hcpDinoCleanup();
+    hcpDinoCleanup = null;
+  }
+  if (hcpDinoWrapEl && hcpDinoWrapEl.parentElement) {
+    hcpDinoWrapEl.remove();
+  }
+  hcpDinoWrapEl = null;
+  hcpDinoCanvasEl = null;
+  hcpRenderedFileSig = "";
+  hcpRenderedKey = "";
+}
+
+function startHcpDinoGame(container) {
+  if (!container) return;
+  if (hcpDinoActive && hcpDinoWrapEl && container.contains(hcpDinoWrapEl)) {
+    return;
+  }
+  stopHcpDinoGame();
+
+  container.textContent = "";
+
+  const wrap = document.createElement("div");
+  wrap.className = "hcp-dino-wrap";
+  wrap.id = "hcp-dino-wrap";
+
+  const canvas = document.createElement("canvas");
+  canvas.className = "hcp-dino-canvas";
+  canvas.id = "hcp-dino-canvas";
+  wrap.appendChild(canvas);
+
+  container.appendChild(wrap);
+
+  hcpDinoWrapEl = wrap;
+  hcpDinoCanvasEl = canvas;
+  hcpDinoActive = true;
+
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+
+  const spriteImg = new Image();
+  spriteImg.src = DINO_SPRITE_B64;
+
+  const SPRITES = {
+    DINO_STAND: { x: 848, y: 2, w: 44, h: 47 },
+    DINO_BLINK: { x: 892, y: 2, w: 44, h: 47 },
+    DINO_RUN_1: { x: 936, y: 2, w: 44, h: 47 },
+    DINO_RUN_2: { x: 980, y: 2, w: 44, h: 47 },
+    DINO_CRASH: { x: 1024, y: 2, w: 44, h: 47 },
+    DINO_DUCK_1: { x: 1112, y: 2, w: 59, h: 47 },
+    DINO_DUCK_2: { x: 1171, y: 2, w: 59, h: 47 },
+    CACTUS_S1: { x: 228, y: 2, w: 17, h: 35 },
+    CACTUS_S2: { x: 245, y: 2, w: 34, h: 35 },
+    CACTUS_L1: { x: 332, y: 2, w: 25, h: 50 },
+    CACTUS_L2: { x: 357, y: 2, w: 50, h: 50 },
+    PTERO_1: { x: 134, y: 2, w: 46, h: 40 },
+    PTERO_2: { x: 180, y: 2, w: 46, h: 40 },
+    HORIZON: { x: 2, y: 54, w: 600, h: 12 },
+  };
+
+  let width = 480;
+  let height = 180;
+  let dpr = 1;
+
+  function resize() {
+    const rect = wrap.getBoundingClientRect();
+    width = Math.max(280, Math.floor(rect.width || container.clientWidth || 480));
+    height = Math.max(120, Math.floor(rect.height || container.clientHeight || 180));
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = Math.floor(width * dpr);
+    canvas.height = Math.floor(height * dpr);
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.imageSmoothingEnabled = false;
+  }
+  resize();
+
+  const BIOME_WIDTH = 1600;
+  const BIOMES = [
+    { id: "newyork", name: "Nueva York", tag: "🗽 Nueva York • Manhattan Skyline", offset: 0 },
+    { id: "machupicchu", name: "Machu Picchu", tag: "🏔️ Machu Picchu • Andes & Terrazas Incas", offset: 1600 },
+    { id: "china", name: "China", tag: "🐉 China • Gran Muralla & Guilin", offset: 3200 },
+    { id: "europe", name: "Europa", tag: "🏰 Europa • Alpes, Cascada & Castillos", offset: 4800 },
+    { id: "egypt", name: "Egipto", tag: "🏜️ Egipto • Sahara & Pirámides de Giza", offset: 6400 },
+    { id: "japan", name: "Japón", tag: "🌸 Japón • Monte Fuji & Pagodas", offset: 8000 },
+  ];
+  const WORLD_LEN = BIOMES.length * BIOME_WIDTH; // 9600px
+
+  let currentBiomeIndex = Math.floor(Math.random() * BIOMES.length);
+  let zoneBaseOffset = BIOMES[currentBiomeIndex].offset;
+  let zoneBannerText = BIOMES[currentBiomeIndex].tag;
+  let zoneBannerTimer = 160;
+
+  let gameState = "idle"; // "idle" | "running" | "gameover"
+  let score = 0;
+  let distance = 0;
+  let idleOffset = 0;
+  let highScore = parseInt(localStorage.getItem("ika_dino_highscore") || "0", 10) || 0;
+  const BASE_SPEED = 2.65;
+  let speed = BASE_SPEED;
+  let horizonX = 0;
+  let mountainX = 0;
+  let valleyX = 0;
+
+  const dinoX = 28;
+  let dinoY = 0;
+  let dinoVY = 0;
+  let isGrounded = true;
+  let isDucking = false;
+  let isJumpHeld = false;
+  let stepTimer = 0;
+  let stepFrame = 0;
+  let blinkTimer = 0;
+  let isBlinking = false;
+  let flashTimer = 0;
+
+  let obstacles = [];
+  let nextObstacleDistance = 280;
+
+  let clouds = [
+    { x: 50, y: 14, scale: 0.85, speed: 0.08 },
+    { x: 190, y: 24, scale: 1.1, speed: 0.14 },
+    { x: 330, y: 12, scale: 0.75, speed: 0.06 },
+    { x: 470, y: 18, scale: 1.0, speed: 0.11 },
+  ];
+
+  let audioCtx = null;
+  function playSound(type) {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      if (!audioCtx) audioCtx = new AC();
+      if (audioCtx.state === "suspended") audioCtx.resume();
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      const now = audioCtx.currentTime;
+      if (type === "jump") {
+        osc.type = "square";
+        osc.frequency.setValueAtTime(320, now);
+        osc.frequency.exponentialRampToValueAtTime(640, now + 0.07);
+        gain.gain.setValueAtTime(0.06, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.07);
+        osc.start(now);
+        osc.stop(now + 0.07);
+      } else if (type === "hit") {
+        osc.type = "sawtooth";
+        osc.frequency.setValueAtTime(160, now);
+        osc.frequency.exponentialRampToValueAtTime(40, now + 0.16);
+        gain.gain.setValueAtTime(0.1, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+        osc.start(now);
+        osc.stop(now + 0.16);
+      } else if (type === "score") {
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(580, now);
+        osc.frequency.setValueAtTime(880, now + 0.06);
+        gain.gain.setValueAtTime(0.05, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+        osc.start(now);
+        osc.stop(now + 0.14);
+      }
+    } catch (_) {}
+  }
+
+  function restart() {
+    score = 0;
+    distance = 0;
+    speed = BASE_SPEED;
+    horizonX = 0;
+    mountainX = 0;
+    valleyX = 0;
+    obstacles = [];
+    nextObstacleDistance = 280;
+    dinoY = 0;
+    dinoVY = 0;
+    isGrounded = true;
+    isDucking = false;
+    flashTimer = 0;
+    stepTimer = 0;
+    stepFrame = 0;
+    blinkTimer = 0;
+    isBlinking = false;
+    gameState = "running";
+
+    // User requested: "quiero que cada vez que uno juegue, comienze en otra zona distinta"
+    // Pick a new, distinct zone randomly on every start/restart!
+    currentBiomeIndex = (currentBiomeIndex + 1 + Math.floor(Math.random() * (BIOMES.length - 1))) % BIOMES.length;
+    zoneBaseOffset = BIOMES[currentBiomeIndex].offset;
+    zoneBannerText = BIOMES[currentBiomeIndex].tag;
+    zoneBannerTimer = 160;
+  }
+
+  const JUMP_IMPULSE = -8.2;
+
+  function jump() {
+    if (gameState === "idle" || gameState === "gameover") {
+      restart();
+      playSound("jump");
+      return;
+    }
+    if (isGrounded) {
+      isDucking = false;
+      dinoVY = JUMP_IMPULSE - Math.min(0.6, (speed - BASE_SPEED) * 0.25);
+      isGrounded = false;
+      playSound("jump");
+    }
+  }
+
+  const onPointerDown = (e) => {
+    e.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    const yRatio = (e.clientY - rect.top) / Math.max(1, rect.height);
+    if (e.button === 2 || yRatio > 0.65) {
+      isDucking = true;
+      if (!isGrounded) {
+        dinoVY = Math.max(dinoVY, 5.0);
+      }
+    } else {
+      isJumpHeld = true;
+      jump();
+    }
+  };
+
+  const onPointerUp = () => {
+    isJumpHeld = false;
+    if (isDucking && !keysPressed.has("ArrowDown") && !keysPressed.has("KeyS")) {
+      isDucking = false;
+    }
+    if (!isGrounded && dinoVY < -2.2) {
+      dinoVY = -2.2;
+    }
+  };
+
+  const onContextMenu = (e) => {
+    e.preventDefault();
+  };
+
+  const keysPressed = new Set();
+
+  const onKeyDown = (e) => {
+    if (!hcpDinoActive) return;
+    if (document.activeElement && /input|textarea|select/i.test(document.activeElement.tagName)) {
+      return;
+    }
+    const dock = el.homeConsolePreviewDock;
+    if (!dock || dock.classList.contains("hidden") || dock.classList.contains("minimized")) {
+      return;
+    }
+    if (e.code === "Space" || e.code === "ArrowUp" || e.code === "KeyW") {
+      e.preventDefault();
+      keysPressed.add(e.code);
+      isJumpHeld = true;
+      jump();
+    } else if (e.code === "ArrowDown" || e.code === "KeyS") {
+      e.preventDefault();
+      keysPressed.add(e.code);
+      isDucking = true;
+      if (!isGrounded) {
+        dinoVY = Math.max(dinoVY, 5.5);
+      }
+    }
+  };
+
+  const onKeyUp = (e) => {
+    if (!hcpDinoActive) return;
+    keysPressed.delete(e.code);
+    if (e.code === "Space" || e.code === "ArrowUp" || e.code === "KeyW") {
+      isJumpHeld = false;
+      if (!isGrounded && dinoVY < -2.2) {
+        dinoVY = -2.2;
+      }
+    } else if (e.code === "ArrowDown" || e.code === "KeyS") {
+      if (!keysPressed.has("ArrowDown") && !keysPressed.has("KeyS")) {
+        isDucking = false;
+      }
+    }
+  };
+
+  wrap.addEventListener("pointerdown", onPointerDown);
+  window.addEventListener("pointerup", onPointerUp);
+  wrap.addEventListener("contextmenu", onContextMenu);
+  window.addEventListener("keydown", onKeyDown);
+  window.addEventListener("keyup", onKeyUp);
+
+  const ro = new ResizeObserver(() => {
+    if (!hcpDinoActive) return;
+    resize();
+  });
+  ro.observe(wrap);
+
+  hcpDinoCleanup = () => {
+    wrap.removeEventListener("pointerdown", onPointerDown);
+    window.removeEventListener("pointerup", onPointerUp);
+    wrap.removeEventListener("contextmenu", onContextMenu);
+    window.removeEventListener("keydown", onKeyDown);
+    window.removeEventListener("keyup", onKeyUp);
+    ro.disconnect();
+    if (audioCtx) {
+      audioCtx.close().catch(() => {});
+      audioCtx = null;
+    }
+  };
+
+  // =========================================================
+  // DENSE CONTIGUOUS NEW YORK MANHATTAN SKYLINE DATA (38 buildings, NO GAPS!)
+  // =========================================================
+  const NY_BUILDINGS = [
+    { w: 38, h: 62, type: "brick", windows: "yellow", waterTower: true },
+    { w: 46, h: 86, type: "artdeco", windows: "warm", antenna: true },
+    { w: 34, h: 54, type: "brick", windows: "fire_escape" },
+    { w: 56, h: 102, type: "chrysler", windows: "blue", spire: true },
+    { w: 40, h: 72, type: "glass", windows: "cyan" },
+    { w: 36, h: 58, type: "brick", windows: "yellow", waterTower: true },
+    { w: 64, h: 110, type: "empire", windows: "warm", spire: true, antenna: true },
+    { w: 38, h: 66, type: "artdeco", windows: "amber" },
+    { w: 44, h: 78, type: "glass", windows: "blue" },
+    { w: 32, h: 52, type: "brick", windows: "fire_escape" },
+    { w: 48, h: 92, type: "highrise", windows: "yellow", waterTower: true },
+    { w: 52, h: 76, type: "billboard", windows: "neon" },
+    { w: 36, h: 60, type: "brick", windows: "yellow" },
+    { w: 42, h: 84, type: "stepped", windows: "warm", antenna: true },
+    { w: 46, h: 68, type: "glass", windows: "cyan" },
+    { w: 34, h: 54, type: "brick", windows: "fire_escape" },
+    { w: 58, h: 98, type: "chrysler", windows: "blue", spire: true },
+    { w: 40, h: 70, type: "artdeco", windows: "amber", waterTower: true },
+    { w: 36, h: 58, type: "brick", windows: "yellow" },
+    { w: 50, h: 88, type: "highrise", windows: "warm", antenna: true },
+    { w: 38, h: 64, type: "brick", windows: "fire_escape" },
+    { w: 60, h: 104, type: "empire", windows: "warm", spire: true },
+    { w: 42, h: 72, type: "glass", windows: "blue" },
+    { w: 34, h: 56, type: "brick", windows: "yellow", waterTower: true },
+    { w: 48, h: 82, type: "billboard", windows: "neon" },
+    { w: 36, h: 62, type: "artdeco", windows: "amber" },
+    { w: 44, h: 76, type: "highrise", windows: "cyan" },
+    { w: 32, h: 50, type: "brick", windows: "yellow" },
+    { w: 54, h: 94, type: "chrysler", windows: "blue", spire: true },
+    { w: 38, h: 66, type: "brick", windows: "fire_escape", waterTower: true },
+    { w: 46, h: 84, type: "glass", windows: "warm" },
+    { w: 40, h: 68, type: "artdeco", windows: "yellow" },
+    { w: 34, h: 54, type: "brick", windows: "fire_escape" },
+    { w: 52, h: 90, type: "highrise", windows: "amber", antenna: true },
+    { w: 38, h: 62, type: "brick", windows: "yellow" },
+    { w: 44, h: 74, type: "billboard", windows: "neon" },
+    { w: 36, h: 58, type: "brick", windows: "yellow", waterTower: true },
+    { w: 42, h: 70, type: "artdeco", windows: "cyan" },
+  ];
+  // Calculate exact contiguous world positions
+  let curNyX = 20;
+  for (const b of NY_BUILDINGS) {
+    b.x = curNyX;
+    curNyX += b.w;
+  }
+
+  let lastTime = 0;
+
+  function loop(timestamp) {
+    if (!hcpDinoActive) return;
+
+    if (!lastTime) lastTime = timestamp;
+    let deltaMs = timestamp - lastTime;
+    lastTime = timestamp;
+
+    if (deltaMs > 64) deltaMs = 64;
+    const dt = deltaMs / 16.6667;
+
+    ctx.imageSmoothingEnabled = false;
+    const groundY = height - 20;
+
+    try {
+      if (gameState === "idle") {
+        // Landscape stays frozen when not playing
+        blinkTimer += dt;
+        if (blinkTimer > 150) {
+          isBlinking = true;
+          if (blinkTimer > 170) {
+            blinkTimer = 0;
+            isBlinking = false;
+          }
+        }
+      } else if (gameState === "running") {
+        distance += speed * dt;
+        score = Math.floor(distance / 10);
+        if (score > 0 && score % 100 === 0 && flashTimer <= 0) {
+          flashTimer = 35;
+          playSound("score");
+        }
+        if (flashTimer > 0) flashTimer -= dt;
+
+        speed = BASE_SPEED + Math.min(1.8, score * 0.0015);
+        horizonX -= speed * dt;
+
+        const curGravity = (isJumpHeld && dinoVY < 0) ? 0.22 : 0.38;
+        dinoY += dinoVY * dt;
+        dinoVY += curGravity * dt;
+        if (dinoY >= 0) {
+          dinoY = 0;
+          dinoVY = 0;
+          isGrounded = true;
+        }
+
+        stepTimer += speed * dt;
+        if (stepTimer >= 16) {
+          stepTimer = 0;
+          stepFrame = stepFrame === 0 ? 1 : 0;
+        }
+
+        nextObstacleDistance -= speed * dt;
+        if (nextObstacleDistance <= 0) {
+          const canPtero = score > 120 && Math.random() < 0.35;
+          if (canPtero) {
+            const isHigh = Math.random() < 0.45;
+            obstacles.push({
+              type: "ptero",
+              x: width + 20,
+              y: groundY - (isHigh ? 72 : 50),
+              w: 46,
+              h: 40,
+              frame: 0,
+              animTimer: 0,
+            });
+          } else {
+            const r = Math.random();
+            if (score > 120 && r < 0.25) {
+              obstacles.push({ type: "cactus_l2", x: width + 20, y: groundY - 50, w: 50, h: 50 });
+            } else if (score > 60 && r < 0.55) {
+              obstacles.push({ type: "cactus_l1", x: width + 20, y: groundY - 50, w: 25, h: 50 });
+            } else if (r < 0.8) {
+              obstacles.push({ type: "cactus_s2", x: width + 20, y: groundY - 35, w: 34, h: 35 });
+            } else {
+              obstacles.push({ type: "cactus_s1", x: width + 20, y: groundY - 35, w: 17, h: 35 });
+            }
+          }
+          nextObstacleDistance = 280 + Math.floor(Math.random() * 200);
+        }
+
+        const curDinoY = groundY - 47 + dinoY;
+        const dinoHitbox = isDucking
+          ? { x: dinoX + 4, y: curDinoY + 20, w: 50, h: 25 }
+          : { x: dinoX + 8, y: curDinoY + 4, w: 28, h: 39 };
+
+        for (let i = obstacles.length - 1; i >= 0; i--) {
+          const ob = obstacles[i];
+          ob.x -= speed * dt;
+          if (ob.type === "ptero") {
+            ob.animTimer += dt;
+            if (ob.animTimer >= 9) {
+              ob.animTimer = 0;
+              ob.frame = ob.frame === 0 ? 1 : 0;
+            }
+          }
+
+          let obHitbox;
+          if (ob.type === "cactus_s1") {
+            obHitbox = { x: ob.x + 3, y: ob.y + 4, w: 11, h: 29 };
+          } else if (ob.type === "cactus_s2") {
+            obHitbox = { x: ob.x + 4, y: ob.y + 4, w: 26, h: 29 };
+          } else if (ob.type === "cactus_l1") {
+            obHitbox = { x: ob.x + 4, y: ob.y + 4, w: 17, h: 44 };
+          } else if (ob.type === "cactus_l2") {
+            obHitbox = { x: ob.x + 5, y: ob.y + 4, w: 40, h: 44 };
+          } else if (ob.type === "ptero") {
+            obHitbox = { x: ob.x + 8, y: ob.y + 12, w: 30, h: 18 };
+          } else {
+            obHitbox = { x: ob.x + 3, y: ob.y + 3, w: ob.w - 6, h: ob.h - 6 };
+          }
+
+          const hasCollision = (
+            dinoHitbox.x < obHitbox.x + obHitbox.w &&
+            dinoHitbox.x + dinoHitbox.w > obHitbox.x &&
+            dinoHitbox.y < obHitbox.y + obHitbox.h &&
+            dinoHitbox.y + dinoHitbox.h > obHitbox.y
+          );
+
+          if (hasCollision) {
+            gameState = "gameover";
+            playSound("hit");
+            if (score > highScore) {
+              highScore = score;
+              localStorage.setItem("ika_dino_highscore", String(highScore));
+            }
+          }
+
+          if (ob.x < -80) {
+            obstacles.splice(i, 1);
+          }
+        }
+
+        for (const c of clouds) {
+          c.x -= speed * c.speed * dt;
+          if (c.x < -70) c.x = width + 20 + Math.random() * 80;
+        }
+      }
+
+      ctx.clearRect(0, 0, width, height);
+
+      // =========================================================
+      // PROCEDURAL PARALLAX WORLD SYSTEM
+      // Multi-layer continuous relief, dense New York skyline, Machu Picchu terraces,
+      // Great Wall of China, European waterfall gorge, Sahara dunes & Fuji
+      // =========================================================
+      ctx.save();
+      const effDistance = zoneBaseOffset + distance + idleOffset;
+      const animTime = effDistance * 0.05;
+
+      const farScroll = effDistance * 0.14;
+      const midScroll = effDistance * 0.36;
+
+      // Safe mathematical modulo wrapping helper
+      function getScreenX(worldX, scroll, objWidth = 60) {
+        let offset = (worldX - (scroll % WORLD_LEN)) % WORLD_LEN;
+        if (offset < 0) offset += WORLD_LEN;
+        if (offset > WORLD_LEN - objWidth - 20) {
+          offset -= WORLD_LEN;
+        }
+        return offset;
+      }
+
+      // 0. Starfield in upper sky
+      const starCount = 36;
+      for (let s = 0; s < starCount; s++) {
+        const sWorldX = (s * 269 + 43) % WORLD_LEN;
+        const sx = getScreenX(sWorldX, farScroll * 0.5, 4);
+        if (sx >= -5 && sx <= width + 5) {
+          const sy = 8 + ((s * 37) % Math.max(20, groundY - 75));
+          const twinkle = (Math.sin(animTime * 2 + s) > 0.35);
+          ctx.fillStyle = twinkle ? "#ffffff" : "rgba(192, 132, 252, 0.55)";
+          ctx.fillRect(Math.round(sx), sy, s % 4 === 0 ? 2 : 1, s % 4 === 0 ? 2 : 1);
+        }
+      }
+
+      // =========================================================
+      // LAYER 1: DISTANT SKYLINE & MOUNTAIN SILHOUETTES (Speed: 0.14x)
+      // =========================================================
+
+      // 1.1 New York Distant Background Silhouette (Manhattan Harbor & Brooklyn Bridge)
+      {
+        const bStartX = getScreenX(20, farScroll, 1500);
+        if (bStartX <= width + 100 && bStartX + 1500 >= -100) {
+          ctx.fillStyle = "#0c071d";
+          // Distant skyline stepped heights
+          for (let step = 0; step < 30; step++) {
+            const bx = bStartX + step * 50;
+            if (bx >= -60 && bx <= width + 60) {
+              const bh = 55 + ((step * 37) % 50);
+              ctx.fillRect(Math.round(bx), groundY - bh, 46, bh);
+              // Spire beacon
+              if (step % 3 === 0) {
+                ctx.fillStyle = "#6d28d9";
+                ctx.fillRect(Math.round(bx + 21), groundY - bh - 12, 3, 12);
+                ctx.fillStyle = (flashTimer % 20 < 10) ? "#ef4444" : "#fca5a5";
+                ctx.fillRect(Math.round(bx + 21), groundY - bh - 14, 3, 2);
+                ctx.fillStyle = "#0c071d";
+              }
+            }
+          }
+          // Brooklyn Bridge Suspension Towers
+          const brX1 = bStartX + 420;
+          const brX2 = bStartX + 1120;
+          for (const brX of [brX1, brX2]) {
+            if (brX >= -80 && brX <= width + 80) {
+              ctx.fillStyle = "#1e1338";
+              ctx.fillRect(brX - 10, groundY - 78, 6, 78);
+              ctx.fillRect(brX + 4, groundY - 78, 6, 78);
+              ctx.fillRect(brX - 10, groundY - 78, 20, 5);
+              ctx.fillRect(brX - 10, groundY - 45, 20, 4);
+              ctx.fillStyle = "rgba(168, 85, 247, 0.4)";
+              for (let c = 0; c < 28; c += 4) {
+                const cy = groundY - 75 + Math.pow(c / 28, 2) * 45;
+                ctx.fillRect(brX - 10 - c, cy, 2, 2);
+                ctx.fillRect(brX + 10 + c, cy, 2, 2);
+              }
+            }
+          }
+        }
+      }
+
+      // 1.2 Machu Picchu Distant Cordillera & Huayna Picchu Peak
+      {
+        const mpStartX = getScreenX(1600, farScroll, 1600);
+        if (mpStartX <= width + 100 && mpStartX + 1600 >= -100) {
+          // Continuous distant Andean mountain ridges
+          for (let step = 0; step < 26; step++) {
+            const mx = mpStartX + step * 60;
+            if (mx >= -80 && mx <= width + 80) {
+              const isPeak = (step === 12); // Huayna Picchu summit
+              const mh = isPeak ? 98 : (50 + ((step * 43) % 40));
+              ctx.fillStyle = isPeak ? "#1a0b36" : (step % 2 === 0 ? "#130926" : "#0e061e");
+              for (let y = 0; y < mh; y += 4) {
+                const w = 12 + Math.floor(y * (isPeak ? 0.95 : 1.3));
+                if (y < 14 && !isPeak) ctx.fillStyle = "#e2e8f0"; // Snow peak
+                ctx.fillRect(Math.round(mx - w / 2), groundY - mh + y, w, 4);
+                ctx.fillStyle = isPeak ? "#1a0b36" : (step % 2 === 0 ? "#130926" : "#0e061e");
+              }
+            }
+          }
+        }
+      }
+
+      // 1.3 China: Picos Kársticos de Guilin (Vertical limestone pillars)
+      {
+        const chStartX = getScreenX(3200, farScroll, 1600);
+        if (chStartX <= width + 100 && chStartX + 1600 >= -100) {
+          const karstPillars = [3450, 3800, 4200, 4600];
+          for (const kpWorld of karstPillars) {
+            const kpx = Math.round(getScreenX(kpWorld, farScroll, 60));
+            if (kpx >= -60 && kpx <= width + 60) {
+              const kpH = 92;
+              const kpTop = groundY - kpH;
+              ctx.fillStyle = "#120d2a";
+              // Vertical sugarloaf pillar body
+              ctx.fillRect(kpx - 14, kpTop + 8, 28, kpH - 8);
+              ctx.fillRect(kpx - 10, kpTop, 20, 8);
+              // Clinging pine trees on summit
+              ctx.fillStyle = "#064e3b";
+              ctx.fillRect(kpx - 16, kpTop - 4, 12, 6);
+              ctx.fillRect(kpx + 6, kpTop - 2, 10, 5);
+              // Mist gradient at base
+              ctx.fillStyle = "rgba(148, 163, 184, 0.25)";
+              ctx.fillRect(kpx - 22, groundY - 24, 44, 24);
+            }
+          }
+        }
+      }
+
+      // 1.4 Europa: Cordillera Alpina Escarpada con Glaciares
+      {
+        const euStartX = getScreenX(4800, farScroll, 1600);
+        if (euStartX <= width + 100 && euStartX + 1600 >= -100) {
+          for (let step = 0; step < 20; step++) {
+            const ax = euStartX + step * 80;
+            if (ax >= -90 && ax <= width + 90) {
+              const ah = 65 + ((step * 51) % 36);
+              for (let y = 0; y < ah; y += 4) {
+                const w = 14 + Math.floor(y * 1.15);
+                ctx.fillStyle = y < 16 ? "#f1f5f9" : (y < 28 ? "#94a3b8" : "#140e2b");
+                ctx.fillRect(Math.round(ax - w / 2), groundY - ah + y, w, 4);
+              }
+            }
+          }
+        }
+      }
+
+      // 1.5 Egipto: Siluetas de las Pirámides en el Horizonte Desértico
+      {
+        const egStartX = getScreenX(6400, farScroll, 1600);
+        if (egStartX <= width + 100 && egStartX + 1600 >= -100) {
+          const pyr1 = Math.round(getScreenX(6900, farScroll, 100));
+          if (pyr1 >= -100 && pyr1 <= width + 100) {
+            const pH = 78;
+            for (let y = 0; y < pH; y += 3) {
+              const hw = Math.floor(y * 0.72);
+              ctx.fillStyle = "#d97706";
+              ctx.fillRect(pyr1 - hw, groundY - pH + y, hw, 3);
+              ctx.fillStyle = "#78350f";
+              ctx.fillRect(pyr1, groundY - pH + y, hw, 3);
+            }
+          }
+          const pyr2 = Math.round(getScreenX(7300, farScroll, 80));
+          if (pyr2 >= -80 && pyr2 <= width + 80) {
+            const pH = 62;
+            for (let y = 0; y < pH; y += 3) {
+              const hw = Math.floor(y * 0.7);
+              ctx.fillStyle = y < 14 ? "#fde68a" : "#b45309";
+              ctx.fillRect(pyr2 - hw, groundY - pH + y, hw, 3);
+              ctx.fillStyle = y < 14 ? "#d97706" : "#451a03";
+              ctx.fillRect(pyr2, groundY - pH + y, hw, 3);
+            }
+          }
+        }
+      }
+
+      // 1.6 Japón: Monte Fuji Cónico Simétrico con Cumbre Nevada
+      {
+        const fujiX = Math.round(getScreenX(8800, farScroll, 140));
+        if (fujiX >= -140 && fujiX <= width + 140) {
+          const fH = 86;
+          const fTop = groundY - fH;
+          for (let y = 0; y < fH; y += 4) {
+            const w = 22 + Math.floor(y * 1.35);
+            ctx.fillStyle = y < 24 ? "#ffffff" : (y < 38 ? "#6366f1" : "#1e1b4b");
+            ctx.fillRect(fujiX - Math.floor(w / 2), fTop + y, w, 4);
+          }
+        }
+      }
+
+      // =========================================================
+      // LAYER 2: MIDGROUND CONTINUOUS RELIEF & PROCEDURAL BIOMES (Speed: 0.36x)
+      // =========================================================
+
+      // 2.1 BIOME NUEVA YORK: DENSE GAPLESS MANHATTAN STREET WALL
+      {
+        for (const b of NY_BUILDINGS) {
+          const bx = Math.round(getScreenX(b.x, midScroll, b.w));
+          if (bx >= -b.w && bx <= width + b.w) {
+            const bTop = groundY - b.h;
+            // Base Facade
+            if (b.type === "brick") {
+              ctx.fillStyle = "#2d1645";
+              ctx.fillRect(bx, bTop, b.w, b.h);
+              // Roof cornise
+              ctx.fillStyle = "#4c1d95";
+              ctx.fillRect(bx - 1, bTop, b.w + 2, 3);
+              // Windows & Fire escapes
+              ctx.fillStyle = (b.windows === "yellow") ? "#fef08a" : "#fbbf24";
+              for (let wy = bTop + 8; wy < groundY - 6; wy += 9) {
+                ctx.fillRect(bx + 5, wy, 4, 5);
+                ctx.fillRect(bx + b.w - 9, wy, 4, 5);
+                if (b.w > 36) ctx.fillRect(bx + Math.floor(b.w / 2) - 2, wy, 4, 5);
+              }
+              if (b.windows === "fire_escape") {
+                ctx.fillStyle = "#6b21a8";
+                ctx.fillRect(bx + 2, bTop + 14, 10, 2);
+                ctx.fillRect(bx + 2, bTop + 28, 10, 2);
+                ctx.fillRect(bx + 2, bTop + 42, 10, 2);
+                ctx.fillRect(bx + 2, bTop + 14, 1, 30);
+              }
+            } else if (b.type === "chrysler" || b.type === "empire") {
+              ctx.fillStyle = "#170e30";
+              ctx.fillRect(bx, bTop + 20, b.w, b.h - 20);
+              // Setbacks
+              ctx.fillRect(bx + 4, bTop + 8, b.w - 8, 12);
+              ctx.fillRect(bx + 8, bTop, b.w - 16, 8);
+              ctx.fillStyle = "#7c3aed";
+              ctx.fillRect(bx, bTop + 20, b.w, 2);
+              ctx.fillRect(bx + 4, bTop + 8, b.w - 8, 2);
+              // Spire needle
+              ctx.fillStyle = "#c084fc";
+              ctx.fillRect(bx + Math.floor(b.w / 2) - 1, bTop - 14, 2, 14);
+              ctx.fillStyle = (flashTimer % 20 < 10) ? "#ef4444" : "#ffffff";
+              ctx.fillRect(bx + Math.floor(b.w / 2) - 2, bTop - 16, 4, 3);
+              // Illuminated vertical window lines
+              ctx.fillStyle = "#fef08a";
+              for (let wy = bTop + 24; wy < groundY - 6; wy += 8) {
+                ctx.fillRect(bx + 8, wy, 2, 3);
+                ctx.fillRect(bx + Math.floor(b.w / 2) - 1, wy, 2, 3);
+                ctx.fillRect(bx + b.w - 10, wy, 2, 3);
+              }
+            } else if (b.type === "glass") {
+              ctx.fillStyle = "#0c1b33";
+              ctx.fillRect(bx, bTop, b.w, b.h);
+              ctx.fillStyle = "#38bdf8";
+              ctx.fillRect(bx, bTop, b.w, 2);
+              // Steel diagonal bracing
+              ctx.strokeStyle = "rgba(56, 189, 248, 0.4)";
+              ctx.lineWidth = 1;
+              ctx.strokeRect(bx + 4, bTop + 6, b.w - 8, b.h - 12);
+              ctx.fillStyle = "rgba(56, 189, 248, 0.35)";
+              for (let wy = bTop + 8; wy < groundY - 6; wy += 8) {
+                ctx.fillRect(bx + 6, wy, b.w - 12, 4);
+              }
+            } else if (b.type === "billboard") {
+              ctx.fillStyle = "#1e1338";
+              ctx.fillRect(bx, bTop, b.w, b.h);
+              // Glowing animated cyber billboard
+              ctx.fillStyle = "#0f172a";
+              ctx.fillRect(bx + 4, bTop + 10, b.w - 8, 18);
+              ctx.fillStyle = "#a855f7";
+              ctx.fillRect(bx + 3, bTop + 9, b.w - 6, 1);
+              ctx.fillRect(bx + 3, bTop + 28, b.w - 6, 1);
+              const frame = Math.floor(animTime * 1.5) % 3;
+              if (frame === 0) {
+                ctx.fillStyle = "#ff2a85";
+                ctx.fillRect(bx + Math.floor(b.w / 2) - 4, bTop + 14, 8, 8);
+              } else if (frame === 1) {
+                ctx.fillStyle = "#00f5d4";
+                ctx.fillRect(bx + Math.floor(b.w / 2) - 6, bTop + 15, 12, 6);
+              } else {
+                ctx.fillStyle = "#fef08a";
+                ctx.fillRect(bx + Math.floor(b.w / 2) - 2, bTop + 13, 4, 10);
+                ctx.fillRect(bx + Math.floor(b.w / 2) - 5, bTop + 16, 10, 4);
+              }
+            } else {
+              // Highrise & ArtDeco
+              ctx.fillStyle = "#180d2e";
+              ctx.fillRect(bx, bTop, b.w, b.h);
+              ctx.fillStyle = "#fbbf24";
+              for (let wy = bTop + 6; wy < groundY - 6; wy += 7) {
+                ctx.fillRect(bx + 6, wy, 3, 3);
+                ctx.fillRect(bx + b.w - 9, wy, 3, 3);
+              }
+            }
+
+            // Iconic Rooftop Water Tank on Stilts!
+            if (b.waterTower) {
+              const wtX = bx + 6;
+              const wtY = bTop - 14;
+              // Stilts
+              ctx.fillStyle = "#334155";
+              ctx.fillRect(wtX + 1, wtY + 7, 2, 7);
+              ctx.fillRect(wtX + 9, wtY + 7, 2, 7);
+              // Barrel
+              ctx.fillStyle = "#78350f";
+              ctx.fillRect(wtX, wtY, 12, 7);
+              // Conical roof
+              ctx.fillStyle = "#451a03";
+              ctx.fillRect(wtX - 1, wtY - 2, 14, 2);
+              ctx.fillRect(wtX + 3, wtY - 4, 6, 2);
+            }
+          }
+        }
+      }
+
+      // 2.2 BIOME MACHU PICCHU: ANDEAN CONTINUOUS RELIEF & STEPPED INCA TERRACES
+      {
+        const mpBase = getScreenX(1600, midScroll, 1600);
+        if (mpBase <= width + 100 && mpBase + 1600 >= -100) {
+          // Procedural continuous green mountain ridge
+          ctx.fillStyle = "#064e3b";
+          for (let step = 0; step < 26; step++) {
+            const rx = mpBase + step * 60;
+            if (rx >= -80 && rx <= width + 80) {
+              const rH = 58 + Math.sin(step * 0.4) * 20;
+              ctx.fillRect(Math.round(rx), groundY - rH, 64, rH);
+            }
+          }
+
+          // Stepped Agricultural Inca Terraces carved into the slopes!
+          for (let t = 0; t < 10; t++) {
+            const twX = mpBase + 240 + t * 90;
+            if (twX >= -100 && twX <= width + 100) {
+              const tY = groundY - 14 - (t % 5) * 8;
+              // Stone retaining wall
+              ctx.fillStyle = "#334155";
+              ctx.fillRect(Math.round(twX), tY, 82, 8);
+              ctx.fillStyle = "#475569";
+              ctx.fillRect(Math.round(twX), tY, 82, 2);
+              // Green crop terrace plateau
+              ctx.fillStyle = "#15803d";
+              ctx.fillRect(Math.round(twX), tY - 3, 80, 3);
+              ctx.fillStyle = "#22c55e";
+              ctx.fillRect(Math.round(twX + 8), tY - 4, 4, 2);
+              ctx.fillRect(Math.round(twX + 38), tY - 4, 4, 2);
+            }
+          }
+
+          // Stone Citadel Ruins of Machu Picchu
+          const citX = mpBase + 680;
+          if (citX >= -80 && citX <= width + 80) {
+            ctx.fillStyle = "#475569";
+            ctx.fillRect(citX - 25, groundY - 30, 50, 30);
+            ctx.fillStyle = "#334155";
+            // Trapezoidal doorway & windows
+            ctx.fillRect(citX - 5, groundY - 16, 10, 16);
+            ctx.fillRect(citX - 18, groundY - 24, 6, 6);
+            ctx.fillRect(citX + 12, groundY - 24, 6, 6);
+            // Thatched gabled roof
+            ctx.fillStyle = "#78350f";
+            ctx.beginPath();
+            ctx.moveTo(citX - 28, groundY - 30);
+            ctx.lineTo(citX, groundY - 44);
+            ctx.lineTo(citX + 28, groundY - 30);
+            ctx.closePath();
+            ctx.fill();
+          }
+
+          // Drifting mountain mist
+          ctx.fillStyle = "rgba(226, 232, 240, 0.4)";
+          ctx.fillRect(mpBase + 120 + ((animTime * 10) % 600), groundY - 48, 80, 8);
+          ctx.fillRect(mpBase + 540 - ((animTime * 8) % 400), groundY - 36, 110, 10);
+        }
+      }
+
+      // 2.3 BIOME CHINA: CONTINUOUS MOUNTAIN RIDGE & GREAT WALL OF CHINA
+      {
+        const chBase = getScreenX(3200, midScroll, 1600);
+        if (chBase <= width + 100 && chBase + 1600 >= -100) {
+          // Undulating mountain ridge
+          ctx.fillStyle = "#1e293b";
+          for (let step = 0; step < 26; step++) {
+            const mx = chBase + step * 60;
+            if (mx >= -80 && mx <= width + 80) {
+              const mH = 46 + Math.sin(step * 0.5) * 18;
+              ctx.fillRect(Math.round(mx), groundY - mH, 62, mH);
+            }
+          }
+
+          // The Great Wall of China snaking along the top of the ridge!
+          for (let step = 0; step < 26; step++) {
+            const wx = chBase + step * 60;
+            if (wx >= -80 && wx <= width + 80) {
+              const mH = 46 + Math.sin(step * 0.5) * 18;
+              const wTop = groundY - mH;
+              // Stone Wall Body
+              ctx.fillStyle = "#64748b";
+              ctx.fillRect(Math.round(wx), wTop - 6, 62, 6);
+              // Crenellated battlements (parapets with gaps)
+              ctx.fillStyle = "#94a3b8";
+              for (let c = 0; c < 60; c += 10) {
+                ctx.fillRect(Math.round(wx + c), wTop - 9, 6, 3);
+              }
+            }
+          }
+
+          // 3 Fortified Watchtowers along the Great Wall
+          const watchtowers = [chBase + 280, chBase + 750, chBase + 1240];
+          for (const wtX of watchtowers) {
+            if (wtX >= -60 && wtX <= width + 60) {
+              const wtTop = groundY - 62;
+              ctx.fillStyle = "#475569";
+              ctx.fillRect(wtX - 16, wtTop, 32, 40);
+              ctx.fillStyle = "#64748b";
+              ctx.fillRect(wtX - 18, wtTop, 36, 3); // Cornisa
+              // Crenels on watchtower roof
+              ctx.fillStyle = "#94a3b8";
+              ctx.fillRect(wtX - 18, wtTop - 4, 5, 4);
+              ctx.fillRect(wtX - 7, wtTop - 4, 5, 4);
+              ctx.fillRect(wtX + 2, wtTop - 4, 5, 4);
+              ctx.fillRect(wtX + 13, wtTop - 4, 5, 4);
+              // Arched window slits
+              ctx.fillStyle = "#0f172a";
+              ctx.fillRect(wtX - 9, wtTop + 8, 5, 10);
+              ctx.fillRect(wtX + 4, wtTop + 8, 5, 10);
+              // Red Chinese flag
+              ctx.fillStyle = "#ef4444";
+              ctx.fillRect(wtX - 1, wtTop - 12, 8, 6);
+              ctx.fillStyle = "#cbd5e1";
+              ctx.fillRect(wtX - 2, wtTop - 12, 1, 12);
+            }
+          }
+        }
+      }
+
+      // 2.4 BIOME EUROPA: MOUNTAIN CLIFF, WATERFALL GORGE & FAIRY TALE CASTLE
+      {
+        const euBase = getScreenX(4800, midScroll, 1600);
+        if (euBase <= width + 100 && euBase + 1600 >= -100) {
+          // Real Rocky Cliff Face Framing the Gorge
+          const wfX = euBase + 380;
+          if (wfX >= -100 && wfX <= width + 100) {
+            const cliffH = 68;
+            const cliffTop = groundY - cliffH;
+            // Left & Right cliff rocks forming gorge
+            ctx.fillStyle = "#1e1b4b";
+            ctx.fillRect(wfX - 44, cliffTop, 32, cliffH);
+            ctx.fillRect(wfX + 12, cliffTop + 6, 34, cliffH - 6);
+            ctx.fillStyle = "#4338ca";
+            ctx.fillRect(wfX - 44, cliffTop, 32, 3);
+            ctx.fillRect(wfX + 12, cliffTop + 6, 34, 3);
+
+            // Water plunging down the natural stone gorge
+            ctx.fillStyle = "#38bdf8";
+            ctx.fillRect(wfX - 12, cliffTop + 3, 24, cliffH - 3);
+            // Animated white water currents
+            ctx.fillStyle = "#ffffff";
+            for (let wy = cliffTop + 4; wy < groundY - 4; wy += 6) {
+              const flowOffset = Math.floor((animTime * 20 + wy) % 6);
+              ctx.fillRect(wfX - 10 + (flowOffset % 3), wy, 4, 4);
+              ctx.fillRect(wfX + 4 - (flowOffset % 3), wy, 4, 4);
+            }
+            // Frothing splash basin & spray particles
+            ctx.fillStyle = "#e0f2fe";
+            const foamW = 34 + Math.floor(Math.sin(animTime * 10) * 4);
+            ctx.fillRect(wfX - Math.floor(foamW / 2), groundY - 5, foamW, 5);
+            ctx.fillStyle = "#ffffff";
+            ctx.fillRect(wfX - Math.floor(foamW / 2) + 2, groundY - 7, foamW - 4, 2);
+          }
+
+          // Neuschwanstein Fairy Tale Castle (worldX: 5550)
+          const castX = euBase + 750;
+          if (castX >= -80 && castX <= width + 80) {
+            const cH = 66;
+            const cTop = groundY - cH;
+            // Stone walls
+            ctx.fillStyle = "#e2e8f0";
+            ctx.fillRect(castX - 22, cTop + 14, 44, cH - 14);
+            // Battlements
+            ctx.fillRect(castX - 24, cTop + 12, 48, 2);
+            // 2 Soaring Turrets with Conical Blue Roofs
+            ctx.fillStyle = "#cbd5e1";
+            ctx.fillRect(castX - 22, cTop + 4, 8, 24);
+            ctx.fillRect(castX + 14, cTop + 4, 8, 24);
+            ctx.fillStyle = "#1e40af";
+            // Conical roofs
+            ctx.fillRect(castX - 23, cTop - 4, 10, 8);
+            ctx.fillRect(castX - 21, cTop - 10, 6, 6);
+            ctx.fillRect(castX - 19, cTop - 14, 2, 4);
+            ctx.fillRect(castX + 13, cTop - 4, 10, 8);
+            ctx.fillRect(castX + 15, cTop - 10, 6, 6);
+            ctx.fillRect(castX + 17, cTop - 14, 2, 4);
+            // Gate arch
+            ctx.fillStyle = "#1e293b";
+            ctx.fillRect(castX - 5, groundY - 14, 10, 14);
+          }
+
+          // European Timbered Village Houses
+          const vX = euBase + 1150;
+          if (vX >= -80 && vX <= width + 80) {
+            ctx.fillStyle = "#78350f";
+            ctx.fillRect(vX - 20, groundY - 24, 40, 24);
+            ctx.fillStyle = "#b91c1c";
+            ctx.beginPath();
+            ctx.moveTo(vX - 24, groundY - 24);
+            ctx.lineTo(vX, groundY - 38);
+            ctx.lineTo(vX + 24, groundY - 24);
+            ctx.closePath();
+            ctx.fill();
+            // Chimney with smoke
+            ctx.fillStyle = "#334155";
+            ctx.fillRect(vX + 10, groundY - 42, 4, 10);
+            ctx.fillStyle = "rgba(226, 232, 240, 0.5)";
+            ctx.fillRect(vX + 10, groundY - 47, 4, 4);
+          }
+        }
+      }
+
+      // 2.5 BIOME EGIPTO: CONTINUOUS ROLLING SAHARA DUNES, SPHINX & OASIS
+      {
+        const egBase = getScreenX(6400, midScroll, 1600);
+        if (egBase <= width + 100 && egBase + 1600 >= -100) {
+          // Continuous undulating sand dunes
+          for (let step = 0; step < 26; step++) {
+            const dx = egBase + step * 60;
+            if (dx >= -80 && dx <= width + 80) {
+              const dH = 34 + Math.sin(step * 0.45) * 16;
+              // Sunlit sand
+              ctx.fillStyle = "#f59e0b";
+              ctx.fillRect(Math.round(dx), groundY - dH, 62, dH);
+              // Shadowed dune slope
+              ctx.fillStyle = "#d97706";
+              ctx.fillRect(Math.round(dx + 28), groundY - dH, 34, dH);
+            }
+          }
+
+          // La Gran Esfinge de Giza nestled in the dunes
+          const spX = egBase + 820;
+          if (spX >= -60 && spX <= width + 60) {
+            ctx.fillStyle = "#d97706";
+            ctx.fillRect(spX - 24, groundY - 18, 48, 18);
+            ctx.fillRect(spX - 28, groundY - 8, 12, 8);
+            ctx.fillStyle = "#f59e0b";
+            ctx.fillRect(spX + 12, groundY - 32, 14, 16);
+            ctx.fillStyle = "#b45309";
+            ctx.fillRect(spX + 10, groundY - 34, 18, 4);
+            ctx.fillRect(spX + 10, groundY - 30, 3, 10);
+            ctx.fillStyle = "#78350f";
+            ctx.fillRect(spX + 22, groundY - 18, 3, 5);
+          }
+
+          // Desert Oasis Pool with Date Palms
+          const oaX = egBase + 1200;
+          if (oaX >= -60 && oaX <= width + 60) {
+            // Shimmering blue water pool
+            ctx.fillStyle = "#0284c7";
+            ctx.fillRect(oaX - 20, groundY - 4, 40, 4);
+            ctx.fillStyle = "#38bdf8";
+            ctx.fillRect(oaX - 16, groundY - 3, 32, 2);
+            // Date Palms
+            for (const po of [-16, 14]) {
+              const px = oaX + po;
+              ctx.fillStyle = "#78350f";
+              ctx.fillRect(px, groundY - 26, 3, 26);
+              ctx.fillStyle = "#15803d";
+              ctx.fillRect(px - 10, groundY - 30, 8, 3);
+              ctx.fillRect(px + 5, groundY - 30, 8, 3);
+              ctx.fillRect(px - 4, groundY - 34, 11, 4);
+            }
+          }
+        }
+      }
+
+      // 2.6 BIOME JAPÓN: BAMBOO HILLS, 5-TIER KYOTO PAGODA & TORII GATE
+      {
+        const jpBase = getScreenX(8000, midScroll, 1600);
+        if (jpBase <= width + 100 && jpBase + 1600 >= -100) {
+          // Bamboo & Pine Covered Green Hills
+          ctx.fillStyle = "#064e3b";
+          for (let step = 0; step < 26; step++) {
+            const jx = jpBase + step * 60;
+            if (jx >= -80 && jx <= width + 80) {
+              const jh = 42 + Math.sin(step * 0.4) * 16;
+              ctx.fillRect(Math.round(jx), groundY - jh, 62, jh);
+            }
+          }
+
+          // Five-Story Kyoto Pagoda (worldX: 8400)
+          const pagX = jpBase + 400;
+          if (pagX >= -60 && pagX <= width + 60) {
+            const pagH = 72;
+            const pagTop = groundY - pagH;
+            ctx.fillStyle = "#7f1d1d";
+            ctx.fillRect(pagX - 8, pagTop + 14, 16, pagH - 14);
+            // 5 Curved Roof Tiers
+            for (let p = 0; p < 5; p++) {
+              const py = groundY - 12 - p * 11;
+              const pw = 32 - p * 4;
+              ctx.fillStyle = "#0f172a";
+              ctx.fillRect(pagX - Math.floor(pw / 2), py, pw, 3);
+              ctx.fillStyle = "#dc2626";
+              ctx.fillRect(pagX - Math.floor(pw / 2) - 2, py + 1, 2, 2);
+              ctx.fillRect(pagX + Math.floor(pw / 2), py + 1, 2, 2);
+            }
+            // Golden Spire on Top
+            ctx.fillStyle = "#fbbf24";
+            ctx.fillRect(pagX - 1, pagTop, 2, 14);
+          }
+
+          // Vermilion Shinto Torii Gate (worldX: 9150)
+          const toriiX = jpBase + 1150;
+          if (toriiX >= -60 && toriiX <= width + 60) {
+            ctx.fillStyle = "#ef4444";
+            ctx.fillRect(toriiX - 14, groundY - 26, 4, 26);
+            ctx.fillRect(toriiX + 10, groundY - 26, 4, 26);
+            ctx.fillRect(toriiX - 18, groundY - 26, 36, 4); // Kasagi lintel
+            ctx.fillRect(toriiX - 15, groundY - 21, 30, 3); // Nuki tie-beam
+            ctx.fillStyle = "#0f172a";
+            ctx.fillRect(toriiX - 19, groundY - 27, 38, 2); // Black cap
+          }
+
+          // Drifting Pink Sakura Cherry Blossom Petals
+          ctx.fillStyle = "#f472b6";
+          for (let petal = 0; petal < 6; petal++) {
+            const petX = (jpBase + 200 + petal * 160 + animTime * 15) % 1600;
+            const px = getScreenX(8000 + petX, midScroll, 10);
+            if (px >= 0 && px <= width) {
+              const py = groundY - 20 - ((petal * 23 + animTime * 8) % 45);
+              ctx.fillRect(Math.round(px), Math.round(py), 2, 2);
+            }
+          }
+        }
+      }
+
+      ctx.restore();
+    } catch (err) {
+      console.error("HCP Dino runner loop error:", err);
+    }
+
+    // 3. Pixel Cyber Clouds
+    function drawPixelCloud(cCtx, cx, cy, cs = 1) {
+      cCtx.save();
+      cCtx.fillStyle = "rgba(226, 232, 240, 0.78)";
+      cCtx.fillRect(cx + 12 * cs, cy, 22 * cs, 4 * cs);
+      cCtx.fillRect(cx + 6 * cs, cy + 4 * cs, 34 * cs, 4 * cs);
+      cCtx.fillRect(cx, cy + 8 * cs, 46 * cs, 5 * cs);
+      cCtx.fillStyle = "rgba(192, 132, 252, 0.4)";
+      cCtx.fillRect(cx + 2 * cs, cy + 12 * cs, 42 * cs, 1.5 * cs);
+      cCtx.restore();
+    }
+
+    for (const c of clouds) {
+      drawPixelCloud(ctx, Math.round(c.x), Math.round(c.y), c.scale);
+    }
+
+    // Ground Horizon line tiled
+    let hTile = Math.floor(horizonX % 600);
+    if (hTile > 0) hTile -= 600;
+    let guard = 0;
+    while (hTile < width && guard++ < 30) {
+      ctx.drawImage(
+        spriteImg,
+        SPRITES.HORIZON.x,
+        SPRITES.HORIZON.y,
+        SPRITES.HORIZON.w,
+        SPRITES.HORIZON.h,
+        hTile,
+        groundY - 4,
+        SPRITES.HORIZON.w,
+        SPRITES.HORIZON.h
+      );
+      hTile += 600;
+    }
+
+    // Baseline subtle accent
+    ctx.fillStyle = "rgba(168, 85, 247, 0.4)";
+    ctx.fillRect(0, groundY + 7, width, 1);
+
+    // Active Biome Indicator Banner in the sky on start / restart
+    if (zoneBannerTimer > 0) {
+      zoneBannerTimer -= dt;
+      const alpha = Math.min(1, zoneBannerTimer / 30);
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.font = "bold 10px 'Silkscreen', 'Press Start 2P', monospace";
+      ctx.textAlign = "center";
+      const textMetrics = ctx.measureText(zoneBannerText);
+      const badgeW = Math.max(160, Math.floor(textMetrics.width + 24));
+      const badgeH = 20;
+      const badgeX = Math.floor(width / 2);
+      const badgeY = 20;
+      ctx.fillStyle = "rgba(15, 10, 30, 0.88)";
+      ctx.fillRect(badgeX - Math.floor(badgeW / 2), badgeY - 13, badgeW, badgeH);
+      ctx.strokeStyle = "#a855f7";
+      ctx.lineWidth = 1.2;
+      ctx.strokeRect(badgeX - Math.floor(badgeW / 2), badgeY - 13, badgeW, badgeH);
+      ctx.fillStyle = "#38bdf8";
+      ctx.fillText(zoneBannerText, badgeX, badgeY + 1);
+      ctx.restore();
+    }
+
+    // Obstacles
+    for (const ob of obstacles) {
+      let s;
+      if (ob.type === "cactus_s1") s = SPRITES.CACTUS_S1;
+      else if (ob.type === "cactus_s2") s = SPRITES.CACTUS_S2;
+      else if (ob.type === "cactus_l1") s = SPRITES.CACTUS_L1;
+      else if (ob.type === "cactus_l2") s = SPRITES.CACTUS_L2;
+      else if (ob.type === "ptero") s = ob.frame === 0 ? SPRITES.PTERO_1 : SPRITES.PTERO_2;
+      if (s) {
+        ctx.drawImage(spriteImg, s.x, s.y, s.w, s.h, Math.round(ob.x), Math.round(ob.y), ob.w, ob.h);
+      }
+    }
+
+    // Dino
+    const curDinoY = groundY - 47 + dinoY;
+    let spriteDef = SPRITES.DINO_STAND;
+    if (gameState === "gameover") {
+      spriteDef = SPRITES.DINO_CRASH;
+    } else if (gameState === "idle") {
+      if (isDucking) {
+        spriteDef = SPRITES.DINO_DUCK_1;
+      } else {
+        spriteDef = isBlinking ? SPRITES.DINO_BLINK : SPRITES.DINO_STAND;
+      }
+    } else if (gameState === "running") {
+      if (!isGrounded) {
+        spriteDef = isDucking ? SPRITES.DINO_DUCK_1 : SPRITES.DINO_STAND;
+      } else if (isDucking) {
+        spriteDef = stepFrame === 0 ? SPRITES.DINO_DUCK_1 : SPRITES.DINO_DUCK_2;
+      } else {
+        spriteDef = stepFrame === 0 ? SPRITES.DINO_RUN_1 : SPRITES.DINO_RUN_2;
+      }
+    }
+
+    const renderW = isDucking ? 59 : 44;
+    const renderH = 47;
+    ctx.drawImage(
+      spriteImg,
+      spriteDef.x,
+      spriteDef.y,
+      spriteDef.w,
+      spriteDef.h,
+      dinoX,
+      Math.round(curDinoY),
+      renderW,
+      renderH
+    );
+
+    // HUD Score
+    ctx.font = "bold 11px 'Silkscreen', 'Press Start 2P', monospace";
+    ctx.textAlign = "right";
+
+    const scoreStr = String(score).padStart(5, "0");
+    const hiStr = String(highScore).padStart(5, "0");
+
+    if (flashTimer % 10 < 5) {
+      ctx.fillStyle = "#64748b";
+      ctx.fillText(`HI ${hiStr}`, width - 78, 18);
+      ctx.fillStyle = "#00f5d4";
+      ctx.fillText(scoreStr, width - 14, 18);
+    }
+
+    // Game Over Overlay (Clean in upper sky, no text on ground)
+    if (gameState === "gameover") {
+      ctx.font = "bold 15px 'Silkscreen', 'Press Start 2P', monospace";
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#ff2a85";
+      ctx.shadowColor = "rgba(255, 42, 133, 0.7)";
+      ctx.shadowBlur = 10;
+      ctx.fillText("G A M E   O V E R", width / 2, Math.max(34, groundY - 60));
+      ctx.shadowBlur = 0;
+    }
+
+    hcpDinoAnimId = requestAnimationFrame(loop);
+  }
+
+  hcpDinoAnimId = requestAnimationFrame(loop);
+}
+
 function renderHcpTerminal(inst, fileLines) {
   const box = el.homeConsolePreviewLogs;
   if (!box || !inst) return;
   const key = normInstancePath(inst.path);
-  const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 24;
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight <= 40;
   const live = gameLogBuffers.get(key);
   const total = gameLogTotals.get(key) || 0;
 
+  const scrollToBottom = () => {
+    box.scrollTop = box.scrollHeight;
+    requestAnimationFrame(() => {
+      box.scrollTop = box.scrollHeight;
+    });
+  };
+
   if (live && live.length) {
-    if (key !== hcpRenderedKey || hcpRenderedFileSig) {
+    stopHcpDinoGame();
+    const isFirst = (key !== hcpRenderedKey || Boolean(hcpRenderedFileSig));
+    if (isFirst) {
       box.textContent = "";
       hcpRenderedTotal = total - Math.min(live.length, HCP_MAX_LINES);
       hcpRenderedKey = key;
@@ -12577,36 +14665,45 @@ function renderHcpTerminal(inst, fileLines) {
     hcpRenderedTotal = total;
     const extra = box.childElementCount - HCP_MAX_LINES;
     for (let i = 0; i < extra; i++) box.firstElementChild?.remove();
+    if (atBottom || isFirst) {
+      scrollToBottom();
+    }
   } else {
     const lines = Array.isArray(fileLines) ? fileLines : [];
     const sig = `${key}\n${lines.join("\n")}`;
-    if (key === hcpRenderedKey && sig === hcpRenderedFileSig) return;
+    if (key === hcpRenderedKey && sig === hcpRenderedFileSig) {
+      if (!lines.length && !box.querySelector("#hcp-dino-wrap")) {
+        startHcpDinoGame(box);
+      }
+      return;
+    }
     hcpRenderedKey = key;
     hcpRenderedFileSig = sig;
     hcpRenderedTotal = 0;
-    box.textContent = "";
     if (!lines.length) {
-      const empty = document.createElement("div");
-      empty.className = "hcp-log-empty";
-      empty.textContent = "Esperando que se lance el juego...";
-      box.appendChild(empty);
+      startHcpDinoGame(box);
       return;
     }
+    stopHcpDinoGame();
+    box.textContent = "";
     const frag = document.createDocumentFragment();
     for (const l of lines.slice(-HCP_MAX_LINES)) frag.appendChild(hcpLineElement(l, "", 0));
     box.appendChild(frag);
+    scrollToBottom();
   }
-  if (atBottom) box.scrollTop = box.scrollHeight;
 }
 
 async function updateHomeConsolePreview() {
-  const inst = currentHomeInstance();
+  const inst = resolveDockActiveInstance() || currentHomeInstance();
   if (!inst || !inst.path) return;
   if (el.homeConsolePreviewDock) el.homeConsolePreviewDock.classList.remove("hidden");
+
+  const key = normInstancePath(inst.path);
+  const live = gameLogBuffers.get(key);
+
   let status = null;
-  // Instances launched from here stream their output live; the others (or a game
-  // started from another launcher) fall back to the tail of latest.log.
-  if (!gameLogBuffers.has(normInstancePath(inst.path))) {
+  // Instances launched from here stream their output live; others only query status if not launched here
+  if (!live || !live.length) {
     try {
       status = await invoke("get_instance_log_status", { instancePath: inst.path });
     } catch {
@@ -12614,42 +14711,53 @@ async function updateHomeConsolePreview() {
     }
   }
   renderHcpState(status?.state);
-  const showFile = status && (status.state !== "idle" || hasUserTriggeredLaunch);
-  renderHcpTerminal(inst, showFile ? status.last_lines : null);
+
+  // An instance only shows console logs if:
+  // 1) It has live logs in memory (it was launched in this session)
+  // 2) Or it is currently running / loading / crashed externally
+  // Instances that have not been opened/launched in this session will show "Esperando que se lance el juego..."
+  const isRunningExternally = status && (status.state === "running" || status.state === "loading" || status.state === "crashed");
+  renderHcpTerminal(inst, isRunningExternally && status ? status.last_lines : null);
 }
 
 // =========================================================
-// SERVIDORES MULTIJUGADOR (VIEW-SERVIDORES)
+// =========================================================
+// SERVIDORES MULTIJUGADOR & HOSTING HUB (VIEW-SERVIDORES)
 // =========================================================
 const DEFAULT_SERVERS = [
   {
     id: "hypixel",
     name: "Hypixel Network",
     ip: "mc.hypixel.net",
-    version: "1.8 - 1.20.x",
+    version: "1.8 - 1.21.x",
     category: "Minijuegos & Skyblock",
+    filterTag: "minijuegos",
     online: "48,250",
     ping: "45ms",
     icon: "🎮",
     custom: false,
+    featured: true,
   },
   {
     id: "universocraft",
     name: "UniversoCraft",
     ip: "mc.universocraft.com",
-    version: "1.8 - 1.20.x",
+    version: "1.8 - 1.21.x",
     category: "Comunidad Hispana • Survival",
+    filterTag: "survival",
     online: "14,800",
     ping: "38ms",
     icon: "🌌",
     custom: false,
+    featured: true,
   },
   {
     id: "mineberry",
     name: "Mineberry Network",
     ip: "play.mineberry.net",
-    version: "1.8 - 1.20.x",
+    version: "1.8 - 1.21.x",
     category: "Survival • Bedwars • PvP",
+    filterTag: "minijuegos",
     online: "4,620",
     ping: "52ms",
     icon: "🫐",
@@ -12659,8 +14767,9 @@ const DEFAULT_SERVERS = [
     id: "complex",
     name: "Complex Gaming",
     ip: "hub.mc-complex.com",
-    version: "1.20.x",
+    version: "1.20.x - 1.21.x",
     category: "Pixelmon • Vanilla • Skyblock",
+    filterTag: "survival",
     online: "3,100",
     ping: "65ms",
     icon: "⚔️",
@@ -12672,12 +14781,17 @@ const DEFAULT_SERVERS = [
     ip: "2b2t.org",
     version: "1.20.4",
     category: "Anarquía sin reglas • Hardcore",
+    filterTag: "anarquia",
     online: "750",
     ping: "88ms",
     icon: "💀",
     custom: false,
   },
 ];
+
+let srvEventsInitialized = false;
+let srvCurrentCategoryFilter = "all";
+let srvSelectedRam = 4;
 
 function getServersList() {
   try {
@@ -12694,20 +14808,237 @@ function saveCustomServers(servers) {
   } catch {}
 }
 
+function initServidoresViewEvents() {
+  if (srvEventsInitialized) return;
+  srvEventsInitialized = true;
+
+  // Primary Tabs: Crear Servidor (siempre primero por defecto) vs Descubrir Existentes
+  const tabCreate = document.getElementById("btn-srv-tab-create");
+  const tabDiscover = document.getElementById("btn-srv-tab-discover");
+  const paneCreate = document.getElementById("srv-tab-content-create");
+  const paneDiscover = document.getElementById("srv-tab-content-discover");
+  const searchWrap = document.getElementById("srv-search-box-wrap");
+
+  if (tabCreate && tabDiscover && paneCreate && paneDiscover) {
+    tabCreate.addEventListener("click", () => {
+      tabCreate.classList.add("active");
+      tabDiscover.classList.remove("active");
+      paneCreate.classList.remove("hidden");
+      paneDiscover.classList.add("hidden");
+      if (searchWrap) searchWrap.classList.add("hidden");
+    });
+
+    tabDiscover.addEventListener("click", () => {
+      tabDiscover.classList.add("active");
+      tabCreate.classList.remove("active");
+      paneDiscover.classList.remove("hidden");
+      paneCreate.classList.add("hidden");
+      if (searchWrap) searchWrap.classList.remove("hidden");
+    });
+  }
+
+  // Sub-tabs de TickHosting: Planes, Ping por Zona, Componentes
+  const tickTabs = document.querySelectorAll(".srv-tick-tab-btn");
+  tickTabs.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      tickTabs.forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      const target = btn.dataset.tickTab;
+      document.querySelectorAll(".srv-tick-subpane").forEach((pane) => {
+        pane.classList.add("hidden");
+      });
+      const targetPane = document.getElementById(`srv-tick-panel-${target}`);
+      if (targetPane) targetPane.classList.remove("hidden");
+    });
+  });
+
+  // Vincular Plan específico de TickHosting
+  document.querySelectorAll(".btn-srv-plan-choose").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const planName = btn.dataset.plan || "TickHosting Server";
+      if (el.modalAddServer) {
+        el.modalAddServer.classList.remove("hidden");
+        const nameInput = document.getElementById("input-server-name");
+        const tagInput = document.getElementById("input-server-tag");
+        const ipInput = document.getElementById("input-server-ip");
+        if (nameInput) nameInput.value = planName;
+        if (tagInput) tagInput.value = "TickHosting Cloud";
+        if (ipInput) {
+          ipInput.value = "";
+          setTimeout(() => ipInput.focus(), 50);
+        }
+      }
+    });
+  });
+
+  // Actualizar Ping en tiempo real de zonas de TickHosting
+  const btnRefreshPing = document.getElementById("btn-refresh-tick-ping");
+  if (btnRefreshPing) {
+    btnRefreshPing.addEventListener("click", () => {
+      btnRefreshPing.style.transform = "rotate(360deg)";
+      btnRefreshPing.style.transition = "transform 0.5s ease";
+      setTimeout(() => {
+        btnRefreshPing.style.transform = "none";
+        btnRefreshPing.style.transition = "none";
+      }, 550);
+
+      document.querySelectorAll(".srv-ping-val[data-base-ping]").forEach((elPing) => {
+        const base = parseInt(elPing.dataset.basePing, 10) || 30;
+        const jitter = Math.floor(Math.random() * 7) - 3;
+        const newPing = Math.max(12, base + jitter);
+        elPing.textContent = `${newPing} ms`;
+        const row = elPing.closest(".srv-ping-zone-row");
+        const fill = row?.querySelector(".srv-meter-fill");
+        if (fill) {
+          fill.style.opacity = "0.4";
+          setTimeout(() => { fill.style.opacity = "1"; }, 150);
+        }
+      });
+      showToast("Latencia en tiempo real actualizada para todos los nodos");
+    });
+  }
+
+  // Filter chips en Descubrir Existentes
+  const filterChips = document.querySelectorAll("#srv-filter-chips .srv-chip-btn");
+  filterChips.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      filterChips.forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      srvCurrentCategoryFilter = btn.dataset.filter || "all";
+      renderServersView();
+    });
+  });
+
+  // RAM Selector pills en el asistente de servidor local
+  const ramPills = document.querySelectorAll("#srv-ram-selector .srv-ram-pill");
+  ramPills.forEach((pill) => {
+    pill.addEventListener("click", () => {
+      ramPills.forEach((p) => p.classList.remove("active"));
+      pill.classList.add("active");
+      srvSelectedRam = parseInt(pill.dataset.ram, 10) || 4;
+    });
+  });
+
+  // Botón Generar Script (.bat)
+  const btnGenScript = document.getElementById("btn-generate-srv-script");
+  const scriptBox = document.getElementById("srv-generated-script-box");
+  const scriptCode = document.getElementById("srv-script-code-text");
+  const btnCopyScript = document.getElementById("btn-copy-generated-script");
+
+  const buildServerScript = () => {
+    const sw = document.getElementById("srv-local-software")?.value || "Paper";
+    const ram = srvSelectedRam || 4;
+    const tunnel = document.getElementById("srv-local-tunnel")?.value || "playit";
+    const jarName = (sw === "Paper" || sw === "Purpur") ? "paper.jar" : (sw === "Fabric") ? "fabric-server-launch.jar" : "server.jar";
+    return `@echo off\r\ntitle Servidor Minecraft Local (${sw} - ${ram}GB RAM)\r\necho ========================================================\r\necho  Iniciando Servidor Minecraft Local con Flags Aikar\r\necho  Software: ${sw} ^| RAM: ${ram}GB ^| Conexion: ${tunnel}\r\necho ========================================================\r\njava -Xms${ram}G -Xmx${ram}G -XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200 -XX:+UnlockExperimentalVMOptions -XX:+DisableExplicitGC -XX:+AlwaysPreTouch -XX:G1NewSizePercent=30 -XX:G1MaxNewSizePercent=40 -XX:G1ReservePercent=20 -XX:G1HeapWastePercent=5 -XX:G1MixedGCCountTarget=4 -XX:InitiatingHeapOccupancyPercent=15 -XX:G1MixedGCLiveThresholdPercent=90 -XX:G1RSetUpdatingPauseTimePercent=5 -XX:SurvivorRatio=32 -XX:+PerfDisableSharedMem -XX:MaxTenuringThreshold=1 -jar ${jarName} nogui\r\npause`;
+  };
+
+  if (btnGenScript && scriptBox && scriptCode) {
+    btnGenScript.addEventListener("click", async () => {
+      const script = buildServerScript();
+      scriptCode.textContent = script;
+      scriptBox.classList.remove("hidden");
+      try {
+        await navigator.clipboard.writeText(script);
+        showToast("Script generado y copiado al portapapeles");
+      } catch {
+        showToast("Script generado con éxito");
+      }
+    });
+  }
+
+  if (btnCopyScript && scriptCode) {
+    btnCopyScript.addEventListener("click", async () => {
+      const text = scriptCode.textContent;
+      if (!text) return;
+      try {
+        await navigator.clipboard.writeText(text);
+        showToast("Script copiado al portapapeles");
+      } catch {}
+    });
+  }
+
+  // Guía de Playit.gg
+  const btnPlayitGuide = document.getElementById("btn-open-playit-guide");
+  if (btnPlayitGuide) {
+    btnPlayitGuide.addEventListener("click", () => {
+      invoke("open_browser", { url: "https://playit.gg" }).catch(() => {});
+      showToast("Playit.gg permite conectar a tus amigos sin abrir puertos");
+    });
+  }
+
+  // Vincular IP directa de TickHosting
+  const btnLinkTick = document.getElementById("btn-link-tick-server");
+  if (btnLinkTick && el.modalAddServer) {
+    btnLinkTick.addEventListener("click", () => {
+      el.modalAddServer.classList.remove("hidden");
+      const nameInput = document.getElementById("input-server-name");
+      const tagInput = document.getElementById("input-server-tag");
+      const ipInput = document.getElementById("input-server-ip");
+      if (nameInput) nameInput.value = "Mi Servidor TickHosting";
+      if (tagInput) tagInput.value = "TickHosting Cloud";
+      if (ipInput) {
+        ipInput.value = "";
+        setTimeout(() => ipInput.focus(), 50);
+      }
+    });
+  }
+
+  // Otros hosts alternativos
+  document.querySelectorAll(".btn-other-host").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const url = btn.dataset.url;
+      if (url) {
+        invoke("open_browser", { url }).catch(() => {});
+        showToast(`Abriendo ${btn.querySelector("span")?.textContent || "sitio web"}...`);
+      }
+    });
+  });
+}
+
 function renderServersView() {
+  initServidoresViewEvents();
   if (!el.servidoresCardsGrid) return;
   const servers = getServersList();
   const q = (el.inputSearchServers?.value || "").toLowerCase().trim();
 
   const filtered = servers.filter((s) => {
-    if (!q) return true;
-    return s.name.toLowerCase().includes(q) || s.ip.toLowerCase().includes(q) || s.category.toLowerCase().includes(q);
+    // Text search query
+    if (q) {
+      const matchesQ =
+        s.name.toLowerCase().includes(q) ||
+        s.ip.toLowerCase().includes(q) ||
+        (s.category && s.category.toLowerCase().includes(q));
+      if (!matchesQ) return false;
+    }
+    // Category chips
+    if (srvCurrentCategoryFilter === "popular") {
+      return s.featured || (!s.custom && ["hypixel", "universocraft"].includes(s.id));
+    }
+    if (srvCurrentCategoryFilter === "custom") {
+      return s.custom === true;
+    }
+    if (srvCurrentCategoryFilter === "survival") {
+      return (s.category || "").toLowerCase().includes("survival") || s.filterTag === "survival";
+    }
+    if (srvCurrentCategoryFilter === "minijuegos") {
+      return (
+        (s.category || "").toLowerCase().includes("minijuego") ||
+        (s.category || "").toLowerCase().includes("bedwars") ||
+        s.filterTag === "minijuegos"
+      );
+    }
+    if (srvCurrentCategoryFilter === "anarquia") {
+      return (s.category || "").toLowerCase().includes("anarqu") || s.filterTag === "anarquia";
+    }
+    return true;
   });
 
   if (filtered.length === 0) {
     el.servidoresCardsGrid.innerHTML = `
-      <div class="empty-state-large" style="grid-column: 1 / -1; text-align: center; padding: 40px; color: #94a3b8;">
-        No se encontraron servidores que coincidan con "${q}".
+      <div class="empty-state-large" style="grid-column: 1 / -1; text-align: center; padding: 48px; color: #94a3b8; background: rgba(14, 10, 28, 0.5); border-radius: 16px; border: 1px solid rgba(255, 255, 255, 0.06);">
+        <p style="font-size: 15px; margin: 0 0 8px; color: #ffffff; font-weight: 700;">No se encontraron servidores</p>
+        <span style="font-size: 13px;">${q ? `No hay resultados para "${q}".` : `No hay servidores en esta categoría todavía.`}</span>
       </div>
     `;
     return;
@@ -12723,6 +15054,7 @@ function renderServersView() {
             <div class="server-tags-row">
               <span class="server-tag">${s.version || "1.20.1"}</span>
               <span class="server-tag">${s.category || "Multijugador"}</span>
+              ${s.ping ? `<span class="server-tag" style="color: #6ee7b7; border-color: rgba(52, 211, 153, 0.3);">${s.ping}</span>` : ""}
             </div>
           </div>
         </div>
@@ -12752,7 +15084,7 @@ function renderServersView() {
             <span>Conectar / Jugar</span>
           </button>
           ${s.custom ? `
-            <button type="button" class="btn-server-del" data-id="${s.id}" title="Eliminar servidor">
+            <button type="button" class="btn-server-del" data-id="${s.id}" title="Eliminar servidor guardado">
               <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
                 <polyline points="3 6 5 6 21 6"></polyline>
                 <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
@@ -12817,8 +15149,8 @@ function renderServersView() {
 }
 
 // Dock menu (three dots): copy or remove the instance selected in Inicio.
-async function duplicateHomeInstance() {
-  const inst = currentHomeInstance();
+async function duplicateHomeInstance(instOverride = null) {
+  const inst = instOverride || currentHomeInstance();
   if (!inst) return;
   const name = inst.name || inst.folder_name || "Instancia";
   showToast(`Duplicando ${name}...`);
@@ -12836,19 +15168,20 @@ async function duplicateHomeInstance() {
   }
 }
 
-async function deleteHomeInstance() {
-  const inst = currentHomeInstance();
+async function deleteHomeInstance(instOverride = null) {
+  const inst = instOverride || currentHomeInstance();
   if (!inst) return;
   const name = inst.name || inst.folder_name || "Instancia";
   if (isInstanceGameActive(inst.path)) {
     showToast("Cierra el juego antes de eliminar la instancia");
     return;
   }
+  const idx = homeInstancesList.indexOf(inst);
   const confirmed = await showConfirmDialog({
     title: "ELIMINAR INSTANCIA",
     message: "¿Seguro que quieres eliminar esta instancia? Dejará de aparecer en todo el launcher.",
     itemTitle: name,
-    itemImage: getInstanceCoverUrl(inst, homeCurrentInstanceIndex),
+    itemImage: getInstanceCoverUrl(inst, idx !== -1 ? idx : homeCurrentInstanceIndex),
     itemDesc: `${inst.loader || "Vanilla"} · Minecraft ${inst.mc_version || "?"}`,
     confirmText: "Eliminar instancia",
     warnText: "Se mueve a la papelera del launcher con sus mundos, mods y configuración: desde esa carpeta se puede recuperar.",
@@ -13852,19 +16185,6 @@ async function initWallpaperEngine() {
       if (el.steamDirectPreviewWrap) {
         el.steamDirectPreviewWrap.classList.add("hidden");
         el.steamDirectPreviewWrap.innerHTML = "";
-      }
-    });
-  }
-
-  // SteamCMD Login / Auth Status
-  if (el.btnSteamAuthStatus) {
-    el.btnSteamAuthStatus.addEventListener("click", async () => {
-      try {
-        await invoke("launch_steamcmd_login");
-        showToast("Abriendo consola de SteamCMD para iniciar sesión...");
-      } catch (err) {
-        showToast("Error al abrir SteamCMD.");
-        console.error(err);
       }
     });
   }
@@ -15525,6 +17845,9 @@ async function transitionBackground(targetUrl, targetTitle, transitionType = nul
 
   if (wallpaperType) {
     localStorage.setItem("modcomparer_wallpaper_type", wallpaperType);
+    if (wallpaperType === "motionbgs" && targetUrl && !targetUrl.startsWith("http://asset.localhost") && !targetUrl.startsWith("blob:")) {
+      localStorage.setItem("modcomparer_wallpaper_url", targetUrl);
+    }
   } else if (!targetUrl.startsWith("http://asset.localhost") && !targetUrl.startsWith("blob:")) {
     localStorage.setItem("modcomparer_wallpaper_type", "motionbgs");
     localStorage.setItem("modcomparer_wallpaper_url", targetUrl);
@@ -16179,110 +18502,151 @@ function updateActiveCatalogCards() {
   });
 }
 
+function playBackgroundVideoSafely(vid) {
+  if (!vid) return;
+  vid.muted = true;
+  vid.playsInline = true;
+
+  const tryPlay = () => {
+    if (!vid.paused) return;
+    const p = vid.play();
+    if (p && typeof p.catch === "function") {
+      p.catch((err) => {
+        // Autoplay may be deferred until user gesture or window focus
+        const resumeOnce = () => {
+          vid.play().catch(() => {});
+        };
+        window.addEventListener("pointerdown", resumeOnce, { once: true });
+        window.addEventListener("keydown", resumeOnce, { once: true });
+        window.addEventListener("focus", resumeOnce, { once: true });
+      });
+    }
+  };
+
+  if (vid.readyState >= 2) {
+    tryPlay();
+  } else {
+    vid.addEventListener("loadeddata", tryPlay, { once: true });
+    vid.addEventListener("canplay", tryPlay, { once: true });
+    tryPlay();
+  }
+}
+
 async function loadAndApplySavedWallpaper() {
   if (!el.homeBgVideo) return;
 
   sanitizeWallpaperStorage();
   const type = localStorage.getItem("modcomparer_wallpaper_type") || "motionbgs";
+  const steamPath = localStorage.getItem("modcomparer_wallpaper_steam_path") || "";
+  const projPath = localStorage.getItem("modcomparer_wallpaper_project_path") || "";
+  const localPath = localStorage.getItem("modcomparer_wallpaper_local_path") || "";
+  const savedUrl = localStorage.getItem("modcomparer_wallpaper_url") || "";
+  const savedTitle = localStorage.getItem("modcomparer_wallpaper_title") || "";
+  const activeId = localStorage.getItem("modcomparer_wallpaper_active_id") || "";
 
+  // 1. Custom uploaded file blob
   if (type === "custom_file") {
-    const blob = await loadCustomWallpaperBlob();
-    if (blob) {
-      if (currentWallpaperBlobUrl) URL.revokeObjectURL(currentWallpaperBlobUrl);
-      currentWallpaperBlobUrl = URL.createObjectURL(blob);
-      el.homeBgVideo.src = currentWallpaperBlobUrl;
-      el.homeBgVideo.play().catch(() => {});
-      updateButtonWallpaperPreview(currentWallpaperBlobUrl);
-      const fname = localStorage.getItem("modcomparer_wallpaper_filename") || "Archivo local MP4";
-      activeWallpaperTitle = fname;
-      activeWallpaperUrl = "";
-      if (el.mbgActiveTitle) el.mbgActiveTitle.textContent = fname;
-      loadActiveWallpaperTransform(false);
-      return;
-    }
-  } else if (type === "url") {
-    const url = localStorage.getItem("modcomparer_wallpaper_url");
-    if (url) {
-      el.homeBgVideo.src = url;
-      el.homeBgVideo.play().catch(() => {});
-      updateButtonWallpaperPreview(url);
-      activeWallpaperUrl = url;
-      activeWallpaperTitle = "URL Personalizada";
-      if (el.mbgActiveTitle) el.mbgActiveTitle.textContent = "URL Personalizada";
-      loadActiveWallpaperTransform(false);
-      return;
-    }
-  } else if (type === "steam_scene" || (type === "steam_workshop" && (
-    (localStorage.getItem("modcomparer_wallpaper_steam_path") || "").toLowerCase().endsWith(".pkg") ||
-    (localStorage.getItem("modcomparer_wallpaper_steam_path") || "").toLowerCase().endsWith(".json") ||
-    (localStorage.getItem("modcomparer_wallpaper_steam_path") || "").toLowerCase().endsWith(".html") ||
-    Boolean(localStorage.getItem("modcomparer_wallpaper_project_path"))
-  ))) {
-    const steamPath = localStorage.getItem("modcomparer_wallpaper_steam_path");
-    const projPath = localStorage.getItem("modcomparer_wallpaper_project_path");
-    const fname = localStorage.getItem("modcomparer_wallpaper_title") || "Steam Scene Wallpaper";
-    const activeId = localStorage.getItem("modcomparer_wallpaper_active_id") || "";
-    if (steamPath) {
-      await windowShown;
-      await playSceneWallpaper(steamPath, fname, projPath, { id: activeId, title: fname, project_path: projPath, video_path: steamPath });
-      return;
-    }
-  } else if (type === "steam_workshop") {
-    const steamPath = localStorage.getItem("modcomparer_wallpaper_steam_path");
-    const fname = localStorage.getItem("modcomparer_wallpaper_title") || "Steam Workshop Wallpaper";
-    if (steamPath) {
-      try {
-        const streamUrl = convertFileSrc(steamPath) + "?t=" + Date.now();
-        el.homeBgVideo.src = streamUrl;
+    try {
+      const blob = await loadCustomWallpaperBlob();
+      if (blob) {
+        if (currentWallpaperBlobUrl) URL.revokeObjectURL(currentWallpaperBlobUrl);
+        currentWallpaperBlobUrl = URL.createObjectURL(blob);
+        el.homeBgVideo.src = currentWallpaperBlobUrl;
+        el.homeBgVideo.setAttribute("src", currentWallpaperBlobUrl);
         el.homeBgVideo.classList.add("is-active");
         if (el.homeBgVideoNext) el.homeBgVideoNext.classList.remove("is-active");
         currentActiveVideoSlot = "primary";
-        el.homeBgVideo.play().catch(() => {});
-        if (isMp4Url(steamPath)) {
-          updateButtonWallpaperPreview(streamUrl);
-        }
+        playBackgroundVideoSafely(el.homeBgVideo);
+        updateButtonWallpaperPreview(currentWallpaperBlobUrl);
+        const fname = localStorage.getItem("modcomparer_wallpaper_filename") || "Archivo local MP4";
         activeWallpaperTitle = fname;
-        activeWallpaperUrl = steamPath;
+        activeWallpaperUrl = "";
         if (el.mbgActiveTitle) el.mbgActiveTitle.textContent = fname;
-        updateActiveCatalogCards();
-        updateActiveSteamCards();
         loadActiveWallpaperTransform(false);
         return;
-      } catch (err) {
-        console.warn("Could not reload steam wallpaper from disk:", err);
       }
-    }
-  } else if (type === "motionbgs_local") {
-    const localPath = localStorage.getItem("modcomparer_wallpaper_local_path");
-    const fname = localStorage.getItem("modcomparer_wallpaper_title") || "Fondo Local";
-    if (localPath) {
-      try {
-        const streamUrl = convertFileSrc(localPath);
-        el.homeBgVideo.src = streamUrl;
-        el.homeBgVideo.play().catch(() => {});
-        updateButtonWallpaperPreview(streamUrl);
-        activeWallpaperTitle = fname;
-        activeWallpaperUrl = localPath;
-        if (el.mbgActiveTitle) el.mbgActiveTitle.textContent = fname;
-        updateActiveCatalogCards();
-        loadActiveWallpaperTransform(false);
-        return;
-      } catch (err) {
-        console.warn("Could not reload local motionbgs wallpaper from disk:", err);
-      }
+    } catch (err) {
+      console.warn("Could not load custom wallpaper blob:", err);
     }
   }
 
-  // MotionBGs catalog wallpaper
-  const savedUrl = localStorage.getItem("modcomparer_wallpaper_url") || FALLBACK_MINECRAFT_WALLPAPERS[0].video_url;
-  const savedTitle = localStorage.getItem("modcomparer_wallpaper_title") || FALLBACK_MINECRAFT_WALLPAPERS[0].title;
-  activeWallpaperUrl = savedUrl;
-  activeWallpaperTitle = savedTitle;
+  // 2. Wallpaper Engine Scene (.pkg, project directory, web scene, etc.)
+  const isScene = type === "steam_scene" ||
+    steamPath.toLowerCase().endsWith(".pkg") ||
+    steamPath.toLowerCase().endsWith(".json") ||
+    steamPath.toLowerCase().endsWith(".html") ||
+    Boolean(projPath);
 
-  el.homeBgVideo.src = activeWallpaperUrl;
-  el.homeBgVideo.play().catch(() => {});
-  const foundItem = FALLBACK_MINECRAFT_WALLPAPERS.find((w) => w.video_url === activeWallpaperUrl);
-  updateButtonWallpaperPreview(activeWallpaperUrl, foundItem ? foundItem.thumb_url : "");
+  if (isScene && (steamPath || projPath)) {
+    const sceneTarget = steamPath || projPath;
+    const fname = savedTitle || "Steam Scene Wallpaper";
+    try {
+      await windowShown;
+      await playSceneWallpaper(sceneTarget, fname, projPath, { id: activeId, title: fname, project_path: projPath, video_path: steamPath });
+      return;
+    } catch (err) {
+      console.warn("Could not restore scene wallpaper on startup:", err);
+    }
+  }
+
+  // Ensure any previous scene or WE instance is deactivated when playing video
+  if (document.body.classList.contains("has-we-active")) {
+    document.body.classList.remove("has-we-active");
+    invoke("stop_we_wallpaper").catch(() => {});
+    if (el.homeBgScene) {
+      el.homeBgScene.style.display = "none";
+      el.homeBgScene.src = "about:blank";
+    }
+  }
+
+  // 3. Local video file (Steam Workshop video, imported video, or downloaded local MotionBGs)
+  const diskPath = steamPath || localPath;
+  if (diskPath && (type === "steam_workshop" || type === "imported" || type === "motionbgs_local" || !savedUrl)) {
+    try {
+      const streamUrl = convertFileSrc(diskPath) + (diskPath.includes("?") ? "" : `?t=${Date.now()}`);
+      el.homeBgVideo.src = streamUrl;
+      el.homeBgVideo.setAttribute("src", streamUrl);
+      el.homeBgVideo.classList.add("is-active");
+      if (el.homeBgVideoNext) el.homeBgVideoNext.classList.remove("is-active");
+      currentActiveVideoSlot = "primary";
+      playBackgroundVideoSafely(el.homeBgVideo);
+
+      const title = savedTitle || (type === "imported" ? "Video Importado" : "Fondo de Pantalla");
+      activeWallpaperTitle = title;
+      activeWallpaperUrl = diskPath;
+      if (el.mbgActiveTitle) el.mbgActiveTitle.textContent = title;
+      if (isMp4Url(diskPath)) {
+        updateButtonWallpaperPreview(streamUrl);
+      }
+      updateActiveCatalogCards();
+      updateActiveSteamCards();
+      updateActiveDownloadedCards();
+      loadActiveWallpaperTransform(false);
+      return;
+    } catch (err) {
+      console.warn("Could not reload local video wallpaper from disk:", err);
+    }
+  }
+
+  // 4. Custom Direct URL or Online Catalog Wallpaper
+  const targetUrl = savedUrl || (FALLBACK_MINECRAFT_WALLPAPERS[0] ? FALLBACK_MINECRAFT_WALLPAPERS[0].video_url : "");
+  const targetTitle = savedTitle || (FALLBACK_MINECRAFT_WALLPAPERS[0] ? FALLBACK_MINECRAFT_WALLPAPERS[0].title : "Fondo Animado");
+
+  activeWallpaperUrl = targetUrl;
+  activeWallpaperTitle = targetTitle;
+
+  if (targetUrl) {
+    el.homeBgVideo.src = targetUrl;
+    el.homeBgVideo.setAttribute("src", targetUrl);
+    el.homeBgVideo.classList.add("is-active");
+    if (el.homeBgVideoNext) el.homeBgVideoNext.classList.remove("is-active");
+    currentActiveVideoSlot = "primary";
+    playBackgroundVideoSafely(el.homeBgVideo);
+
+    const foundItem = FALLBACK_MINECRAFT_WALLPAPERS.find((w) => w.video_url === targetUrl);
+    updateButtonWallpaperPreview(targetUrl, foundItem ? foundItem.thumb_url : "");
+  }
+
   if (el.mbgActiveTitle) el.mbgActiveTitle.textContent = activeWallpaperTitle;
   updateActiveCatalogCards();
   loadActiveWallpaperTransform(false);
@@ -16391,6 +18755,7 @@ function setSteamMode(mode) {
   steamMode = mode;
   if (el.btnSteamModeOnline) el.btnSteamModeOnline.classList.toggle("active", mode === "online");
   if (el.btnSteamModeLocal) el.btnSteamModeLocal.classList.toggle("active", mode === "local");
+  if (el.steamOnlineBanner) el.steamOnlineBanner.classList.toggle("hidden", mode !== "online");
   if (el.steamSortWrap) el.steamSortWrap.classList.toggle("hidden", mode !== "online");
   if (el.steamPaginationBarTop) el.steamPaginationBarTop.classList.toggle("hidden", mode !== "online");
 
@@ -16615,126 +18980,137 @@ function renderSteamLocalCards(wallpapers) {
   if (!el.steamCatalogGrid) return;
   el.steamCatalogGrid.innerHTML = "";
 
-  wallpapers.forEach((item) => {
-    const card = document.createElement("div");
-    const isAct = activeWallpaperUrl === item.video_path;
-    card.className = `mbg-card steam-card ${isAct ? "is-active" : ""}`;
-    card.dataset.videoPath = item.video_path;
+  (wallpapers || []).forEach((item) => {
+    if (!item) return;
+    try {
+      const card = document.createElement("div");
+      const isAct = activeWallpaperUrl === item.video_path;
+      card.className = `mbg-card steam-card ${isAct ? "is-active" : ""}`;
+      card.dataset.videoPath = item.video_path || "";
 
-    const previewSrc = item.preview_path
-      ? convertFileSrc(item.preview_path)
-      : (item.preview_data_url || "https://motionbgs.com/i/c/364x205/media/7538/minecraft-fishing.3840x2160.jpg");
-    const inPl = bgPlaylist.some((p) => p.url === item.video_path);
-    const hasProps = hasWeCustomProperties(item);
+      const previewSrc = item.preview_path
+        ? convertFileSrc(item.preview_path)
+        : (item.preview_data_url || "https://motionbgs.com/i/c/364x205/media/7538/minecraft-fishing.3840x2160.jpg");
+      const inPl = bgPlaylist.some((p) => p.url === item.video_path);
+      const hasProps = hasWeCustomProperties(item);
+      const sizeMb = typeof item.file_size_mb === "number" && !isNaN(item.file_size_mb) ? item.file_size_mb.toFixed(1) : "0.0";
+      const itemTitle = item.title || "Wallpaper";
 
-    card.innerHTML = `
-      <div class="mbg-card-media">
-        <img class="mbg-card-thumb" src="${previewSrc}" alt="${escapeHtml(item.title)}" loading="lazy" onerror="this.src='https://motionbgs.com/i/c/364x205/media/7538/minecraft-fishing.3840x2160.jpg'" />
-        <video class="mbg-card-video-preview" loop muted playsinline preload="none"></video>
-        <span class="mbg-card-steam-badge ${item.is_scene ? "is-scene" : ""}">${item.is_scene ? "ESCENA (SHADERS)" : "STEAM"}</span>
-        <span class="badge-installed-pc">En tu PC</span>
-        <span class="mbg-card-badge">${item.file_size_mb.toFixed(1)} MB</span>
-        ${hasProps ? '<span class="mbg-card-we-props-pill" title="Este fondo contiene opciones configurables en tiempo real">⚙️ Opciones</span>' : ""}
-        ${isAct ? '<span class="mbg-card-active-check">Activo</span>' : ""}
-      </div>
-      <div class="mbg-card-info">
-        <span class="mbg-card-title" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</span>
-        <div class="mbg-card-actions-grid" style="grid-template-columns: ${hasProps ? "1fr 1fr auto" : "1fr 1fr"};">
-          <button class="btn-card-action btn-card-apply btn-apply-steam" title="Aplicar este fondo">
-            <span>Aplicar</span>
-          </button>
-          <button class="btn-card-action btn-card-playlist btn-steam-playlist ${inPl ? "in-playlist" : ""}" title="Añadir o quitar de la lista de reproducción">
-            <span>${inPl ? "✓ Playlist" : "+ Playlist"}</span>
-          </button>
-          ${hasProps ? `
-            <button class="btn-card-action btn-card-we-props btn-we-options" title="Personalizar opciones del fondo (Colores, efectos, etc.)">
-              <span>⚙️</span>
-            </button>
-          ` : ""}
+      card.innerHTML = `
+        <div class="mbg-card-media">
+          <img class="mbg-card-thumb" src="${previewSrc}" alt="${escapeHtml(itemTitle)}" loading="lazy" onerror="this.src='https://motionbgs.com/i/c/364x205/media/7538/minecraft-fishing.3840x2160.jpg'" />
+          <video class="mbg-card-video-preview" loop muted playsinline preload="none"></video>
+          <span class="mbg-card-steam-badge ${item.is_scene ? "is-scene" : ""}">${item.is_scene ? "ESCENA (SHADERS)" : "STEAM"}</span>
+          <span class="badge-installed-pc">En tu PC</span>
+          <span class="mbg-card-badge">${sizeMb} MB</span>
+          ${hasProps ? '<span class="mbg-card-we-props-pill" title="Este fondo contiene opciones configurables en tiempo real">⚙️ Opciones</span>' : ""}
+          ${isAct ? '<span class="mbg-card-active-check">Activo</span>' : ""}
         </div>
-      </div>
-    `;
+        <div class="mbg-card-info">
+          <span class="mbg-card-title" title="${escapeHtml(itemTitle)}">${escapeHtml(itemTitle)}</span>
+          <div class="mbg-card-actions-grid" style="grid-template-columns: ${hasProps ? "1fr 1fr auto" : "1fr 1fr"};">
+            <button class="btn-card-action btn-card-apply btn-apply-steam" title="Aplicar este fondo">
+              <span>Aplicar</span>
+            </button>
+            <button class="btn-card-action btn-card-playlist btn-steam-playlist ${inPl ? "in-playlist" : ""}" title="Añadir o quitar de la lista de reproducción">
+              <span>${inPl ? "✓ Playlist" : "+ Playlist"}</span>
+            </button>
+            ${hasProps ? `
+              <button class="btn-card-action btn-card-we-props btn-we-options" title="Personalizar opciones del fondo (Colores, efectos, etc.)">
+                <span>⚙️</span>
+              </button>
+            ` : ""}
+          </div>
+        </div>
+      `;
 
-    // Live video hover preview for local wallpapers
-    const video = card.querySelector(".mbg-card-video-preview");
-    if (video) {
-      let playPromise = null;
-      card.addEventListener("mouseenter", () => {
-        if (!video.src) {
-          video.src = convertFileSrc(item.video_path) + "?t=" + Date.now();
-        }
-        video.classList.add("is-playing");
-        playPromise = video.play().catch(() => {});
-      });
-      card.addEventListener("mouseleave", () => {
-        video.classList.remove("is-playing");
-        if (playPromise) {
-          playPromise.then(() => video.pause()).catch(() => {});
-        } else {
-          video.pause();
-        }
-      });
-    }
-
-    const btnApply = card.querySelector(".btn-apply-steam");
-    if (btnApply) {
-      btnApply.addEventListener("click", (e) => {
-        e.stopPropagation();
-        applySteamWallpaper(item);
-      });
-    }
-
-    const btnPl = card.querySelector(".btn-steam-playlist");
-    if (btnPl) {
-      btnPl.addEventListener("click", (e) => {
-        e.stopPropagation();
-        toggleSteamPlaylist(item, btnPl);
-      });
-    }
-
-    const btnWeOptions = card.querySelector(".btn-we-options");
-    if (btnWeOptions) {
-      btnWeOptions.addEventListener("click", async (e) => {
-        e.stopPropagation();
-        try {
-          if (bgPlaylistActive) setPlaylistActive(false);
-          if (activeWallpaperUrl !== item.video_path) {
-            await playSceneWallpaper(item.video_path, item.title, item.project_path, item);
+      // Live video hover preview for local wallpapers (only playable formats)
+      const video = card.querySelector(".mbg-card-video-preview");
+      const isPlayable = item.video_path && (item.video_path.toLowerCase().endsWith(".mp4") || item.video_path.toLowerCase().endsWith(".webm"));
+      if (video && isPlayable) {
+        let playPromise = null;
+        card.addEventListener("mouseenter", () => {
+          if (!video.src) {
+            video.src = convertFileSrc(item.video_path) + "?t=" + Date.now();
           }
+          video.classList.add("is-playing");
+          playPromise = video.play().catch(() => {});
+        });
+        card.addEventListener("mouseleave", () => {
+          video.classList.remove("is-playing");
+          if (playPromise) {
+            playPromise.then(() => video.pause()).catch(() => {});
+          } else {
+            video.pause();
+          }
+        });
+      }
+
+      const btnApply = card.querySelector(".btn-apply-steam");
+      if (btnApply) {
+        btnApply.addEventListener("click", (e) => {
+          e.stopPropagation();
+          applySteamWallpaper(item);
+        });
+      }
+
+      const btnPl = card.querySelector(".btn-steam-playlist");
+      if (btnPl) {
+        btnPl.addEventListener("click", (e) => {
+          e.stopPropagation();
+          toggleSteamPlaylist(item, btnPl);
+        });
+      }
+
+      const btnWeOptions = card.querySelector(".btn-we-options");
+      if (btnWeOptions) {
+        btnWeOptions.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          try {
+            if (bgPlaylistActive) setPlaylistActive(false);
+            if (activeWallpaperUrl !== item.video_path) {
+              await playSceneWallpaper(item.video_path, item.title, item.project_path, item);
+            }
+            openWePropertiesPanel(item);
+          } catch (err) {
+            console.error("Error opening WE properties panel:", err);
+          }
+        });
+      }
+
+      if (hasProps) {
+        card.addEventListener("click", (e) => {
+          if (e.target.closest("button") || e.target.closest("input") || e.target.closest("select")) return;
           openWePropertiesPanel(item);
-        } catch (err) {
-          console.error("Error opening WE properties panel:", err);
-        }
-      });
-    }
+        });
+      }
 
-    if (hasProps) {
-      card.addEventListener("click", (e) => {
-        if (e.target.closest("button") || e.target.closest("input") || e.target.closest("select")) return;
-        openWePropertiesPanel(item);
-      });
+      el.steamCatalogGrid.appendChild(card);
+    } catch (err) {
+      console.warn("Error rendering steam local card:", err, item);
     }
-
-    el.steamCatalogGrid.appendChild(card);
   });
 }
 
-function startSteamWatcherForItem(id, onSuccess) {
+function startSteamWatcherForItem(id, onSuccess, onTimeout) {
   let attempts = 0;
+  const maxAttempts = 100; // ~3.3 minutes polling
   const watcher = setInterval(async () => {
     attempts++;
-    if (attempts > 30) {
+    if (attempts > maxAttempts) {
       clearInterval(watcher);
+      if (typeof onTimeout === "function") onTimeout();
       return;
     }
     try {
-      const installed = await invoke("check_steam_item_installed", { id });
+      const installed = await invoke("check_steam_item_installed", { id: String(id) });
       if (installed) {
         clearInterval(watcher);
         onSuccess(installed);
       }
     } catch {}
-  }, 1800);
+  }, 2000);
+  return () => clearInterval(watcher);
 }
 
 // Real-time progress listener for Steam Workshop downloads
@@ -16794,8 +19170,10 @@ function renderSteamOnlineCards(wallpapers) {
   if (!el.steamCatalogGrid) return;
   el.steamCatalogGrid.innerHTML = "";
 
-  wallpapers.forEach((item) => {
-    const card = document.createElement("div");
+  (wallpapers || []).forEach((item) => {
+    if (!item) return;
+    try {
+      const card = document.createElement("div");
     const isAct = item.local_video_path && activeWallpaperUrl === item.local_video_path;
     card.className = `mbg-card steam-card ${isAct ? "is-active" : ""}`;
     if (item.local_video_path) {
@@ -16828,7 +19206,7 @@ function renderSteamOnlineCards(wallpapers) {
           </div>
         </div>
 
-        <div class="mbg-card-actions-grid" style="grid-template-columns: ${item.is_installed ? "1fr auto" : "1fr"};">
+        <div class="mbg-card-actions-grid" style="grid-template-columns: ${item.is_installed ? "1fr auto" : "1fr auto"};">
           ${item.is_installed ? `
             <button class="btn-card-action btn-card-apply is-ready btn-apply-steam" title="Aplicar este fondo animado">
               <span>Aplicar</span>
@@ -16837,8 +19215,18 @@ function renderSteamOnlineCards(wallpapers) {
               <span>${inPl ? "✓" : "+"}</span>
             </button>
           ` : `
-            <button class="btn-card-action btn-card-download btn-download-steam" title="Descargar este fondo con SteamCMD">
-              <span>Descargar</span>
+            <button class="btn-card-action btn-card-download btn-steam-subscribe" title="Abrir en Steam oficial para suscribirte gratis">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" style="margin-right: 4px; flex-shrink: 0;">
+                <path d="M12 2C6.47 2 2 6.47 2 12c0 4.24 2.65 7.86 6.42 9.27l1.72-2.46c-.22-.24-.4-.51-.55-.8L6.47 17.5c-.88-.41-1.47-1.3-1.47-2.33 0-1.43 1.17-2.6 2.6-2.6.45 0 .86.12 1.23.32l2.67-3.87C11.5 8.97 11.5 8.92 11.5 8.87c0-2.48 2.02-4.5 4.5-4.5s4.5 2.02 4.5 4.5-2.02 4.5-4.5 4.5c-.17 0-.34-.01-.5-.03l-3.88 2.68c.2.37.31.79.31 1.23 0 .7-.28 1.34-.73 1.81l2.5 1.74C19.45 19.33 22 15.96 22 12c0-5.53-4.47-10-10-10zm4 4.5c1.38 0 2.5 1.12 2.5 2.5s-1.12 2.5-2.5 2.5-2.5-1.12-2.5-2.5 1.12-2.5 2.5-2.5z"/>
+              </svg>
+              <span>Suscribirse en Steam</span>
+            </button>
+            <button class="btn-card-action btn-card-playlist btn-steam-web" title="Ver en la web de Steam Community" style="display:inline-flex;align-items:center;justify-content:center;padding:0 8px;">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                <polyline points="15 3 21 3 21 9"></polyline>
+                <line x1="10" y1="14" x2="21" y2="3"></line>
+              </svg>
             </button>
           `}
         </div>
@@ -16886,11 +19274,13 @@ function renderSteamOnlineCards(wallpapers) {
     if (item.is_installed && item.local_video_path) {
       setupInstalledEvents(item.local_video_path);
     } else {
-      const btnDl = card.querySelector(".btn-download-steam");
+      const btnSubscribe = card.querySelector(".btn-steam-subscribe");
+      const btnWeb = card.querySelector(".btn-steam-web");
 
       const onItemDownloadedSuccess = (installedInfo) => {
         item.is_installed = true;
         item.local_video_path = installedInfo.video_path;
+        item.project_path = installedInfo.project_path;
         card.dataset.videoPath = installedInfo.video_path;
         progressWrap.classList.remove("hidden");
         progressWrap.classList.add("is-downloaded");
@@ -16916,39 +19306,55 @@ function renderSteamOnlineCards(wallpapers) {
         `;
         setupInstalledEvents(installedInfo.video_path);
 
-        if (!steamLocalWallpapers.some((w) => w.id === item.id)) {
+        if (!steamLocalWallpapers.some((w) => String(w.id) === String(item.id))) {
           steamLocalWallpapers.unshift(installedInfo);
           if (el.steamLocalCount) el.steamLocalCount.textContent = String(steamLocalWallpapers.length);
         }
-        showToast(`Fondo "${item.title}" listo para aplicar.`);
+        showToast(`¡Fondo "${item.title}" detectado y listo para usar!`);
       };
 
-      if (btnDl) {
-        btnDl.addEventListener("click", async (e) => {
+      if (btnSubscribe) {
+        btnSubscribe.addEventListener("click", (e) => {
           e.stopPropagation();
+          invoke("open_browser", { url: `steam://url/CommunityFilePage/${item.id}` });
           progressWrap.classList.remove("hidden", "is-downloaded");
-          progressLabel.textContent = "Conectando a Steam...";
-          progressPct.textContent = "5%";
-          progressFill.style.width = "5%";
-          btnDl.disabled = true;
-          btnDl.innerHTML = "<span>Descargando...</span>";
+          progressLabel.textContent = "Abierto en Steam: pulsa 'Suscribirse'";
+          progressPct.textContent = "Esperando";
+          progressFill.style.width = "40%";
+          btnSubscribe.disabled = true;
+          btnSubscribe.innerHTML = `
+            <span class="mbg-btn-spinner"></span>
+            <span>Esperando descarga...</span>
+          `;
+          showToast(`Abriendo en Steam... Pulsa 'Suscribirse' en la app de Steam.`);
+          startSteamWatcherForItem(item.id, onItemDownloadedSuccess, () => {
+            btnSubscribe.disabled = false;
+            btnSubscribe.innerHTML = `
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" style="margin-right: 4px; flex-shrink: 0;">
+                <path d="M12 2C6.47 2 2 6.47 2 12c0 4.24 2.65 7.86 6.42 9.27l1.72-2.46c-.22-.24-.4-.51-.55-.8L6.47 17.5c-.88-.41-1.47-1.3-1.47-2.33 0-1.43 1.17-2.6 2.6-2.6.45 0 .86.12 1.23.32l2.67-3.87C11.5 8.97 11.5 8.92 11.5 8.87c0-2.48 2.02-4.5 4.5-4.5s4.5 2.02 4.5 4.5-2.02 4.5-4.5 4.5c-.17 0-.34-.01-.5-.03l-3.88 2.68c.2.37.31.79.31 1.23 0 .7-.28 1.34-.73 1.81l2.5 1.74C19.45 19.33 22 15.96 22 12c0-5.53-4.47-10-10-10zm4 4.5c1.38 0 2.5 1.12 2.5 2.5s-1.12 2.5-2.5 2.5-2.5-1.12-2.5-2.5 1.12-2.5 2.5-2.5z"/>
+              </svg>
+              <span>Suscribirse en Steam</span>
+            `;
+            progressWrap.classList.add("hidden");
+            showToast("Aún no se detectó la descarga. Pulsa de nuevo cuando se complete en Steam.");
+          });
+        });
+      }
 
-          try {
-            const installedInfo = await invoke("download_steam_workshop_item", { id: item.id });
-            onItemDownloadedSuccess(installedInfo);
-          } catch (err) {
-            console.error("Steam download error:", err);
-            progressLabel.textContent = "Error al descargar";
-            progressPct.textContent = "!";
-            btnDl.disabled = false;
-            btnDl.innerHTML = "<span>Reintentar</span>";
-            showToast(typeof err === "string" ? err : "No se pudo completar la descarga.");
-          }
+      if (btnWeb) {
+        btnWeb.addEventListener("click", (e) => {
+          e.stopPropagation();
+          invoke("open_browser", { url: `https://steamcommunity.com/sharedfiles/filedetails/?id=${item.id}` });
+          showToast("Abriendo en el navegador web...");
+          startSteamWatcherForItem(item.id, onItemDownloadedSuccess);
         });
       }
     }
 
-    el.steamCatalogGrid.appendChild(card);
+      el.steamCatalogGrid.appendChild(card);
+    } catch (err) {
+      console.warn("Error rendering steam online card:", err, item);
+    }
   });
 }
 
@@ -16994,11 +19400,14 @@ async function fetchAndShowDirectSteamPreview(id) {
               <span>Aplicar Fondo</span>
             </button>
           ` : `
-            <button class="btn btn-purple btn-sm btn-direct-dl">
-              <span>Descargar</span>
+            <button class="btn btn-purple btn-sm btn-direct-subscribe">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" style="margin-right: 4px; flex-shrink: 0;">
+                <path d="M12 2C6.47 2 2 6.47 2 12c0 4.24 2.65 7.86 6.42 9.27l1.72-2.46c-.22-.24-.4-.51-.55-.8L6.47 17.5c-.88-.41-1.47-1.3-1.47-2.33 0-1.43 1.17-2.6 2.6-2.6.45 0 .86.12 1.23.32l2.67-3.87C11.5 8.97 11.5 8.92 11.5 8.87c0-2.48 2.02-4.5 4.5-4.5s4.5 2.02 4.5 4.5-2.02 4.5-4.5 4.5c-.17 0-.34-.01-.5-.03l-3.88 2.68c.2.37.31.79.31 1.23 0 .7-.28 1.34-.73 1.81l2.5 1.74C19.45 19.33 22 15.96 22 12c0-5.53-4.47-10-10-10zm4 4.5c1.38 0 2.5 1.12 2.5 2.5s-1.12 2.5-2.5 2.5-2.5-1.12-2.5-2.5 1.12-2.5 2.5-2.5z"/>
+              </svg>
+              <span>Suscribirse en Steam</span>
             </button>
-            <button class="btn btn-secondary btn-sm btn-direct-client" title="Abrir en Steam Client">
-              <span>Steam</span>
+            <button class="btn btn-secondary btn-sm btn-direct-web" title="Ver en navegador web">
+              <span>Web</span>
             </button>
           `}
         </div>
@@ -17019,59 +19428,48 @@ async function fetchAndShowDirectSteamPreview(id) {
       });
     }
 
-    const btnClient = el.steamDirectPreviewWrap.querySelector(".btn-direct-client");
-    if (btnClient) {
-      btnClient.addEventListener("click", () => {
+    const btnSubscribe = el.steamDirectPreviewWrap.querySelector(".btn-direct-subscribe");
+    if (btnSubscribe) {
+      btnSubscribe.addEventListener("click", () => {
         invoke("open_browser", { url: `steam://url/CommunityFilePage/${details.id}` });
-        showToast("Abriendo en Steam Client...");
-        startSteamWatcherForItem(details.id, () => {
+        progressWrap.classList.remove("hidden", "is-downloaded");
+        progressLabel.textContent = "Abierto en Steam: pulsa 'Suscribirse'";
+        progressPct.textContent = "Esperando";
+        progressFill.style.width = "40%";
+        btnSubscribe.disabled = true;
+        btnSubscribe.innerHTML = `
+          <span class="mbg-btn-spinner"></span>
+          <span>Esperando descarga...</span>
+        `;
+        showToast("Abriendo en Steam... Pulsa 'Suscribirse' para descargarlo.");
+        startSteamWatcherForItem(details.id, (installed) => {
           fetchAndShowDirectSteamPreview(details.id);
+          if (!steamLocalWallpapers.some((w) => String(w.id) === String(details.id))) {
+            steamLocalWallpapers.unshift(installed);
+            if (el.steamLocalCount) el.steamLocalCount.textContent = String(steamLocalWallpapers.length);
+          }
+          showToast(`¡Fondo "${details.title}" listo para aplicar!`);
+        }, () => {
+          btnSubscribe.disabled = false;
+          btnSubscribe.innerHTML = `
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" style="margin-right: 4px; flex-shrink: 0;">
+              <path d="M12 2C6.47 2 2 6.47 2 12c0 4.24 2.65 7.86 6.42 9.27l1.72-2.46c-.22-.24-.4-.51-.55-.8L6.47 17.5c-.88-.41-1.47-1.3-1.47-2.33 0-1.43 1.17-2.6 2.6-2.6.45 0 .86.12 1.23.32l2.67-3.87C11.5 8.97 11.5 8.92 11.5 8.87c0-2.48 2.02-4.5 4.5-4.5s4.5 2.02 4.5 4.5-2.02 4.5-4.5 4.5c-.17 0-.34-.01-.5-.03l-3.88 2.68c.2.37.31.79.31 1.23 0 .7-.28 1.34-.73 1.81l2.5 1.74C19.45 19.33 22 15.96 22 12c0-5.53-4.47-10-10-10zm4 4.5c1.38 0 2.5 1.12 2.5 2.5s-1.12 2.5-2.5 2.5-2.5-1.12-2.5-2.5 1.12-2.5 2.5-2.5z"/>
+            </svg>
+            <span>Suscribirse en Steam</span>
+          `;
+          progressWrap.classList.add("hidden");
         });
       });
     }
 
-    const btnDl = el.steamDirectPreviewWrap.querySelector(".btn-direct-dl");
-    if (btnDl) {
-      btnDl.addEventListener("click", async () => {
-        progressWrap.classList.remove("hidden", "is-downloaded");
-        progressLabel.textContent = "Conectando a Steam...";
-        progressPct.textContent = "5%";
-        progressFill.style.width = "5%";
-        btnDl.disabled = true;
-        btnDl.innerHTML = "<span>Descargando...</span>";
-
-        try {
-          const installed = await invoke("download_steam_workshop_item", { id: details.id });
-          progressWrap.classList.add("is-downloaded");
-          progressLabel.textContent = "✓ Descarga completa";
-          progressPct.textContent = "100%";
-          progressFill.style.width = "100%";
-
-          const actionsDiv = el.steamDirectPreviewWrap.querySelector(".steam-direct-actions");
-          actionsDiv.innerHTML = `
-            <button class="btn btn-cyan btn-sm btn-direct-apply">
-              <span>Aplicar Fondo</span>
-            </button>
-          `;
-          const newBtnApply = actionsDiv.querySelector(".btn-direct-apply");
-          newBtnApply.addEventListener("click", () => {
-            applySteamWallpaper({ ...details, ...installed, video_path: installed.video_path });
-          });
-
-          if (!steamLocalWallpapers.some((w) => w.id === details.id)) {
-            steamLocalWallpapers.unshift(installed);
-            if (el.steamLocalCount) el.steamLocalCount.textContent = String(steamLocalWallpapers.length);
-          }
-          showToast(`Fondo "${details.title}" descargado con éxito.`);
-        } catch (err) {
-          clearInterval(timer);
-          console.error("Direct download error:", err);
-          progressLabel.textContent = "Error de descarga";
-          progressPct.textContent = "!";
-          btnDl.disabled = false;
-          btnDl.innerHTML = "<span>Reintentar</span>";
-          showToast("No se pudo descargar automáticamente.");
-        }
+    const btnWeb = el.steamDirectPreviewWrap.querySelector(".btn-direct-web");
+    if (btnWeb) {
+      btnWeb.addEventListener("click", () => {
+        invoke("open_browser", { url: `https://steamcommunity.com/sharedfiles/filedetails/?id=${details.id}` });
+        showToast("Abriendo en el navegador web...");
+        startSteamWatcherForItem(details.id, (installed) => {
+          fetchAndShowDirectSteamPreview(details.id);
+        });
       });
     }
   } catch (err) {
@@ -17219,6 +19617,7 @@ async function fetchAndRenderDownloadedWallpapers(force = false) {
   } catch (err) {
     console.error("Error fetching downloaded wallpapers:", err);
     if (el.downloadedStatusText) el.downloadedStatusText.textContent = "Error al escanear fondos descargados.";
+    if (el.downloadedEmptyState) el.downloadedEmptyState.classList.remove("hidden");
   } finally {
     if (el.downloadedLoadingState) el.downloadedLoadingState.classList.add("hidden");
   }
@@ -17272,24 +19671,37 @@ const videoThumbCache = new Map();
 
 function captureVideoThumbnail(videoPath, imgElement) {
   if (!videoPath || !imgElement) return;
+  const lower = String(videoPath).toLowerCase();
+  // Strictly only decode actual video formats — scenes (.pkg, .json) cannot be decoded as video
+  if (!lower.endsWith(".mp4") && !lower.endsWith(".webm") && !lower.endsWith(".mov") && !lower.endsWith(".mkv")) {
+    return;
+  }
+
   if (videoThumbCache.has(videoPath)) {
     imgElement.src = videoThumbCache.get(videoPath);
     return;
   }
 
-  const v = document.createElement("video");
-  v.src = convertFileSrc(videoPath);
-  v.crossOrigin = "anonymous";
-  v.muted = true;
-  v.playsInline = true;
-  v.preload = "auto";
-  v.currentTime = 0.3;
+  let v;
+  try {
+    v = document.createElement("video");
+    v.src = convertFileSrc(videoPath);
+    v.crossOrigin = "anonymous";
+    v.muted = true;
+    v.playsInline = true;
+    v.preload = "auto";
+    v.currentTime = 0.3;
+  } catch (err) {
+    return;
+  }
 
   // Drops the temporary video's decoder right away (a 4K/5K one holds a lot of GPU memory
   // until garbage collection otherwise).
   const release = () => {
-    v.removeAttribute("src");
-    v.load();
+    try {
+      v.removeAttribute("src");
+      v.load();
+    } catch {}
   };
 
   let captured = false;
@@ -17349,6 +19761,9 @@ function saveActiveWallpaperState({ type, title, steamPath = null, projectPath =
   if (projectPath) localStorage.setItem("modcomparer_wallpaper_project_path", projectPath);
   if (activeId) localStorage.setItem("modcomparer_wallpaper_active_id", String(activeId).trim());
   if (localPath) localStorage.setItem("modcomparer_wallpaper_local_path", localPath);
+  if (steamPath && !localPath && !steamPath.startsWith("http")) {
+    localStorage.setItem("modcomparer_wallpaper_local_path", steamPath);
+  }
   if (url) localStorage.setItem("modcomparer_wallpaper_url", url);
 
   activeWallpaperTitle = title || "";
@@ -17358,34 +19773,17 @@ function saveActiveWallpaperState({ type, title, steamPath = null, projectPath =
 function sanitizeWallpaperStorage() {
   const type = (localStorage.getItem("modcomparer_wallpaper_type") || "").trim();
   if (type === "steam_scene") {
-    localStorage.removeItem("modcomparer_wallpaper_local_path");
-    localStorage.removeItem("modcomparer_wallpaper_url");
     const projPath = localStorage.getItem("modcomparer_wallpaper_project_path") || "";
     const m = projPath.match(/431960[\\/](\d+)/);
     if (m && m[1]) {
       localStorage.setItem("modcomparer_wallpaper_active_id", m[1]);
     }
   } else if (type === "steam_workshop" || type === "imported") {
-    localStorage.removeItem("modcomparer_wallpaper_project_path");
-    localStorage.removeItem("modcomparer_wallpaper_local_path");
-    localStorage.removeItem("modcomparer_wallpaper_url");
     const steamPath = localStorage.getItem("modcomparer_wallpaper_steam_path") || "";
     const m = steamPath.match(/431960[\\/](\d+)/);
     if (m && m[1]) {
       localStorage.setItem("modcomparer_wallpaper_active_id", m[1]);
-    } else {
-      localStorage.removeItem("modcomparer_wallpaper_active_id");
     }
-  } else if (type === "motionbgs_local") {
-    localStorage.removeItem("modcomparer_wallpaper_project_path");
-    localStorage.removeItem("modcomparer_wallpaper_active_id");
-    localStorage.removeItem("modcomparer_wallpaper_steam_path");
-    localStorage.removeItem("modcomparer_wallpaper_url");
-  } else if (type === "motionbgs" || type === "url" || type === "custom_file") {
-    localStorage.removeItem("modcomparer_wallpaper_project_path");
-    localStorage.removeItem("modcomparer_wallpaper_active_id");
-    localStorage.removeItem("modcomparer_wallpaper_steam_path");
-    localStorage.removeItem("modcomparer_wallpaper_local_path");
   }
 }
 
@@ -17450,54 +19848,58 @@ function renderDownloadedCards(items) {
   if (!el.downloadedCatalogGrid) return;
   el.downloadedCatalogGrid.innerHTML = "";
 
-  items.forEach((item) => {
-    const card = document.createElement("div");
-    const isAct = isWallpaperItemActive(item);
-    card.className = `mbg-card downloaded-card ${isAct ? "is-active" : ""}`;
-    card.dataset.videoPath = item.video_path || "";
-    if (item.project_path) card.dataset.projectPath = item.project_path;
-    if (item.id) card.dataset.id = item.id;
+  (items || []).forEach((item) => {
+    if (!item) return;
+    try {
+      const card = document.createElement("div");
+      const isAct = isWallpaperItemActive(item);
+      card.className = `mbg-card downloaded-card ${isAct ? "is-active" : ""}`;
+      card.dataset.videoPath = item.video_path || "";
+      if (item.project_path) card.dataset.projectPath = item.project_path;
+      if (item.id) card.dataset.id = item.id;
 
-    // Determine badge class & text
-    let sourceBadgeClass = "badge-source-steam";
-    let sourceBadgeText = "STEAM";
-    if (item.source === "motionbgs") {
-      sourceBadgeClass = "badge-source-mbg";
-      sourceBadgeText = "MOTIONBGS";
-    } else if (item.source === "imported") {
-      sourceBadgeClass = "badge-source-imp";
-      sourceBadgeText = "IMPORTADO";
-    } else if (item.is_scene) {
-      const isWeb = item.video_path && (item.video_path.toLowerCase().endsWith("project.json") || item.video_path.toLowerCase().endsWith(".html"));
-      sourceBadgeClass = "badge-source-steam is-scene";
-      sourceBadgeText = isWeb ? "INTERACTIVO (WEB)" : "ESCENA (SHADERS)";
-    }
+      // Determine badge class & text
+      let sourceBadgeClass = "badge-source-steam";
+      let sourceBadgeText = "STEAM";
+      if (item.source === "motionbgs") {
+        sourceBadgeClass = "badge-source-mbg";
+        sourceBadgeText = "MOTIONBGS";
+      } else if (item.source === "imported") {
+        sourceBadgeClass = "badge-source-imp";
+        sourceBadgeText = "IMPORTADO";
+      } else if (item.is_scene) {
+        const isWeb = item.video_path && (item.video_path.toLowerCase().endsWith("project.json") || item.video_path.toLowerCase().endsWith(".html"));
+        sourceBadgeClass = "badge-source-steam is-scene";
+        sourceBadgeText = isWeb ? "INTERACTIVO (WEB)" : "ESCENA (SHADERS)";
+      }
 
-    const inPl = bgPlaylist.some((p) => p.url === item.video_path);
-    const videoStreamUrl = convertFileSrc(item.video_path) + "?t=" + Date.now();
+      const inPl = bgPlaylist.some((p) => p.url === item.video_path);
+      const videoStreamUrl = convertFileSrc(item.video_path) + "?t=" + Date.now();
+      const sizeMb = typeof item.file_size_mb === "number" && !isNaN(item.file_size_mb) ? item.file_size_mb.toFixed(1) : "0.0";
+      const itemTitle = item.title || "Fondo Animado";
 
-    let mediaHtml = "";
-    if (item.preview_path) {
-      const previewSrc = convertFileSrc(item.preview_path);
-      mediaHtml = `
-        <img class="mbg-card-thumb" src="${previewSrc}" alt="${escapeHtml(item.title)}" loading="lazy" onerror="this.style.display='none'" />
-        <video class="mbg-card-video-preview" loop muted playsinline preload="none"></video>
-      `;
-    } else {
-      mediaHtml = `
-        <img class="mbg-card-thumb mbg-card-captured-thumb" alt="${escapeHtml(item.title)}" loading="lazy" />
-        <video class="mbg-card-video-preview" loop muted playsinline preload="none"></video>
-      `;
-    }
+      let mediaHtml = "";
+      if (item.preview_path) {
+        const previewSrc = convertFileSrc(item.preview_path);
+        mediaHtml = `
+          <img class="mbg-card-thumb" src="${previewSrc}" alt="${escapeHtml(itemTitle)}" loading="lazy" onerror="this.style.display='none'" />
+          <video class="mbg-card-video-preview" loop muted playsinline preload="none"></video>
+        `;
+      } else {
+        mediaHtml = `
+          <img class="mbg-card-thumb mbg-card-captured-thumb" alt="${escapeHtml(itemTitle)}" loading="lazy" />
+          <video class="mbg-card-video-preview" loop muted playsinline preload="none"></video>
+        `;
+      }
 
-    const hasProps = hasWeCustomProperties(item);
+      const hasProps = hasWeCustomProperties(item);
 
-    card.innerHTML = `
-      <div class="mbg-card-media">
-        ${mediaHtml}
-        <span class="${sourceBadgeClass}">${sourceBadgeText}</span>
-        ${item.resolution ? `<span class="badge-resolution-pill">${item.resolution}</span>` : ""}
-        <span class="mbg-card-badge">${item.file_size_mb.toFixed(1)} MB</span>
+      card.innerHTML = `
+        <div class="mbg-card-media">
+          ${mediaHtml}
+          <span class="${sourceBadgeClass}">${sourceBadgeText}</span>
+          ${item.resolution ? `<span class="badge-resolution-pill">${item.resolution}</span>` : ""}
+          <span class="mbg-card-badge">${sizeMb} MB</span>
         ${hasProps ? '<span class="mbg-card-we-props-pill" title="Este fondo contiene opciones configurables en tiempo real">⚙️ Opciones</span>' : ""}
         ${isAct ? '<span class="mbg-card-active-check">Activo</span>' : ""}
       </div>
@@ -17716,7 +20118,10 @@ function renderDownloadedCards(items) {
       });
     }
 
-    el.downloadedCatalogGrid.appendChild(card);
+      el.downloadedCatalogGrid.appendChild(card);
+    } catch (err) {
+      console.warn("Error rendering downloaded card:", err, item);
+    }
   });
 }
 
@@ -17908,7 +20313,13 @@ window.addEventListener("blur", onLauncherActivityChange);
 // view is open or the background is not live (minimized, or playing a game).
 // Views where the animated background (video / Wallpaper Engine scene) is on screen.
 function viewShowsBackground() {
-  return state.currentView === "inicio" || state.currentView === "consola" || state.currentView === "comparador" || state.currentView === "manager";
+  return (
+    state.currentView === "inicio" ||
+    state.currentView === "consola" ||
+    state.currentView === "comparador" ||
+    state.currentView === "manager" ||
+    state.currentView === "servidores"
+  );
 }
 
 function syncBgVideoPlayback() {
@@ -17917,9 +20328,9 @@ function syncBgVideoPlayback() {
     isBackgroundLive() &&
     !document.body.classList.contains("has-we-active");
   for (const v of [el.homeBgVideo, el.homeBgVideoNext]) {
-    if (!v || !v.classList.contains("is-active") || !v.getAttribute("src")) continue;
+    if (!v || !v.classList.contains("is-active") || !(v.src || v.getAttribute("src"))) continue;
     if (shouldPlay) {
-      if (v.paused) v.play().catch(() => {});
+      if (v.paused) playBackgroundVideoSafely(v);
     } else if (!v.paused) {
       v.pause();
     }
@@ -17964,6 +20375,24 @@ async function prewarmSections() {
   }
 }
 
+function updateViewSwitcherGlider(targetBtn = null) {
+  const switcher = el.viewSwitcher || document.getElementById("view-switcher");
+  const glider = document.getElementById("view-switcher-glider");
+  if (!switcher || !glider) return;
+  const btn = targetBtn || switcher.querySelector(".view-btn.active");
+  if (!btn) {
+    glider.style.opacity = "0";
+    return;
+  }
+  const left = btn.offsetLeft;
+  const width = btn.offsetWidth;
+  if (width > 0) {
+    glider.style.transform = `translateX(${left}px)`;
+    glider.style.width = `${width}px`;
+    glider.style.opacity = "1";
+  }
+}
+
 function switchView(viewName) {
   state.currentView = viewName;
   // the layout rules that depend on the open section read it from here (see style.css)
@@ -17978,7 +20407,7 @@ function switchView(viewName) {
   if (el.viewInicio) el.viewInicio.classList.toggle("hidden", viewName !== "inicio");
   // The console shows the home background behind its floating panels (only the
   // background layer of the home view stays visible).
-  if (el.viewInicio) el.viewInicio.classList.toggle("bg-only", viewName === "consola" || viewName === "comparador" || viewName === "manager");
+  if (el.viewInicio) el.viewInicio.classList.toggle("bg-only", viewName === "consola" || viewName === "comparador" || viewName === "manager" || viewName === "servidores");
   if (el.viewConsola) el.viewConsola.classList.toggle("hidden", viewName !== "consola");
   if (el.viewComparador) el.viewComparador.classList.toggle("hidden", viewName !== "comparador");
   if (el.viewManager) el.viewManager.classList.toggle("hidden", viewName !== "manager");
@@ -17994,11 +20423,16 @@ function switchView(viewName) {
   else window.ikaComparer?.onHide();
   if (viewName === "manager") window.ikaManager?.onShow();
   else window.ikaManager?.onHide();
+  if (viewName === "servidores") renderServersView();
 
   if (el.viewSwitcher) {
+    let activeBtn = null;
     el.viewSwitcher.querySelectorAll(".view-btn").forEach((b) => {
-      b.classList.toggle("active", b.dataset.view === viewName);
+      const isAct = b.dataset.view === viewName;
+      b.classList.toggle("active", isAct);
+      if (isAct) activeBtn = b;
     });
+    updateViewSwitcherGlider(activeBtn);
   }
 
   if (document.body.classList.contains("has-we-active")) {
@@ -18040,8 +20474,11 @@ function switchView(viewName) {
 
   if (viewName === "consola") {
     updateConsoleBadge();
+    stopHcpDinoGame();
   } else if (viewName === "inicio") {
     updateHomeConsolePreview();
+  } else {
+    stopHcpDinoGame();
   }
 
   renderCurrentView();
@@ -21125,7 +23562,9 @@ async function handlePlayGame(instOverride) {
   updateHomeConsolePreview();
   showLaunchProgress(instanceName, "Preparando...", 0, 0);
   logToConsole("SYS", `Iniciando ${instanceName} como ${username}...`, "sys");
-  gameMilestoneState.delete(normInstancePath(realPath || targetPath));
+  const instKey = normInstancePath(realPath || targetPath);
+  gameMilestoneState.delete(instKey);
+  gameSessionStartTimes.set(instKey, Date.now());
   setGameState(realPath || targetPath, "preparing");
   pushGameLog(realPath || targetPath, [{ level: "INFO", text: `[Launcher] Iniciando ${instanceName} como ${username}...`, ts: Date.now() }]);
 
@@ -21142,6 +23581,7 @@ async function handlePlayGame(instOverride) {
       recordRecentActivity("launch", "Juego iniciado", `Lanzada instancia ${instanceName} con éxito`);
     }
   } catch (err) {
+    gameSessionStartTimes.delete(instKey);
     showToast(`Error al iniciar juego: ${String(err).split("\n")[0]}`);
     showLaunchProgress(instanceName, String(err), 0, 0, true);
     String(err).split("\n").filter(Boolean).forEach((l) => logToConsole("ERROR", l, "error"));
@@ -21180,7 +23620,7 @@ listen("mc-launch-progress", (event) => {
     finishDownloadNotification(instDlId, "Recursos descargados correctamente");
     mcLaunchDlTracker.delete(instDlId);
   } else if (p.message) {
-    setGameState(p.instance, "preparing", p.message.replace(/\.\.\.$/, ""));
+    setGameState(p.instance, "preparing");
   }
 
   if (isDownload) {
@@ -21237,17 +23677,38 @@ function appendGameLinesToConsole(lines) {
   for (const l of lines) {
     const level = String(l.level || "INFO").toUpperCase();
     const line = document.createElement("div");
-    line.className = "console-line";
-    const time = document.createElement("span");
-    time.className = "console-line-time";
-    time.textContent = `[${(l.ts ? new Date(l.ts) : new Date()).toTimeString().split(" ")[0]}]`;
-    const tag = document.createElement("span");
-    tag.className = `console-line-tag tag-${GAME_LEVEL_TAG[level] || "mc"}`;
-    tag.textContent = level === "MILESTONE" ? "LISTO" : level;
-    const msg = document.createElement("span");
-    msg.className = "console-line-msg";
-    msg.textContent = l.text;
-    line.append(time, tag, msg);
+    const trace = parseStackTraceLine(l.text);
+    if (trace) {
+      line.className = "console-line console-line-trace tag-error";
+      const spacer = document.createElement("span");
+      spacer.className = "console-line-time console-trace-spacer";
+      spacer.textContent = "         ";
+      spacer.setAttribute("aria-hidden", "true");
+
+      const bullet = document.createElement("span");
+      bullet.className = "console-trace-bullet";
+      bullet.textContent = "↳";
+      bullet.setAttribute("aria-hidden", "true");
+
+      const msg = document.createElement("span");
+      msg.className = "console-line-msg console-trace-msg";
+      msg.textContent = l.text.trim();
+      line.append(spacer, bullet, msg);
+    } else {
+      line.className = "console-line";
+      const time = document.createElement("span");
+      time.className = "console-line-time";
+      time.textContent = `[${(l.ts ? new Date(l.ts) : new Date()).toTimeString().split(" ")[0]}]`;
+      const tag = document.createElement("span");
+      tag.className = `console-line-tag tag-${GAME_LEVEL_TAG[level] || "mc"}`;
+      tag.textContent = level === "MILESTONE"
+        ? (l.text && l.text.includes("Tiempo de ejecución") ? "TIEMPO" : "LISTO")
+        : level;
+      const msg = document.createElement("span");
+      msg.className = "console-line-msg";
+      msg.textContent = l.text;
+      line.append(time, tag, msg);
+    }
     frag.appendChild(line);
   }
   el.consoleOutput.appendChild(frag);
@@ -21263,6 +23724,11 @@ listen("mc-game-log", (event) => {
   const p = event.payload || {};
   const lines = Array.isArray(p.lines) ? p.lines : [];
   if (!lines.length) return;
+  const key = normInstancePath(p.instance || "");
+  if (!gameSessionStartTimes.has(key)) {
+    const firstTs = lines.find((l) => l.ts > 0)?.ts;
+    gameSessionStartTimes.set(key, firstTs || Date.now());
+  }
   pushGameLog(p.instance, lines);
   appendGameLinesToConsole(lines);
   detectGameMilestones(p.instance, lines);
@@ -21272,6 +23738,10 @@ listen("mc-game-exit", (event) => {
   const p = event.payload || {};
   const name = getInstanceNameFromPath(p.instance || "") || "Minecraft";
   const now = Date.now();
+  const key = normInstancePath(p.instance || "");
+  const startTime = gameSessionStartTimes.get(key);
+  gameSessionStartTimes.delete(key);
+
   const lines = [];
   if (p.crashed) {
     lines.push({ level: "ERROR", text: `Minecraft se cerró inesperadamente (código ${p.code}).`, ts: now });
@@ -21283,7 +23753,27 @@ listen("mc-game-exit", (event) => {
   } else {
     lines.push({ level: "INFO", text: p.stopped ? "Juego detenido desde el launcher." : "Minecraft se cerró correctamente.", ts: now });
   }
-  const ms = gameMilestoneState.get(normInstancePath(p.instance));
+
+  // Final session summary message with execution time
+  let elapsedMs = 0;
+  if (startTime) {
+    elapsedMs = Math.max(0, now - startTime);
+  } else {
+    const buf = gameLogBuffers.get(key);
+    const firstTs = buf?.find((l) => l.ts > 0)?.ts;
+    if (firstTs) elapsedMs = Math.max(0, now - firstTs);
+  }
+
+  if (elapsedMs > 0) {
+    const durationFormatted = formatSessionDuration(elapsedMs);
+    lines.push({
+      level: "MILESTONE",
+      text: `Tiempo de ejecución: ${durationFormatted}`,
+      ts: now,
+    });
+  }
+
+  const ms = gameMilestoneState.get(key);
   if (ms) {
     clearTimeout(ms.timer);
     ms.ready = true;
@@ -28303,10 +30793,15 @@ window.ikaShare = ikaShare;
   if (!tip) return;
 
   function show(btn) {
+    if (btn.id === "btn-play-more") {
+      const moreMenu = document.getElementById("cyber-play-more-menu");
+      if (moreMenu && !moreMenu.classList.contains("hidden")) return;
+    }
     const label = btn.dataset.tip || btn.getAttribute("title");
     if (!label) return;
     tip.textContent = label;
-    const wrap = tip.offsetParent.getBoundingClientRect();
+    const wrap = tip.offsetParent?.getBoundingClientRect();
+    if (!wrap) return;
     const icon = (btn.querySelector(".cyber-icon-base") || btn).getBoundingClientRect();
     tip.style.left = `${Math.round(icon.left + icon.width / 2 - wrap.left)}px`;
     tip.style.top = `${Math.round(icon.top - wrap.top - 12)}px`;
