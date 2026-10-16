@@ -1749,7 +1749,7 @@
             <!-- 2. Single Continuous Glowing Circuit Hairline (Matching bottom zone: bloom + crisp core) -->
             <g class="titlebar-hairline" id="titlebar-hairline">
               <path id="titlebar-hairline-bloom"
-                    d="M -3500,52 L 0,52 C 40,52 50,102 90,102 L 850,102 C 890,102 900,52 940,52 L 4440,52"
+                    d="M 0,52 C 40,52 50,102 90,102 L 850,102 C 890,102 900,52 940,52"
                     stroke="url(#hairlineGradRight)"
                     stroke-width="4.2"
                     stroke-linecap="round"
@@ -1758,7 +1758,7 @@
                     filter="url(#hairlineNeonGlow)"
                     fill="none" />
               <path id="titlebar-hairline-core"
-                    d="M -3500,52 L 0,52 C 40,52 50,102 90,102 L 850,102 C 890,102 900,52 940,52 L 4440,52"
+                    d="M 0,52 C 40,52 50,102 90,102 L 850,102 C 890,102 900,52 940,52"
                     stroke="url(#hairlineGradRight)"
                     stroke-width="2"
                     stroke-linecap="round"
@@ -1768,6 +1768,7 @@
           </svg>
 
           <nav class="view-switcher" id="view-switcher">
+            <div class="view-switcher-glider" id="view-switcher-glider" aria-hidden="true"></div>
             <button class="view-btn active" data-view="inicio">
               <svg class="tab-icon" viewBox="0 0 576 512" width="14" height="14" fill="currentColor">
                 <path d="M575.8 255.5c0 18-15 32.1-32 32.1l-32 0 .7 160.2c0 2.7-.2 5.4-.5 8.1l0 16.2c0 22.1-17.9 40-40 40l-16 0c-1.1 0-2.2 0-3.3-.1c-1.4 .1-2.8 .1-4.2 .1L416 512l-24 0c-22.1 0-40-17.9-40-40l0-24 0-64c0-17.7-14.3-32-32-32l-64 0c-17.7 0-32 14.3-32 32l0 64 0 24c0 22.1-17.9 40-40 40l-24 0-31.9 0c-1.5 0-3-.1-4.5-.2c-1.2 .1-2.4 .2-3.6 .2l-16 0c-22.1 0-40-17.9-40-40l0-112c0-.9 0-1.9 .1-2.8l0-69.7-32 0c-18 0-32-14-32-32.1c0-9 3-17 10-24L266.4 8c7-7 15-8 22-8s15 2 21 7L564.8 231.5c8 7 12 15 11 24z"/>
@@ -1787,8 +1788,11 @@
               <span>Comparador</span>
             </button>
             <button class="view-btn" data-view="manager">
-              <svg class="tab-icon" viewBox="0 0 512 512" width="14" height="14" fill="currentColor">
-                <path d="M495.9 166.6c3.2 8.7 .5 18.4-6.4 24.6l-43.3 39.4c1.1 8.3 1.7 16.8 1.7 25.4s-.6 17.1-1.7 25.4l43.3 39.4c6.9 6.2 9.6 15.9 6.4 24.6c-4.4 11.9-9.7 23.3-15.8 34.3l-4.7 8.1c-6.6 11-14 21.4-22.1 31.2c-5.9 7.2-15.7 9.6-24.5 6.8l-55.7-17.7c-13.4 10.3-28.2 18.9-44 25.4l-12.5 57.1c-2 9.1-9 16.3-18.2 17.8c-13.8 2.3-28 3.5-42.5 3.5s-28.7-1.2-42.5-3.5c-9.2-1.5-16.2-8.7-18.2-17.8l-12.5-57.1c-15.8-6.5-30.6-15.1-44-25.4L83.1 425.9c-8.8 2.8-18.6 .3-24.5-6.8c-8.1-9.8-15.5-20.2-22.1-31.2l-4.7-8.1c-6.1-11-11.4-22.4-15.8-34.3c-3.2-8.7-.5-18.4 6.4-24.6l43.3-39.4C64.6 273.1 64 264.6 64 256s.6-17.1 1.7-25.4L22.4 191.2c-6.9-6.2-9.6-15.9-6.4-24.6c4.4-11.9 9.7-23.3 15.8-34.3l4.7-8.1c6.6-11 14-21.4 22.1-31.2c5.9-7.2 15.7-9.6 24.5-6.8l55.7 17.7c13.4-10.3 28.2-18.9 44-25.4l12.5-57.1c2-9.1 9-16.3 18.2-17.8C227.3 1.2 241.5 0 256 0s28.7 1.2 42.5 3.5c9.2 1.5 16.2 8.7 18.2 17.8l12.5 57.1c15.8 6.5 30.6 15.1 44 25.4l55.7-17.7c8.8-2.8 18.6-.3 24.5 6.8c8.1 9.8 15.5 20.2 22.1 31.2l4.7 8.1c6.1 11 11.4 22.4 15.8 34.3zM256 336a80 80 0 1 0 0-160 80 80 0 1 0 0 160z"/>
+              <svg class="tab-icon tab-icon-manager-layers" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path class="mgr-layer-plate mgr-layer-top" d="M12 2.5L19.5 6.8L12 11.2L4.5 6.8Z" fill="currentColor" fill-opacity="0.18" />
+                <path class="mgr-layer-plate mgr-layer-left" d="M4 8.5L11.2 12.8V21L4 16.7Z" fill="currentColor" fill-opacity="0.28" />
+                <path class="mgr-layer-plate mgr-layer-right" d="M12.8 12.8L20 8.5V16.7L12.8 21Z" fill="currentColor" fill-opacity="0.12" />
+                <circle class="mgr-layer-core" cx="12" cy="12.2" r="1.6" fill="currentColor" stroke="none" />
               </svg>
               <span>Gestor de Instancia</span>
             </button>
@@ -2050,14 +2054,10 @@
                 <div id="home-console-sub" class="hidden" style="display: none !important;"></div>
               </div>
 
-              <!-- Body: Two Columns (Logs stream left, Minecraft artwork right) -->
+              <!-- Body: Logs stream full width -->
               <div class="hcp-body">
                 <div class="hcp-log-terminal" id="home-console-preview-logs">
                   <div class="hcp-log-empty">Esperando que se lance el juego...</div>
-                </div>
-
-                <div class="hcp-artwork-box">
-                  <img src="/minecraft-console-art.png" class="hcp-artwork-img" alt="Minecraft Artwork" />
                 </div>
               </div>
 
@@ -2070,9 +2070,9 @@
                       <polyline points="7.5 12 10.5 15 16.5 9" stroke="#34d399" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
                     </svg>
                   </span>
-                  <span class="hcp-footer-text" id="hcp-footer-text">Cierre correcto</span>
+                  <span class="hcp-footer-text" id="hcp-footer-text" title="Sesión terminada">Sesión terminada</span>
                   <span class="hcp-footer-divider">|</span>
-                  <span class="hcp-footer-runtime" id="hcp-footer-runtime">Runtime: 1.20.1</span>
+                  <span class="hcp-footer-runtime" id="hcp-footer-runtime">Runtime: Minecraft</span>
                 </div>
 
                 <div class="hcp-footer-action-wrap">
@@ -2299,7 +2299,28 @@
               <div class="instance-filter-search-bar" id="instance-filter-search-bar">
                 <nav class="instance-category-pills" id="instance-category-pills">
                   <button type="button" class="btn-create-inst-pill" id="btn-create-instance-pill" title="Crear una nueva instancia de Minecraft">
-                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <svg class="btn-create-inst-border-svg" aria-hidden="true">
+                      <defs>
+                        <linearGradient id="createInstGradCyan" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="260" y2="0" spreadMethod="repeat">
+                          <stop offset="0%" stop-color="#076573" />
+                          <stop offset="18%" stop-color="#00a8b5" />
+                          <stop offset="36%" stop-color="#00f0e6" />
+                          <stop offset="50%" stop-color="#7efcf6" />
+                          <stop offset="64%" stop-color="#00e5df" />
+                          <stop offset="82%" stop-color="#0891b2" />
+                          <stop offset="100%" stop-color="#076573" />
+                          <animateTransform attributeName="gradientTransform" type="translate" from="0 0" to="-260 0" dur="4.2s" repeatCount="indefinite" />
+                        </linearGradient>
+                      </defs>
+                      <rect class="btn-create-inst-hairline-bloom" x="0.75" y="0.75" width="calc(100% - 1.5px)" height="calc(100% - 1.5px)" rx="17" ry="17"
+                            stroke="url(#createInstGradCyan)" stroke-width="2.2"
+                            stroke-linecap="round" stroke-linejoin="round"
+                            opacity="0.5" filter="url(#hairlineNeonGlow)" fill="none" />
+                      <rect class="btn-create-inst-hairline-core" x="0.75" y="0.75" width="calc(100% - 1.5px)" height="calc(100% - 1.5px)" rx="17" ry="17"
+                            stroke="url(#createInstGradCyan)" stroke-width="1.2"
+                            stroke-linecap="round" stroke-linejoin="round" fill="none" />
+                    </svg>
+                    <svg class="btn-create-inst-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                       <line x1="12" y1="5" x2="12" y2="19"></line>
                       <line x1="5" y1="12" x2="19" y2="12"></line>
                     </svg>
@@ -2932,18 +2953,39 @@
 
         <div id="view-servidores" class="view-container hidden view-servidores-container">
           <div class="servidores-stage">
-            <!-- Header Section -->
+            <!-- Modern Minimalist Header -->
             <div class="servidores-header-bar">
               <div class="servidores-title-box">
                 <div class="servidores-badge">
                   <span class="servidores-pulse"></span>
-                  <span>MULTIJUGADOR & COMUNIDAD</span>
+                  <span>ECOSISTEMA MULTIJUGADOR & HOSTING</span>
                 </div>
                 <h2 class="servidores-title">SERVIDORES DE MINECRAFT</h2>
-                <p class="servidores-subtitle">Explora servidores populares, monitorea el estado en vivo y conéctate directamente con un clic.</p>
+                <p class="servidores-subtitle">Despliega tu propio servidor local o en la nube, consulta especificaciones de hosting o descubre servidores de la comunidad.</p>
               </div>
+
+              <!-- Main Navigation: Crear Servidor is always FIRST and ACTIVE by default -->
+              <div class="servidores-nav-switcher">
+                <button type="button" class="srv-nav-btn active" id="btn-srv-tab-create" data-srv-tab="create">
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
+                    <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
+                    <line x1="6" y1="6" x2="6.01" y2="6"></line>
+                    <line x1="6" y1="18" x2="6.01" y2="18"></line>
+                  </svg>
+                  <span>Crear Servidor</span>
+                </button>
+                <button type="button" class="srv-nav-btn" id="btn-srv-tab-discover" data-srv-tab="discover">
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line>
+                    <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+                  </svg>
+                  <span>Descubrir Existentes</span>
+                </button>
+              </div>
+
               <div class="servidores-top-actions">
-                <div class="servidores-search-box">
+                <div class="servidores-search-box hidden" id="srv-search-box-wrap">
                   <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
                     <circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line>
                   </svg>
@@ -2962,9 +3004,426 @@
               </div>
             </div>
 
-            <!-- Servidores Grid -->
-            <div class="servidores-grid" id="servidores-cards-grid">
-              <!-- Dynamically populated via JavaScript -->
+            <!-- ZONA 1 (PRINCIPAL): CREAR SERVIDOR (SIEMPRE PRIMERO) -->
+            <div id="srv-tab-content-create" class="srv-tab-pane">
+              <div class="srv-create-hero">
+                <h3 class="srv-create-hero-title">¿Cómo deseas alojar tu servidor?</h3>
+                <p class="srv-create-hero-desc">Elige entre ejecutarlo de forma gratuita en tu propia computadora o dejarlo activo las 24 horas en un hosting especializado sin abrir el navegador.</p>
+              </div>
+
+              <div class="srv-create-options-grid">
+                <!-- OPCION 1: MONTAR EN TU PC -->
+                <div class="srv-option-card srv-card-local">
+                  <div class="srv-option-glow"></div>
+                  <div class="srv-option-header">
+                    <div class="srv-option-badge srv-badge-local">
+                      <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+                      <span>100% GRATIS • CERO COSTO</span>
+                    </div>
+                    <div class="srv-option-icon-box srv-icon-local">
+                      <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+                        <line x1="8" y1="21" x2="16" y2="21"></line>
+                        <line x1="12" y1="17" x2="12" y2="21"></line>
+                      </svg>
+                    </div>
+                    <h3 class="srv-option-title">Montar en tu PC de Servidor</h3>
+                    <p class="srv-option-subtitle">Aprovecha la potencia de tu CPU y memoria RAM. Ideal para jugar con amigos, probar mundos privados o experimentar con mods sin suscripciones.</p>
+                  </div>
+
+                  <div class="srv-option-features">
+                    <div class="srv-feat-item">
+                      <span class="srv-feat-bullet">✓</span>
+                      <div>
+                        <strong>Control 100% directo:</strong> Modifica carpetas, plugins, mods y <code>server.properties</code> en tu disco duro al instante.
+                      </div>
+                    </div>
+                    <div class="srv-feat-item">
+                      <span class="srv-feat-bullet">✓</span>
+                      <div>
+                        <strong>Sin abrir puertos:</strong> Conéctate fácilmente con amigos usando túneles seguros como <strong>Playit.gg</strong> o redes virtuales como <strong>Radmin VPN</strong>.
+                      </div>
+                    </div>
+                    <div class="srv-feat-item">
+                      <span class="srv-feat-bullet">✓</span>
+                      <div>
+                        <strong>Cero latencia local:</strong> Juegas con ping 0ms en tu propia red.
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Asistente de Configuración Local -->
+                  <div class="srv-local-wizard-box">
+                    <div class="srv-wizard-title-row">
+                      <span class="srv-wizard-step-badge">ASISTENTE RÁPIDO</span>
+                      <span class="srv-wizard-step-name">Generador de Arranque Optimizado</span>
+                    </div>
+
+                    <div class="srv-wizard-fields">
+                      <div class="srv-wfield">
+                        <label class="srv-wlabel">Motor / Software</label>
+                        <select id="srv-local-software" class="srv-wselect">
+                          <option value="Paper">Paper MC (Optimizado para plugins & FPS)</option>
+                          <option value="Purpur">Purpur (Máximo rendimiento con plugins)</option>
+                          <option value="Fabric">Fabric (Mods técnicos de alto rendimiento)</option>
+                          <option value="NeoForge">NeoForge / Forge (Modpacks grandes)</option>
+                          <option value="Vanilla">Vanilla (Minecraft original de Mojang)</option>
+                        </select>
+                      </div>
+
+                      <div class="srv-wfield">
+                        <label class="srv-wlabel">Memoria RAM Asignada</label>
+                        <div class="srv-ram-pills" id="srv-ram-selector">
+                          <button type="button" class="srv-ram-pill" data-ram="2">2 GB</button>
+                          <button type="button" class="srv-ram-pill active" data-ram="4">4 GB</button>
+                          <button type="button" class="srv-ram-pill" data-ram="6">6 GB</button>
+                          <button type="button" class="srv-ram-pill" data-ram="8">8 GB</button>
+                        </div>
+                      </div>
+
+                      <div class="srv-wfield">
+                        <label class="srv-wlabel">Método de Conexión para Amigos</label>
+                        <select id="srv-local-tunnel" class="srv-wselect">
+                          <option value="playit">Playit.gg (Túnel seguro sin abrir puertos - Recomendado)</option>
+                          <option value="port25565">Abrir Puerto 25565 (Port Forwarding en Router)</option>
+                          <option value="radmin">Radmin VPN / Hamachi (Red privada virtual)</option>
+                          <option value="lan">LAN / Misma red local WiFi o cable</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div class="srv-wizard-actions">
+                      <button type="button" id="btn-generate-srv-script" class="btn-srv-action btn-srv-cyan">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                        <span>Generar Script de Inicio (.bat) con Flags Aikar</span>
+                      </button>
+                      <button type="button" id="btn-open-playit-guide" class="btn-srv-action btn-srv-ghost">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+                        <span>Guía Playit.gg (Sin abrir puertos)</span>
+                      </button>
+                    </div>
+
+                    <div id="srv-generated-script-box" class="srv-script-preview-wrap hidden">
+                      <div class="srv-script-preview-head">
+                        <span>Código para start.bat (copiado al portapapeles):</span>
+                        <button type="button" id="btn-copy-generated-script" class="btn-copy-script-small">Copiar de nuevo</button>
+                      </div>
+                      <pre id="srv-script-code-text" class="srv-script-code"></pre>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- OPCION 2: HOST DE PAGO EN LA NUBE (TICKHOSTING INTEGRADO) -->
+                <div class="srv-option-card srv-card-cloud">
+                  <div class="srv-option-glow"></div>
+                  <div class="srv-option-header">
+                    <div class="srv-option-badge srv-badge-cloud">
+                      <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>
+                      <span>24/7 EN LÍNEA • INTEGRADO EN EL LAUNCHER</span>
+                    </div>
+                    <div class="srv-option-icon-box srv-icon-cloud">
+                      <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"></path>
+                      </svg>
+                    </div>
+                    <h3 class="srv-option-title">Host en la Nube (TickHosting)</h3>
+                    <p class="srv-option-subtitle">Consulta planes, prueba el ping de cada zona y revisa los componentes técnicos directamente desde aquí, sin necesidad de ir a su web.</p>
+                  </div>
+
+                  <!-- Dashboard Integrado de TickHosting -->
+                  <div class="srv-tickhosting-spotlight">
+                    <!-- Top Brand Row -->
+                    <div class="srv-tick-brand-row">
+                      <div class="srv-tick-brand">
+                        <span class="srv-tick-logo-icon">⚡</span>
+                        <div>
+                          <div class="srv-tick-brand-title">
+                            <span class="srv-tick-name">TickHosting</span>
+                            <span class="srv-tick-verified-pill">Oficial</span>
+                          </div>
+                          <span class="srv-tick-sub">Infraestructura AMD Ryzen 9 & Protección Path.net</span>
+                        </div>
+                      </div>
+                      <div class="srv-tick-quick-actions">
+                        <button type="button" id="btn-link-tick-server" class="btn-srv-link-compact" title="Vincular servidor ya contratado o configurado">
+                          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                          <span>+ Vincular IP</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    <!-- Inner Sub-Tabs: Planes, Ping por Zona, Componentes -->
+                    <div class="srv-tick-tabs-bar">
+                      <button type="button" class="srv-tick-tab-btn active" data-tick-tab="plans">
+                        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="9" y1="21" x2="9" y2="9"></line></svg>
+                        <span>Planes & Precios</span>
+                      </button>
+                      <button type="button" class="srv-tick-tab-btn" data-tick-tab="ping">
+                        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12.55a11 11 0 0 1 14.08 0"></path><path d="M1.42 9a16 16 0 0 1 21.16 0"></path><path d="M8.53 16.11a6 6 0 0 1 6.95 0"></path><circle cx="12" cy="20" r="1"></circle></svg>
+                        <span>Ping por Zona</span>
+                      </button>
+                      <button type="button" class="srv-tick-tab-btn" data-tick-tab="hardware">
+                        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"></rect><rect x="9" y="9" width="6" height="6"></rect><line x1="9" y1="1" x2="9" y2="4"></line><line x1="15" y1="1" x2="15" y2="4"></line><line x1="9" y1="20" x2="9" y2="23"></line><line x1="15" y1="20" x2="15" y2="23"></line><line x1="20" y1="9" x2="23" y2="9"></line><line x1="20" y1="14" x2="23" y2="14"></line><line x1="1" y1="9" x2="4" y2="9"></line><line x1="1" y1="14" x2="4" y2="14"></line></svg>
+                        <span>Componentes</span>
+                      </button>
+                    </div>
+
+                    <!-- SUB-PANEL 1: PLANES & PRECIOS -->
+                    <div id="srv-tick-panel-plans" class="srv-tick-subpane">
+                      <div class="srv-tick-plans-grid">
+                        <!-- Plan Free / Básico -->
+                        <div class="srv-plan-mini-card">
+                          <div class="srv-plan-head">
+                            <span class="srv-plan-name">Básico Free</span>
+                            <span class="srv-plan-price">$0 <span>/ gratis</span></span>
+                          </div>
+                          <div class="srv-plan-specs">
+                            <div class="srv-plan-spec-row"><span>RAM:</span><strong>4 GB DDR5</strong></div>
+                            <div class="srv-plan-spec-row"><span>NVMe:</span><strong>10 GB SSD</strong></div>
+                            <div class="srv-plan-spec-row"><span>CPU:</span><strong>AMD Ryzen 9</strong></div>
+                            <div class="srv-plan-spec-row"><span>Jugadores:</span><strong>Ilimitados</strong></div>
+                          </div>
+                          <button type="button" class="btn-srv-plan-choose" data-plan="TickHosting Básico (4GB)">Vincular este Plan</button>
+                        </div>
+
+                        <!-- Plan Starter -->
+                        <div class="srv-plan-mini-card">
+                          <div class="srv-plan-head">
+                            <span class="srv-plan-name">Starter Ryzen</span>
+                            <span class="srv-plan-price">€2.50 <span>/ mes</span></span>
+                          </div>
+                          <div class="srv-plan-specs">
+                            <div class="srv-plan-spec-row"><span>RAM:</span><strong>6 GB DDR5</strong></div>
+                            <div class="srv-plan-spec-row"><span>NVMe:</span><strong>25 GB Gen4</strong></div>
+                            <div class="srv-plan-spec-row"><span>CPU:</span><strong>2 vCores Ryzen 9</strong></div>
+                            <div class="srv-plan-spec-row"><span>Backups:</span><strong>Diarios</strong></div>
+                          </div>
+                          <button type="button" class="btn-srv-plan-choose" data-plan="TickHosting Starter (6GB)">Vincular este Plan</button>
+                        </div>
+
+                        <!-- Plan Pro Gaming (Destacado) -->
+                        <div class="srv-plan-mini-card is-featured">
+                          <div class="srv-plan-featured-tag">MÁS POPULAR</div>
+                          <div class="srv-plan-head">
+                            <span class="srv-plan-name">Pro Gaming</span>
+                            <span class="srv-plan-price">€4.99 <span>/ mes</span></span>
+                          </div>
+                          <div class="srv-plan-specs">
+                            <div class="srv-plan-spec-row"><span>RAM:</span><strong>8 GB DDR5</strong></div>
+                            <div class="srv-plan-spec-row"><span>NVMe:</span><strong>50 GB Gen4</strong></div>
+                            <div class="srv-plan-spec-row"><span>CPU:</span><strong>3 vCores Ryzen 9</strong></div>
+                            <div class="srv-plan-spec-row"><span>Mods:</span><strong>Ilimitados</strong></div>
+                          </div>
+                          <button type="button" class="btn-srv-plan-choose is-featured-btn" data-plan="TickHosting Pro (8GB)">Vincular este Plan</button>
+                        </div>
+
+                        <!-- Plan Extreme -->
+                        <div class="srv-plan-mini-card">
+                          <div class="srv-plan-head">
+                            <span class="srv-plan-name">Extreme Modpacks</span>
+                            <span class="srv-plan-price">€7.99 <span>/ mes</span></span>
+                          </div>
+                          <div class="srv-plan-specs">
+                            <div class="srv-plan-spec-row"><span>RAM:</span><strong>12 GB DDR5</strong></div>
+                            <div class="srv-plan-spec-row"><span>NVMe:</span><strong>80 GB Gen4</strong></div>
+                            <div class="srv-plan-spec-row"><span>CPU:</span><strong>4 vCores Ryzen 9</strong></div>
+                            <div class="srv-plan-spec-row"><span>Soporte:</span><strong>24/7 Prioritario</strong></div>
+                          </div>
+                          <button type="button" class="btn-srv-plan-choose" data-plan="TickHosting Extreme (12GB)">Vincular este Plan</button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- SUB-PANEL 2: PING POR ZONA -->
+                    <div id="srv-tick-panel-ping" class="srv-tick-subpane hidden">
+                      <div class="srv-ping-header-row">
+                        <div>
+                          <span class="srv-ping-title">Latencia estimada en Nodos de TickHosting</span>
+                          <p class="srv-ping-desc">Elige la zona más próxima para una latencia óptima y combates PvP fluidos.</p>
+                        </div>
+                        <button type="button" id="btn-refresh-tick-ping" class="btn-refresh-ping">
+                          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+                          <span>Actualizar Ping</span>
+                        </button>
+                      </div>
+
+                      <div class="srv-ping-zones-list">
+                        <!-- Zona 1: España & Portugal -->
+                        <div class="srv-ping-zone-row">
+                          <div class="srv-zone-info">
+                            <span class="srv-zone-flag">🇪🇸</span>
+                            <div>
+                              <strong class="srv-zone-name">España & Portugal (Madrid / Lisboa)</strong>
+                              <small class="srv-zone-detail">Ruta directa peninsular • Conexión Tier-1</small>
+                            </div>
+                          </div>
+                          <div class="srv-zone-meter">
+                            <div class="srv-meter-bar"><div class="srv-meter-fill srv-meter-green" style="width: 90%;"></div></div>
+                            <span class="srv-ping-val srv-val-green" data-base-ping="22">22 ms</span>
+                          </div>
+                        </div>
+
+                        <!-- Zona 2: Francia -->
+                        <div class="srv-ping-zone-row">
+                          <div class="srv-zone-info">
+                            <span class="srv-zone-flag">🇫🇷</span>
+                            <div>
+                              <strong class="srv-zone-name">Francia (París / Roubaix)</strong>
+                              <small class="srv-zone-detail">Backbone europeo • Protección Anti-DDoS directa</small>
+                            </div>
+                          </div>
+                          <div class="srv-zone-meter">
+                            <div class="srv-meter-bar"><div class="srv-meter-fill srv-meter-green" style="width: 86%;"></div></div>
+                            <span class="srv-ping-val srv-val-green" data-base-ping="28">28 ms</span>
+                          </div>
+                        </div>
+
+                        <!-- Zona 3: Alemania -->
+                        <div class="srv-ping-zone-row">
+                          <div class="srv-zone-info">
+                            <span class="srv-zone-flag">🇩🇪</span>
+                            <div>
+                              <strong class="srv-zone-name">Alemania (Falkenstein / Frankfurt)</strong>
+                              <small class="srv-zone-detail">Punto neutro DE-CIX • Centro de Europa</small>
+                            </div>
+                          </div>
+                          <div class="srv-zone-meter">
+                            <div class="srv-meter-bar"><div class="srv-meter-fill srv-meter-green" style="width: 82%;"></div></div>
+                            <span class="srv-ping-val srv-val-green" data-base-ping="34">34 ms</span>
+                          </div>
+                        </div>
+
+                        <!-- Zona 4: Finlandia -->
+                        <div class="srv-ping-zone-row">
+                          <div class="srv-zone-info">
+                            <span class="srv-zone-flag">🇫🇮</span>
+                            <div>
+                              <strong class="srv-zone-name">Finlandia (Helsinki)</strong>
+                              <small class="srv-zone-detail">Región nórdica • Excelente estabilidad térmica</small>
+                            </div>
+                          </div>
+                          <div class="srv-zone-meter">
+                            <div class="srv-meter-bar"><div class="srv-meter-fill srv-meter-green" style="width: 74%;"></div></div>
+                            <span class="srv-ping-val srv-val-green" data-base-ping="46">46 ms</span>
+                          </div>
+                        </div>
+
+                        <!-- Zona 5: Canadá / Norteamérica -->
+                        <div class="srv-ping-zone-row">
+                          <div class="srv-zone-info">
+                            <span class="srv-zone-flag">🇨🇦</span>
+                            <div>
+                              <strong class="srv-zone-name">Canadá & NA (Beauharnois)</strong>
+                              <small class="srv-zone-detail">Hub transatlántico • Óptimo para Norteamérica y Latam</small>
+                            </div>
+                          </div>
+                          <div class="srv-zone-meter">
+                            <div class="srv-meter-bar"><div class="srv-meter-fill srv-meter-yellow" style="width: 58%;"></div></div>
+                            <span class="srv-ping-val srv-val-yellow" data-base-ping="86">86 ms</span>
+                          </div>
+                        </div>
+
+                        <!-- Zona 6: Singapur -->
+                        <div class="srv-ping-zone-row">
+                          <div class="srv-zone-info">
+                            <span class="srv-zone-flag">🇸🇬</span>
+                            <div>
+                              <strong class="srv-zone-name">Singapur (Asia-Pacífico)</strong>
+                              <small class="srv-zone-detail">Ruta oceánica internacional</small>
+                            </div>
+                          </div>
+                          <div class="srv-zone-meter">
+                            <div class="srv-meter-bar"><div class="srv-meter-fill srv-meter-orange" style="width: 32%;"></div></div>
+                            <span class="srv-ping-val srv-val-orange" data-base-ping="192">192 ms</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- SUB-PANEL 3: COMPONENTES TÉCNICOS -->
+                    <div id="srv-tick-panel-hardware" class="srv-tick-subpane hidden">
+                      <div class="srv-hardware-grid">
+                        <div class="srv-hw-card">
+                          <div class="srv-hw-icon-box">🚀</div>
+                          <div class="srv-hw-body">
+                            <span class="srv-hw-badge">PROCESADOR DEDICADO</span>
+                            <h4 class="srv-hw-title">AMD Ryzen 9 (7950X / 5950X)</h4>
+                            <p class="srv-hw-text">Frecuencias turbo de hasta <strong>5.7 GHz</strong>. El chip de mayor rendimiento mononúcleo para servidores de Minecraft, asegurando <strong>20 TPS estables</strong>.</p>
+                          </div>
+                        </div>
+
+                        <div class="srv-hw-card">
+                          <div class="srv-hw-icon-box">⚡</div>
+                          <div class="srv-hw-body">
+                            <span class="srv-hw-badge">MEMORIA ULTRARRÁPIDA</span>
+                            <h4 class="srv-hw-title">RAM DDR5 ECC @ 5200+ MHz</h4>
+                            <p class="srv-hw-text">Memoria de estándar datacenter con corrección de errores (ECC). Elimina cuellos de botella en la compilación de entidades y mundos.</p>
+                          </div>
+                        </div>
+
+                        <div class="srv-hw-card">
+                          <div class="srv-hw-icon-box">💾</div>
+                          <div class="srv-hw-body">
+                            <span class="srv-hw-badge">ALMACENAMIENTO NVME</span>
+                            <h4 class="srv-hw-title">SSD NVMe PCIe Gen4 (+7000 MB/s)</h4>
+                            <p class="srv-hw-text">Tiempos de lectura instantáneos. Carga de chunks, teletransportes y guardados de mundos sin microtirones.</p>
+                          </div>
+                        </div>
+
+                        <div class="srv-hw-card">
+                          <div class="srv-hw-icon-box">🛡️</div>
+                          <div class="srv-hw-body">
+                            <span class="srv-hw-badge">SEGURIDAD PERIMETRAL</span>
+                            <h4 class="srv-hw-title">Anti-DDoS Path.net Especializado</h4>
+                            <p class="srv-hw-text">Mitigación de más de <strong>12 Tbps</strong>. Filtros exclusivos para paquetes de Minecraft que neutralizan ataques de bots y handshake floods en tiempo real.</p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Comparativa compacta de alternativas -->
+                  <div class="srv-other-hosts-box">
+                    <span class="srv-other-hosts-label">Otras alternativas de hosting:</span>
+                    <div class="srv-other-hosts-row">
+                      <button type="button" class="btn-other-host" data-url="https://apexminecrafthosting.com">
+                        <span>Apex Hosting</span>
+                        <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+                      </button>
+                      <button type="button" class="btn-other-host" data-url="https://shockbyte.com">
+                        <span>Shockbyte</span>
+                        <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+                      </button>
+                      <button type="button" class="btn-other-host" data-url="https://bisecthosting.com">
+                        <span>BisectHosting</span>
+                        <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+                      </button>
+                      <button type="button" class="btn-other-host" data-url="https://pebblehost.com">
+                        <span>PebbleHost</span>
+                        <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- ZONA 2: DESCUBRIR SERVIDORES EXISTENTES (SEGUNDA ZONA) -->
+            <div id="srv-tab-content-discover" class="srv-tab-pane hidden">
+              <!-- Filter chips bar -->
+              <div class="srv-filter-chips-bar" id="srv-filter-chips">
+                <button type="button" class="srv-chip-btn active" data-filter="all">Todos</button>
+                <button type="button" class="srv-chip-btn" data-filter="popular">Populares</button>
+                <button type="button" class="srv-chip-btn" data-filter="custom">Mis Servidores</button>
+                <button type="button" class="srv-chip-btn" data-filter="survival">Survival</button>
+                <button type="button" class="srv-chip-btn" data-filter="minijuegos">Minijuegos & Bedwars</button>
+                <button type="button" class="srv-chip-btn" data-filter="anarquia">Anarquía</button>
+              </div>
+
+              <!-- Servidores Cards Grid -->
+              <div class="servidores-grid" id="servidores-cards-grid">
+                <!-- Dynamically populated via JavaScript -->
+              </div>
             </div>
           </div>
         </div>
@@ -6037,7 +6496,7 @@
       </div>
 
       <div class="bottom-bar-right-zone">
-        <button id="btn-quick-wallpaper" class="btn btn-bottom-wallpaper" title="Personalizar y aplicar fondos animados">
+        <button id="btn-quick-wallpaper" class="btn btn-bottom-wallpaper" title="Personalizar y aplicar wallpapers">
           <div class="btn-wallpaper-mini-preview" id="btn-wallpaper-mini-preview">
             <video id="btn-wallpaper-mini-video" class="btn-wallpaper-mini-video active" muted loop playsinline preload="none"></video>
             <video id="btn-wallpaper-mini-video-next" class="btn-wallpaper-mini-video" muted loop playsinline preload="none"></video>
@@ -6045,7 +6504,7 @@
             <canvas id="btn-wallpaper-mini-poster" class="btn-wallpaper-mini-poster"></canvas>
             <div class="btn-wallpaper-mini-overlay"></div>
           </div>
-          <span class="btn-wallpaper-label">Fondos Animados</span>
+          <span class="btn-wallpaper-label">Wallpapers</span>
           <svg class="btn-wallpaper-chevron" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
             <polyline points="9 18 15 12 9 6"></polyline>
           </svg>
@@ -6215,6 +6674,52 @@
       </div>
     </div>
 
+    <!-- Context Menu for Home Carousel Instances -->
+    <div id="carousel-context-menu" class="context-menu hidden">
+      <div class="context-menu-header">
+        <span class="context-menu-title" id="ctx-carousel-title">Instancia</span>
+        <span class="context-menu-subtitle" id="ctx-carousel-subtitle">Minecraft 1.20.1 · Forge</span>
+      </div>
+      <div class="context-menu-list">
+        <button type="button" class="context-menu-item" id="ctx-carousel-btn-play">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" style="margin-right: 8px; color: #00f5d4;">
+            <polygon points="5 3 19 12 5 21 5 3"></polygon>
+          </svg>
+          <span class="ctx-label">Jugar esta instancia</span>
+        </button>
+        <button type="button" class="context-menu-item" id="ctx-carousel-btn-edit">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 8px; color: #fbbf24;">
+            <path d="M12 20h9"></path>
+            <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"></path>
+          </svg>
+          <span class="ctx-label">Editar instancia</span>
+        </button>
+        <button type="button" class="context-menu-item" id="ctx-carousel-btn-explorer">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 8px; color: #c084fc;">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+          </svg>
+          <span class="ctx-label">Abrir en el explorador</span>
+        </button>
+        <button type="button" class="context-menu-item" id="ctx-carousel-btn-duplicate">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 8px; color: #38bdf8;">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+          </svg>
+          <span class="ctx-label">Duplicar instancia</span>
+        </button>
+        <div style="height: 1px; margin: 4px 10px; background: rgba(255, 255, 255, 0.08);"></div>
+        <button type="button" class="context-menu-item is-danger" id="ctx-carousel-btn-delete" style="color: #f87171;">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 8px; color: #f87171;">
+            <polyline points="3 6 5 6 21 6"></polyline>
+            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+            <line x1="10" y1="11" x2="10" y2="17"></line>
+            <line x1="14" y1="11" x2="14" y2="17"></line>
+          </svg>
+          <span class="ctx-label" style="font-weight: 600;">Eliminar instancia</span>
+        </button>
+      </div>
+    </div>
+
     <!-- User Account Context Menu -->
     <div id="user-context-menu" class="user-context-menu hidden">
       <!-- 3D Skin Preview Card -->
@@ -6344,6 +6849,11 @@
     <!-- Modal: Gestor de Fondos Animados MotionBGs -->
     <div id="modal-wallpapers" class="modal-overlay hidden">
       <div class="modal-box modal-arcade modal-wallpapers-box">
+        <svg class="share-modal-border-svg create-inst-border-svg" aria-hidden="true">
+          <rect class="share-modal-hairline-core" x="1" y="1" rx="20" ry="20"
+                stroke="url(#hairlineGradRight)" stroke-width="1.8"
+                stroke-linecap="round" stroke-linejoin="round" fill="none" />
+        </svg>
         <div class="modal-header wallpapers-modal-header">
           <div class="wallpapers-header-left">
             <button class="btn-wallpapers-settings" id="btn-wallpapers-settings" type="button" title="Ajustes de Fondo">
@@ -6354,9 +6864,31 @@
             </button>
             <div class="wallpapers-header-title">
               <div class="wallpapers-header-badge-row">
-                <h3 class="modal-title">FONDOS ANIMADOS</h3>
+                <div class="wallpapers-header-pill wallpapers-pill-animated">
+                  <svg class="share-pill-border-svg" aria-hidden="true">
+                    <defs>
+                      <linearGradient id="wallpapersPillGradCyan" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="260" y2="0" spreadMethod="repeat">
+                        <stop offset="0%" stop-color="#076573" />
+                        <stop offset="18%" stop-color="#00a8b5" />
+                        <stop offset="36%" stop-color="#00f0e6" />
+                        <stop offset="50%" stop-color="#7efcf6" />
+                        <stop offset="64%" stop-color="#00e5df" />
+                        <stop offset="82%" stop-color="#0891b2" />
+                        <stop offset="100%" stop-color="#076573" />
+                        <animateTransform attributeName="gradientTransform" type="translate" from="0 0" to="-260 0" dur="4.2s" repeatCount="indefinite" />
+                      </linearGradient>
+                    </defs>
+                    <rect class="share-pill-hairline-bloom" x="0.5" y="0.5" rx="8" ry="8"
+                          stroke="url(#wallpapersPillGradCyan)" stroke-width="2"
+                          stroke-linecap="round" stroke-linejoin="round"
+                          opacity="0.38" filter="url(#hairlineNeonGlow)" fill="none" />
+                    <rect class="share-pill-hairline-core" x="0.5" y="0.5" rx="8" ry="8"
+                          stroke="url(#wallpapersPillGradCyan)" stroke-width="1"
+                          stroke-linecap="round" stroke-linejoin="round" fill="none" />
+                  </svg>
+                  <h3 class="wallpapers-pill-label">WALLPAPERS</h3>
+                </div>
               </div>
-              <span class="wallpapers-header-sub">Selecciona y Aplica Fondos Animados de Diferentes Catálogos</span>
             </div>
 
             <!-- Popover de Ajustes Generales de Fondo -->
@@ -6573,6 +7105,12 @@
                 <button class="mbg-tag-pill" data-tag="Sci-Fi">Sci-Fi</button>
                 <button class="mbg-tag-pill" data-tag="Game">Juegos</button>
               </div>
+            </div>
+
+            <!-- Banner info for Online catalog -->
+            <div class="steam-online-banner hidden" id="steam-online-banner">
+              <span class="steam-online-banner-icon">💡</span>
+              <span>Al pulsar <strong>"Suscribirse en Steam"</strong>, se abrirá tu aplicación oficial de Steam. Pulsa <strong>"Suscribirse"</strong> allí y el launcher detectará y activará el fondo automáticamente sin pedirte contraseñas.</span>
             </div>
 
             <!-- Top Pagination Bar for Online Catalog (Fixed at top, does not scroll) -->
@@ -6849,15 +7387,11 @@
     </div>
 
     <!-- Modal: Crear Instancia (Modern Two-Column Redesign) -->
-    <div id="modal-create-instance" class="modal-overlay hidden" style="z-index: 99999;">
+    <div id="modal-create-instance" class="modal-overlay hidden">
       <div class="modal-box modal-arcade modal-create-inst-modern">
         <svg class="create-inst-border-svg" aria-hidden="true">
-          <rect class="share-modal-hairline-bloom" x="1" y="1" rx="20" ry="20"
-                stroke="url(#hairlineGradRight)" stroke-width="4.2"
-                stroke-linecap="round" stroke-linejoin="round"
-                opacity="0.45" filter="url(#hairlineNeonGlow)" fill="none" />
           <rect class="share-modal-hairline-core" x="1" y="1" rx="20" ry="20"
-                stroke="url(#hairlineGradRight)" stroke-width="2"
+                stroke="url(#hairlineGradRight)" stroke-width="1.8"
                 stroke-linecap="round" stroke-linejoin="round" fill="none" />
         </svg>
         <!-- Header with Back Button, Title & Subtitle -->
@@ -7732,6 +8266,11 @@
     <!-- Modal: Configuración del Launcher (WhatsApp Style Cyber Profile & Settings Hub) -->
     <div id="modal-launcher-settings" class="modal-overlay hidden">
       <div class="modal-box modal-arcade modal-settings-box modal-profile-settings" id="modal-settings-box">
+        <svg class="create-inst-border-svg" aria-hidden="true">
+          <rect class="share-modal-hairline-core" x="1" y="1" rx="20" ry="20"
+                stroke="url(#hairlineGradRight)" stroke-width="1.8"
+                stroke-linecap="round" stroke-linejoin="round" fill="none" />
+        </svg>
         <div class="modal-drag-grip" id="modal-settings-drag-grip" title="Arrastrar ventana para moverla">
           <span class="modal-drag-grip-bar"></span>
         </div>
@@ -7762,7 +8301,7 @@
             </svg>
             <span>Cambiar portada</span>
           </button>
-          <input type="file" id="input-profile-cover-file" accept="image/png, image/jpeg, image/webp" style="display: none;" />
+          <input type="file" id="input-profile-cover-file" accept="image/*" style="display: none;" />
 
           <!-- Square Avatar with Neon Cyber Frame (Crossed at 50% by the horizontal line) -->
           <div class="profile-avatar-wrap" id="profile-avatar-wrap">
@@ -7875,7 +8414,7 @@
               </div>
               <div class="settings-nav-content">
                 <span class="settings-nav-title">Aspecto Visual</span>
-                <span class="settings-nav-subtitle">Intensidad de neón cyber, fondos animados, reloj pixel</span>
+                <span class="settings-nav-subtitle">Intensidad de neón cyber, wallpapers, reloj pixel</span>
               </div>
               <div class="settings-nav-arrow">
                 <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"></polyline></svg>
@@ -7927,20 +8466,20 @@
               </div>
             </button>
 
-            <!-- 6. Actualizar -->
+            <!-- 6. Acerca de Ika Launcher -->
             <button type="button" class="settings-nav-row" data-target-panel="update">
               <div class="settings-nav-icon-badge">
                 <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <polyline points="23 4 23 10 17 10"></polyline>
-                  <polyline points="1 20 1 14 7 14"></polyline>
-                  <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+                  <circle cx="12" cy="12" r="10"></circle>
+                  <line x1="12" y1="16" x2="12" y2="12"></line>
+                  <line x1="12" y1="8" x2="12.01" y2="8"></line>
                 </svg>
               </div>
               <div class="settings-nav-content">
-                <span class="settings-nav-title">Actualizar</span>
-                <span class="settings-nav-subtitle">Buscar actualizaciones, versión del cliente y diagnóstico</span>
+                <span class="settings-nav-title">Acerca de Ika Launcher</span>
+                <span class="settings-nav-subtitle">Información del proyecto, versión y agradecimientos</span>
               </div>
-              <span class="settings-nav-badge-pill" style="border-color: rgba(56, 189, 248, 0.4); color: #38bdf8;">v0.1.0</span>
+              <span class="settings-nav-badge-pill" style="border-color: rgba(56, 189, 248, 0.4); color: #38bdf8;">v1.5.5</span>
               <div class="settings-nav-arrow">
                 <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"></polyline></svg>
               </div>
@@ -7949,14 +8488,19 @@
 
           <!-- View 2: Detail Drilldown Subviews -->
           <div class="settings-detail-subview hidden" id="settings-detail-subview">
-            <div class="settings-subview-nav-bar">
-              <button type="button" class="settings-subview-back-btn" id="btn-settings-subview-back">
-                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                  <polyline points="15 18 9 12 15 6"></polyline>
-                </svg>
-                <span>Ajustes</span>
-              </button>
-              <h4 class="settings-subview-heading" id="settings-subview-heading">Configuración</h4>
+            <div class="settings-subview-nav-bar" id="settings-subview-nav-bar">
+              <nav class="settings-unified-breadcrumb" id="settings-unified-breadcrumb" aria-label="Navegación de ajustes">
+                <button type="button" class="settings-subview-back-btn" id="btn-settings-subview-back" title="Volver" aria-label="Volver">
+                  <svg viewBox="0 0 8 13" width="8" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="7 1.5 1.5 6.5 7 11.5"></polyline>
+                  </svg>
+                </button>
+                <div class="settings-breadcrumb-trail" id="settings-breadcrumb-trail">
+                  <button type="button" class="settings-bc-item settings-bc-link" id="settings-bc-root">Ajustes</button>
+                  <span class="settings-bc-sep">\</span>
+                  <span class="settings-bc-item settings-bc-current" id="settings-subview-heading">Configuración</span>
+                </div>
+              </nav>
             </div>
 
             <!-- Detail Panel 1: Cuenta -->
@@ -8016,9 +8560,21 @@
 
             <!-- Detail Panel 3: Aspecto Visual -->
             <div class="settings-panel hidden" id="settings-panel-appearance">
-              <div class="form-group" style="margin-bottom: 18px;">
-                <label class="form-label" style="font-size: 13px; font-weight: 700; margin-bottom: 8px;">Tema de Color de la Interfaz</label>
-                <div class="theme-selector-grid" id="theme-selector-grid">
+              <!-- Vista Principal de Aspecto Visual (Carrusel + Filas de Secciones) -->
+              <div class="appearance-main-view" id="appearance-main-view">
+                <div class="form-group" style="margin-bottom: 22px;">
+                <div class="theme-carousel-header-row">
+                  <label class="form-label" style="font-size: 13px; font-weight: 700; margin: 0;">Temas de Color de la Interfaz</label>
+                  <div class="theme-carousel-nav-arrows">
+                    <button type="button" class="theme-nav-btn" id="btn-theme-prev" title="Desplazar a la izquierda">
+                      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"></polyline></svg>
+                    </button>
+                    <button type="button" class="theme-nav-btn" id="btn-theme-next" title="Desplazar a la derecha">
+                      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"></polyline></svg>
+                    </button>
+                  </div>
+                </div>
+                <div class="theme-carousel-scroller" id="theme-carousel-scroller">
                   <!-- Tema 1: Cyber Índigo / Medianoche (Original) -->
                   <div class="theme-card is-active" data-theme="indigo" id="theme-card-indigo">
                     <div class="theme-card-preview theme-preview-indigo">
@@ -8082,7 +8638,7 @@
                     </div>
                     <div class="theme-card-meta">
                       <span class="theme-card-name">Crimson Rubí</span>
-                      <span class="theme-card-tag">Destello Fresa / Rosa Rubí</span>
+                      <span class="theme-card-tag">Destello Fresa / Rosa</span>
                     </div>
                     <div class="theme-card-check">✓</div>
                   </div>
@@ -8099,7 +8655,7 @@
                     </div>
                     <div class="theme-card-meta">
                       <span class="theme-card-name">Cyber Sakura</span>
-                      <span class="theme-card-tag">Destello Rosado / Fucsia</span>
+                      <span class="theme-card-tag">Rosado / Fucsia</span>
                     </div>
                     <div class="theme-card-check">✓</div>
                   </div>
@@ -8116,7 +8672,7 @@
                     </div>
                     <div class="theme-card-meta">
                       <span class="theme-card-name">Matrix Esmeralda</span>
-                      <span class="theme-card-tag">Destello Cyber Verde</span>
+                      <span class="theme-card-tag">Cyber Verde</span>
                     </div>
                     <div class="theme-card-check">✓</div>
                   </div>
@@ -8133,7 +8689,7 @@
                     </div>
                     <div class="theme-card-meta">
                       <span class="theme-card-name">Celeste Neón</span>
-                      <span class="theme-card-tag">Destello Sky Cyan</span>
+                      <span class="theme-card-tag">Sky Cyan</span>
                     </div>
                     <div class="theme-card-check">✓</div>
                   </div>
@@ -8150,7 +8706,7 @@
                     </div>
                     <div class="theme-card-meta">
                       <span class="theme-card-name">Solar Magma</span>
-                      <span class="theme-card-tag">Destello Cyber Naranja</span>
+                      <span class="theme-card-tag">Cyber Naranja</span>
                     </div>
                     <div class="theme-card-check">✓</div>
                   </div>
@@ -8167,11 +8723,276 @@
                     </div>
                     <div class="theme-card-meta">
                       <span class="theme-card-name">Aurora Boreal</span>
-                      <span class="theme-card-tag">Tema Especial Neón</span>
+                      <span class="theme-card-tag">Especial Neón</span>
                     </div>
                     <div class="theme-card-check">✓</div>
                   </div>
                 </div>
+              </div>
+
+                <!-- Opciones de Personalización por Sección (En Fila) -->
+                <div class="appearance-sections-wrap">
+                  <div class="appearance-sections-title">Personalización por Sección</div>
+                  <div class="appearance-sections-nav-list" id="appearance-sections-nav-list">
+                    
+                    <!-- Fila 1: Inicio -->
+                    <button type="button" class="appearance-section-row" data-appearance-sec="inicio">
+                      <div class="appearance-sec-icon-badge">
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg>
+                      </div>
+                      <div class="appearance-sec-row-info">
+                        <span class="appearance-sec-row-title">Inicio</span>
+                        <span class="appearance-sec-row-subtitle">Reloj pixel neón, resplandor HUD holográfico</span>
+                      </div>
+                      <div class="appearance-sec-row-arrow">
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"></polyline></svg>
+                      </div>
+                    </button>
+
+                    <!-- Fila 2: Consola -->
+                    <button type="button" class="appearance-section-row" data-appearance-sec="consola">
+                      <div class="appearance-sec-icon-badge">
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
+                      </div>
+                      <div class="appearance-sec-row-info">
+                        <span class="appearance-sec-row-title">Consola</span>
+                        <span class="appearance-sec-row-subtitle">Auto-scroll en vivo, coloreado de sintaxis arcade</span>
+                      </div>
+                      <div class="appearance-sec-row-arrow">
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"></polyline></svg>
+                      </div>
+                    </button>
+
+                    <!-- Fila 3: Comparador -->
+                    <button type="button" class="appearance-section-row" data-appearance-sec="comparador">
+                      <div class="appearance-sec-icon-badge">
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="18" r="3"></circle><circle cx="6" cy="6" r="3"></circle><path d="M13 6h3a2 2 0 0 1 2 2v7"></path><line x1="6" y1="9" x2="6" y2="21"></line></svg>
+                      </div>
+                      <div class="appearance-sec-row-info">
+                        <span class="appearance-sec-row-title">Comparador</span>
+                        <span class="appearance-sec-row-subtitle">Destacar diferencias con neón, vista compacta</span>
+                      </div>
+                      <div class="appearance-sec-row-arrow">
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"></polyline></svg>
+                      </div>
+                    </button>
+
+                    <!-- Fila 4: Gestor de Instancias -->
+                    <button type="button" class="appearance-section-row" data-appearance-sec="gestor">
+                      <div class="appearance-sec-icon-badge">
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>
+                      </div>
+                      <div class="appearance-sec-row-info">
+                        <span class="appearance-sec-row-title">Gestor de instancias</span>
+                        <span class="appearance-sec-row-subtitle">Insignias de versión y loader, efecto 3D tilt</span>
+                      </div>
+                      <div class="appearance-sec-row-arrow">
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"></polyline></svg>
+                      </div>
+                    </button>
+
+                    <!-- Fila 5: Servidores -->
+                    <button type="button" class="appearance-section-row" data-appearance-sec="servidores">
+                      <div class="appearance-sec-icon-badge">
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect><rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg>
+                      </div>
+                      <div class="appearance-sec-row-info">
+                        <span class="appearance-sec-row-title">Servidores</span>
+                        <span class="appearance-sec-row-subtitle">Indicador de latencia (Ping) con color, MOTD</span>
+                      </div>
+                      <div class="appearance-sec-row-arrow">
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"></polyline></svg>
+                      </div>
+                    </button>
+
+                    <!-- Fila 6: Extras -->
+                    <button type="button" class="appearance-section-row" data-appearance-sec="extras">
+                      <div class="appearance-sec-icon-badge">
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>
+                      </div>
+                      <div class="appearance-sec-row-info">
+                        <span class="appearance-sec-row-title">Extras</span>
+                        <span class="appearance-sec-row-subtitle">Desaparecer texto de bienvenida en pantalla</span>
+                      </div>
+                      <div class="appearance-sec-row-arrow">
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"></polyline></svg>
+                      </div>
+                    </button>
+
+                  </div>
+                </div>
+              </div>
+
+              <!-- Subvista de Sección: Aspecto Visual > [Sección] -->
+              <div class="appearance-section-detail-view hidden" id="appearance-section-detail-view">
+
+                <!-- 1. Inicio Detail -->
+                <div class="appearance-sec-detail-panel hidden" id="appearance-sec-detail-inicio" data-appearance-panel="inicio">
+                  <div class="appearance-sec-detail-header">
+                    <div class="appearance-sec-icon-badge">
+                      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg>
+                    </div>
+                    <div class="appearance-sec-detail-title-col">
+                      <span class="appearance-sec-detail-title">Inicio</span>
+                      <span class="appearance-sec-detail-desc">Configuración visual para la pantalla principal del lanzador.</span>
+                    </div>
+                  </div>
+                  <div class="appearance-sec-detail-switches">
+                    <div class="settings-switch-card">
+                      <div class="settings-switch-info">
+                        <span class="settings-switch-title">Reloj Pixel Neón</span>
+                        <span class="settings-switch-desc">Mostrar widget de reloj digital cyberpunk en la pantalla de inicio.</span>
+                      </div>
+                      <input type="checkbox" id="setting-ui-show-clock" class="cyber-checkbox" checked />
+                    </div>
+                    <div class="settings-switch-card">
+                      <div class="settings-switch-info">
+                        <span class="settings-switch-title">Efecto Brillo HUD</span>
+                        <span class="settings-switch-desc">Resplandor holográfico alrededor de las tarjetas y docks.</span>
+                      </div>
+                      <input type="checkbox" id="setting-ui-hud-glow" class="cyber-checkbox" checked />
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 2. Consola Detail -->
+                <div class="appearance-sec-detail-panel hidden" id="appearance-sec-detail-consola" data-appearance-panel="consola">
+                  <div class="appearance-sec-detail-header">
+                    <div class="appearance-sec-icon-badge">
+                      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
+                    </div>
+                    <div class="appearance-sec-detail-title-col">
+                      <span class="appearance-sec-detail-title">Consola</span>
+                      <span class="appearance-sec-detail-desc">Ajustes del registro de eventos y terminal de Minecraft.</span>
+                    </div>
+                  </div>
+                  <div class="appearance-sec-detail-switches">
+                    <div class="settings-switch-card">
+                      <div class="settings-switch-info">
+                        <span class="settings-switch-title">Auto-scroll en vivo</span>
+                        <span class="settings-switch-desc">Desplazar automáticamente hacia las últimas líneas generadas por Minecraft.</span>
+                      </div>
+                      <input type="checkbox" id="setting-ui-console-autoscroll" class="cyber-checkbox" checked />
+                    </div>
+                    <div class="settings-switch-card">
+                      <div class="settings-switch-info">
+                        <span class="settings-switch-title">Coloreado de sintaxis arcade</span>
+                        <span class="settings-switch-desc">Resaltar errores en rojo, advertencias en amarillo e info en cian.</span>
+                      </div>
+                      <input type="checkbox" id="setting-ui-console-colors" class="cyber-checkbox" checked />
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 3. Comparador Detail -->
+                <div class="appearance-sec-detail-panel hidden" id="appearance-sec-detail-comparador" data-appearance-panel="comparador">
+                  <div class="appearance-sec-detail-header">
+                    <div class="appearance-sec-icon-badge">
+                      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="18" r="3"></circle><circle cx="6" cy="6" r="3"></circle><path d="M13 6h3a2 2 0 0 1 2 2v7"></path><line x1="6" y1="9" x2="6" y2="21"></line></svg>
+                    </div>
+                    <div class="appearance-sec-detail-title-col">
+                      <span class="appearance-sec-detail-title">Comparador</span>
+                      <span class="appearance-sec-detail-desc">Opciones de visualización y contraste en el comparador de instancias.</span>
+                    </div>
+                  </div>
+                  <div class="appearance-sec-detail-switches">
+                    <div class="settings-switch-card">
+                      <div class="settings-switch-info">
+                        <span class="settings-switch-title">Destacar diferencias con neón</span>
+                        <span class="settings-switch-desc">Efecto visual luminoso en los mods que varían entre las dos instancias.</span>
+                      </div>
+                      <input type="checkbox" id="setting-ui-diff-glow" class="cyber-checkbox" checked />
+                    </div>
+                    <div class="settings-switch-card">
+                      <div class="settings-switch-info">
+                        <span class="settings-switch-title">Vista compacta de mods</span>
+                        <span class="settings-switch-desc">Filas más compactas para visualizar mayor cantidad de mods en pantalla.</span>
+                      </div>
+                      <input type="checkbox" id="setting-ui-diff-compact" class="cyber-checkbox" />
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 4. Gestor de Instancias Detail -->
+                <div class="appearance-sec-detail-panel hidden" id="appearance-sec-detail-gestor" data-appearance-panel="gestor">
+                  <div class="appearance-sec-detail-header">
+                    <div class="appearance-sec-icon-badge">
+                      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path></svg>
+                    </div>
+                    <div class="appearance-sec-detail-title-col">
+                      <span class="appearance-sec-detail-title">Gestor de instancias</span>
+                      <span class="appearance-sec-detail-desc">Efectos visuales y distintivos en las tarjetas de versiones instaladas.</span>
+                    </div>
+                  </div>
+                  <div class="appearance-sec-detail-switches">
+                    <div class="settings-switch-card">
+                      <div class="settings-switch-info">
+                        <span class="settings-switch-title">Insignias de versión y loader</span>
+                        <span class="settings-switch-desc">Mostrar etiquetas visuales de Fabric, Forge o NeoForge sobre la tarjeta.</span>
+                      </div>
+                      <input type="checkbox" id="setting-ui-inst-badges" class="cyber-checkbox" checked />
+                    </div>
+                    <div class="settings-switch-card">
+                      <div class="settings-switch-info">
+                        <span class="settings-switch-title">Efecto 3D tilt en tarjetas</span>
+                        <span class="settings-switch-desc">Inclinación tridimensional suave al pasar el cursor sobre las instancias.</span>
+                      </div>
+                      <input type="checkbox" id="setting-ui-inst-tilt" class="cyber-checkbox" checked />
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 5. Servidores Detail -->
+                <div class="appearance-sec-detail-panel hidden" id="appearance-sec-detail-servidores" data-appearance-panel="servidores">
+                  <div class="appearance-sec-detail-header">
+                    <div class="appearance-sec-icon-badge">
+                      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect><rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg>
+                    </div>
+                    <div class="appearance-sec-detail-title-col">
+                      <span class="appearance-sec-detail-title">Servidores</span>
+                      <span class="appearance-sec-detail-desc">Configuración estética de la lista multijugador y estado del servidor.</span>
+                    </div>
+                  </div>
+                  <div class="appearance-sec-detail-switches">
+                    <div class="settings-switch-card">
+                      <div class="settings-switch-info">
+                        <span class="settings-switch-title">Indicador de latencia (Ping) con color</span>
+                        <span class="settings-switch-desc">Verde para ping óptimo, ámbar para medio y rojo para latencia alta.</span>
+                      </div>
+                      <input type="checkbox" id="setting-ui-server-ping" class="cyber-checkbox" checked />
+                    </div>
+                    <div class="settings-switch-card">
+                      <div class="settings-switch-info">
+                        <span class="settings-switch-title">Formato de colores Minecraft en MOTD</span>
+                        <span class="settings-switch-desc">Renderizar texto enriquecido y códigos de formato de los servidores.</span>
+                      </div>
+                      <input type="checkbox" id="setting-ui-server-motd" class="cyber-checkbox" checked />
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 6. Extras Detail -->
+                <div class="appearance-sec-detail-panel hidden" id="appearance-sec-detail-extras" data-appearance-panel="extras">
+                  <div class="appearance-sec-detail-header">
+                    <div class="appearance-sec-icon-badge">
+                      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>
+                    </div>
+                    <div class="appearance-sec-detail-title-col">
+                      <span class="appearance-sec-detail-title">Extras</span>
+                      <span class="appearance-sec-detail-desc">Elementos visuales decorativos adicionales de la interfaz.</span>
+                    </div>
+                  </div>
+                  <div class="appearance-sec-detail-switches">
+                    <div class="settings-switch-card highlight-switch">
+                      <div class="settings-switch-info">
+                        <span class="settings-switch-title">Desaparecer texto de bienvenida</span>
+                        <span class="settings-switch-desc">Oculta el texto "BIENVENIDO DE NUEVO, [Usuario]" en la pantalla de inicio. Si se desmarca, volverá a aparecer.</span>
+                      </div>
+                      <input type="checkbox" id="setting-hide-welcome-text" class="cyber-checkbox" />
+                    </div>
+                  </div>
+                </div>
+
               </div>
             </div>
 
@@ -8227,16 +9048,39 @@
               </div>
             </div>
 
-            <!-- Detail Panel 6: Actualizar -->
+            <!-- Detail Panel 6: Acerca de Ika Launcher -->
             <div class="settings-panel hidden" id="settings-panel-update">
-              <div class="settings-switch-card" style="border-color: rgba(56, 189, 248, 0.35);">
+              <!-- App Info Card -->
+              <div class="settings-switch-card" style="border-color: rgba(56, 189, 248, 0.35); background: rgba(56, 189, 248, 0.04);">
                 <div class="settings-switch-info">
-                  <span class="settings-switch-title" style="color: #38bdf8;">Ika Launcher v0.1.0 (Cyber Edition)</span>
-                  <span class="settings-switch-desc">Versión instalada y sincronizada. Canal de actualización: Estable.</span>
+                  <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
+                    <span class="settings-switch-title" style="color: #38bdf8; font-size: 15px; font-weight: 700; letter-spacing: 0.5px;">Ika Launcher</span>
+                    <span style="display: inline-block; padding: 2px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35);">v1.5.5</span>
+                    <span style="display: inline-block; padding: 2px 7px; border-radius: 9999px; font-size: 10px; font-weight: 600; background: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.35);">Estable</span>
+                  </div>
+                  <span class="settings-switch-desc" style="color: #94a3b8; font-size: 12px; line-height: 1.5;">Lanzador y comparador avanzado de Minecraft con sincronización en tiempo real, gestor de mods y soporte para Wallpaper Engine.</span>
                 </div>
-                <button type="button" class="btn btn-cyan btn-sm" id="btn-check-updates">Buscar Actualizaciones</button>
+                <button type="button" class="btn btn-cyan btn-sm" id="btn-check-updates" style="white-space: nowrap;">Buscar Actualizaciones</button>
               </div>
 
+              <!-- GitHub Repository Card -->
+              <div class="settings-switch-card" style="border-color: rgba(148, 163, 184, 0.25); background: rgba(255, 255, 255, 0.02); margin-top: 12px;">
+                <div class="settings-switch-info">
+                  <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" style="color: #f1f5f9; flex-shrink: 0;">
+                      <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/>
+                    </svg>
+                    <span class="settings-switch-title" style="color: #f1f5f9; font-weight: 600;">Repositorio en GitHub</span>
+                  </div>
+                  <span class="settings-switch-desc" style="color: #38bdf8; font-size: 12px; font-family: monospace;">https://github.com/Xamply/Ika</span>
+                </div>
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-open-github-repo" style="white-space: nowrap; display: inline-flex; align-items: center; gap: 6px;">
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+                  <span>Abrir GitHub</span>
+                </button>
+              </div>
+
+              <!-- Maintenance Section -->
               <div class="form-group" style="margin-top: 14px;">
                 <label class="form-label">Diagnóstico del Sistema y Mantenimiento</label>
                 <div class="settings-input-action-row">
@@ -8246,12 +9090,24 @@
                 <span class="settings-hint">Útil si experimentas lentitud o problemas con texturas de mods.</span>
               </div>
 
+              <!-- Reset Configuration Card -->
               <div class="settings-switch-card" style="border-color: rgba(239, 68, 68, 0.25);">
                 <div class="settings-switch-info">
                   <span class="settings-switch-title" style="color: #f87171;">Restablecer configuración</span>
                   <span class="settings-switch-desc">Restaura todos los valores del lanzador a su estado predeterminado.</span>
                 </div>
                 <button type="button" class="btn btn-danger-soft btn-sm" id="btn-reset-launcher-settings">Restablecer</button>
+              </div>
+
+              <!-- Memorial Dedication Card -->
+              <div class="settings-memorial-card" style="margin-top: 20px; padding: 14px 18px; border-radius: 12px; background: linear-gradient(135deg, rgba(244, 114, 182, 0.08) 0%, rgba(139, 92, 246, 0.08) 100%); border: 1px solid rgba(244, 114, 182, 0.22); display: flex; align-items: center; justify-content: center; gap: 10px; text-align: center;">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" style="color: #f472b6; flex-shrink: 0;">
+                  <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>
+                </svg>
+                <span style="font-size: 13px; font-weight: 500; letter-spacing: 0.3px; color: #fbcfe8; font-style: italic;">En memoria de Laika, la mejor compañera</span>
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" style="color: #f472b6; flex-shrink: 0;">
+                  <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>
+                </svg>
               </div>
             </div>
 
@@ -8358,9 +9214,6 @@
         <div class="modal-footer cover-adjuster-footer">
           <button type="button" class="btn btn-secondary" id="btn-cancel-cover-adjust">Cancelar</button>
           <button type="button" class="btn btn-purple" id="btn-apply-cover-adjust">
-            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="20 6 9 17 4 12"></polyline>
-            </svg>
             <span>Guardar y Aplicar Portada</span>
           </button>
         </div>

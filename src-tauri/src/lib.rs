@@ -1835,8 +1835,13 @@ fn parse_steam_wallpaper_folder(folder: &std::path::Path) -> Option<SteamWallpap
         })
     };
 
+    if !actual_video_file.exists() {
+        return None;
+    }
+
     let size_mb = if is_scene && actual_video_file.extension().and_then(|e| e.to_str()).map(|ext| ext.eq_ignore_ascii_case("json") || ext.eq_ignore_ascii_case("html")).unwrap_or(false) {
         let total_bytes: u64 = walkdir::WalkDir::new(folder)
+            .max_depth(3)
             .into_iter()
             .filter_map(|e| e.ok())
             .filter_map(|e| e.metadata().ok())
@@ -1896,21 +1901,6 @@ fn parse_steam_wallpaper_folder(folder: &std::path::Path) -> Option<SteamWallpap
             }
         }
 
-        // 3. Fallback: Query Steam API details and download preview thumbnail
-        if any_img_str.is_empty() && !workshop_id.is_empty() && workshop_id.chars().all(|c| c.is_ascii_digit()) {
-            if let Ok(details) = fetch_steam_item_details(workshop_id.clone()) {
-                if !details.preview_url.is_empty() && details.preview_url.starts_with("http") {
-                    let dest = folder.join("preview.jpg");
-                    let _ = create_silent_command("curl.exe")
-                        .args(["-s", "-L", "--max-time", "6", "-o", &dest.to_string_lossy(), &details.preview_url])
-                        .output();
-                    if dest.exists() {
-                        any_img_str = dest.to_string_lossy().to_string();
-                    }
-                }
-            }
-        }
-
         any_img_str
     };
 
@@ -1936,12 +1926,44 @@ fn get_steam_candidate_dirs() -> Vec<std::path::PathBuf> {
         std::path::PathBuf::from(r"E:\SteamLibrary\steamapps\workshop\content\431960"),
         std::path::PathBuf::from(r"C:\dev\Comparer\tools\steamcmd\steamapps\workshop\content\431960"),
         std::path::PathBuf::from(r"C:\dev\Comparer\tools\depotdownloader\downloads\431960"),
+        std::path::PathBuf::from(r"C:\dev\Comparer-RAM\tools\steamcmd\steamapps\workshop\content\431960"),
+        std::path::PathBuf::from(r"C:\dev\Comparer-RAM\tools\depotdownloader\downloads\431960"),
     ];
+
     if let Ok(cur) = std::env::current_dir() {
         dirs.push(cur.join("tools").join("steamcmd").join("steamapps").join("workshop").join("content").join("431960"));
         dirs.push(cur.join("tools").join("depotdownloader").join("downloads").join("431960"));
     }
-    dirs
+
+    // Check Steam's libraryfolders.vdf to find workshop content on any configured Steam library
+    for vdf_path in [
+        r"C:\Program Files (x86)\Steam\steamapps\libraryfolders.vdf",
+        r"C:\Program Files\Steam\steamapps\libraryfolders.vdf",
+        r"D:\SteamLibrary\steamapps\libraryfolders.vdf",
+        r"E:\SteamLibrary\steamapps\libraryfolders.vdf",
+    ] {
+        if let Ok(content) = std::fs::read_to_string(vdf_path) {
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("\"path\"") {
+                    let parts: Vec<&str> = trimmed.split('"').collect();
+                    if parts.len() >= 4 {
+                        let steam_lib_path = parts[3].replace(r"\\", r"\");
+                        let p = std::path::PathBuf::from(steam_lib_path).join("steamapps").join("workshop").join("content").join("431960");
+                        dirs.push(p);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut unique = Vec::new();
+    for d in dirs {
+        if !unique.contains(&d) {
+            unique.push(d);
+        }
+    }
+    unique
 }
 
 fn scan_steam_workshop_wallpapers_inner() -> Vec<SteamWallpaperInfo> {
@@ -2107,15 +2129,16 @@ async fn download_steam_workshop_item(app: tauri::AppHandle, id: String) -> Resu
         }
 
         // 2. Target folder for DepotDownloaderMod
-        let target_base = std::path::PathBuf::from(r"C:\dev\Comparer\tools\depotdownloader\downloads\431960");
+        let current_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let target_base = current_dir.join("tools").join("depotdownloader").join("downloads").join("431960");
         let target_folder = target_base.join(&clean_id);
         let _ = std::fs::create_dir_all(&target_folder);
 
         // 3. Find DepotDownloaderMod.exe
         let depot_paths = [
-            std::path::PathBuf::from(r"C:\dev\Comparer\tools\depotdownloader\DepotDownloaderMod.exe"),
-            std::env::current_dir().unwrap_or_default().join("tools").join("depotdownloader").join("DepotDownloaderMod.exe"),
+            current_dir.join("tools").join("depotdownloader").join("DepotDownloaderMod.exe"),
             std::path::PathBuf::from(r"tools\depotdownloader\DepotDownloaderMod.exe"),
+            std::path::PathBuf::from(r"C:\dev\Comparer\tools\depotdownloader\DepotDownloaderMod.exe"),
         ];
 
         let depot_exe = depot_paths.iter().find(|p| p.exists())
@@ -2131,112 +2154,172 @@ async fn download_steam_workshop_item(app: tauri::AppHandle, id: String) -> Resu
         let mut last_err = String::new();
         let pct_re = regex::Regex::new(r"^\s*(\d{1,3}(?:\.\d{1,2})?)%\s+(.*)$").unwrap();
 
-        // Retry loop: up to 3 attempts with account adgjl1182
-        for attempt in 1..=3 {
+        fn get_steam_download_accounts(work_dir: &std::path::Path) -> Vec<(String, String)> {
+            let local_cfg = work_dir.join("accounts.json");
+            if local_cfg.exists() {
+                if let Ok(content) = std::fs::read_to_string(&local_cfg) {
+                    if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
+                        let mut list = Vec::new();
+                        for item in parsed {
+                            if let (Some(u), Some(p)) = (item.get("username").and_then(|v| v.as_str()), item.get("password").and_then(|v| v.as_str())) {
+                                let u_str = u.trim().to_string();
+                                let p_str = p.trim().to_string();
+                                if !u_str.is_empty() && !p_str.is_empty() {
+                                    list.push((u_str, p_str));
+                                }
+                            }
+                        }
+                        if !list.is_empty() {
+                            return list;
+                        }
+                    }
+                }
+            }
+            vec![
+                ("adgjl1182".to_string(), "QETUO99999".to_string()),
+                ("premexilmenledgconis".to_string(), "3pXbHZjlDb".to_string()),
+            ]
+        }
+
+        let accounts = get_steam_download_accounts(work_dir);
+        let total_accs = accounts.len();
+        let mut downloaded_ok = false;
+
+        for (idx, (username, password)) in accounts.into_iter().enumerate() {
             let _ = app.emit("steam-download-progress", serde_json::json!({
                 "id": &clean_id,
-                "percent": 10,
-                "status": if attempt > 1 { format!("Reintentando conexión ({}/3)...", attempt) } else { "Conectando a Steam...".to_string() }
+                "percent": 10 + (idx as u32 * 5),
+                "status": if total_accs > 1 {
+                    format!("Conectando a Steam ({}/{})...", idx + 1, total_accs)
+                } else {
+                    "Conectando a Steam...".to_string()
+                }
             }));
 
             let mut cmd = create_silent_command(depot_exe.to_str().unwrap_or("DepotDownloaderMod.exe"));
-            cmd.current_dir(work_dir)
-                .args([
-                    "-app", "431960",
-                    "-pubfile", &clean_id,
-                    "-username", "adgjl1182",
-                    "-password", "QETUO99999",
-                    "-dir", target_folder.to_str().unwrap_or(""),
-                    "-verify-all",
-                ])
+            cmd.current_dir(work_dir);
+
+            let cmd_args: Vec<String> = vec![
+                "-app".to_string(), "431960".to_string(),
+                "-pubfile".to_string(), clean_id.clone(),
+                "-dir".to_string(), target_folder.to_str().unwrap_or("").to_string(),
+                "-verify-all".to_string(),
+                "-username".to_string(), username.clone(),
+                "-password".to_string(), password,
+            ];
+
+            cmd.args(&cmd_args)
+                .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped());
 
-            let mut child = match cmd.spawn() {
-                Ok(c) => c,
-                Err(e) => {
-                    last_err = e.to_string();
-                    std::thread::sleep(std::time::Duration::from_millis(1500));
-                    continue;
-                }
-            };
+            if let Ok(mut child) = cmd.spawn() {
+                let stderr_thread = {
+                    let stderr = child.stderr.take();
+                    std::thread::spawn(move || {
+                        let mut s = String::new();
+                        if let Some(pipe) = stderr {
+                            let reader = BufReader::new(pipe);
+                            for l in reader.lines().flatten() {
+                                s.push_str(&l);
+                                s.push('\n');
+                            }
+                        }
+                        s
+                    })
+                };
 
-            // Read stderr in background thread
-            let stderr_thread = {
-                let stderr = child.stderr.take();
-                std::thread::spawn(move || {
-                    let mut s = String::new();
-                    if let Some(pipe) = stderr {
-                        let reader = BufReader::new(pipe);
-                        for l in reader.lines().flatten() {
-                            s.push_str(&l);
-                            s.push('\n');
+                if let Some(stdout) = child.stdout.take() {
+                    let reader = BufReader::new(stdout);
+                    for line in reader.lines().flatten() {
+                        let trim = line.trim();
+                        if trim.is_empty() { continue; }
+
+                        if trim.contains("Connecting to Steam") {
+                            let _ = app.emit("steam-download-progress", serde_json::json!({
+                                "id": &clean_id,
+                                "percent": 15,
+                                "status": "Conectando a Steam..."
+                            }));
+                        } else if trim.contains("Logging '") {
+                            let _ = app.emit("steam-download-progress", serde_json::json!({
+                                "id": &clean_id,
+                                "percent": 25,
+                                "status": "Autenticando..."
+                            }));
+                        } else if trim.contains("STEAM GUARD") || trim.contains("Steam Guard") || trim.contains("auth code sent to") {
+                            last_err = format!("La cuenta '{}' requiere verificación Steam Guard.", username);
+                            let _ = child.kill();
+                            break;
+                        } else if trim.contains("Failed to authenticate") || trim.contains("InvalidPassword") || trim.contains("AccountDisabled") {
+                            last_err = format!("La cuenta '{}' no pudo autenticar ({})", username, trim);
+                            let _ = child.kill();
+                            break;
+                        } else if trim.contains("Got depot key") {
+                            let _ = app.emit("steam-download-progress", serde_json::json!({
+                                "id": &clean_id,
+                                "percent": 35,
+                                "status": "Licencia obtenida..."
+                            }));
+                        } else if trim.contains("Downloading depot") || trim.contains("Pre-allocating") {
+                            let _ = app.emit("steam-download-progress", serde_json::json!({
+                                "id": &clean_id,
+                                "percent": 40,
+                                "status": "Descargando archivos..."
+                            }));
+                        } else if let Some(caps) = pct_re.captures(trim) {
+                            let file_pct: f32 = caps.get(1).and_then(|m| m.as_str().parse().ok()).unwrap_or(0.0);
+                            let file_name = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+                            let short_name = std::path::Path::new(file_name)
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or(file_name);
+                            let overall = (40.0 + (file_pct * 0.55)).min(95.0) as u32;
+                            let _ = app.emit("steam-download-progress", serde_json::json!({
+                                "id": &clean_id,
+                                "percent": overall,
+                                "status": format!("{:.0}% {}", file_pct, short_name)
+                            }));
                         }
                     }
-                    s
-                })
-            };
+                }
 
-            // Read stdout in real time and emit live progress
-            if let Some(stdout) = child.stdout.take() {
-                let reader = BufReader::new(stdout);
-                for line in reader.lines().flatten() {
-                    let trim = line.trim();
-                    if trim.is_empty() { continue; }
-
-                    if trim.contains("Connecting to Steam") {
-                        let _ = app.emit("steam-download-progress", serde_json::json!({
-                            "id": &clean_id,
-                            "percent": 15,
-                            "status": "Conectando a Steam..."
-                        }));
-                    } else if trim.contains("Logging '") {
-                        let _ = app.emit("steam-download-progress", serde_json::json!({
-                            "id": &clean_id,
-                            "percent": 25,
-                            "status": "Autenticando..."
-                        }));
-                    } else if trim.contains("Got depot key") {
-                        let _ = app.emit("steam-download-progress", serde_json::json!({
-                            "id": &clean_id,
-                            "percent": 35,
-                            "status": "Licencia obtenida..."
-                        }));
-                    } else if trim.contains("Downloading depot") || trim.contains("Pre-allocating") {
-                        let _ = app.emit("steam-download-progress", serde_json::json!({
-                            "id": &clean_id,
-                            "percent": 40,
-                            "status": "Preparando descarga..."
-                        }));
-                    } else if let Some(caps) = pct_re.captures(trim) {
-                        let file_pct: f32 = caps.get(1).and_then(|m| m.as_str().parse().ok()).unwrap_or(0.0);
-                        let file_name = caps.get(2).map(|m| m.as_str()).unwrap_or("");
-                        let short_name = std::path::Path::new(file_name)
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or(file_name);
-                        let overall = (40.0 + (file_pct * 0.55)).min(95.0) as u32;
-                        let _ = app.emit("steam-download-progress", serde_json::json!({
-                            "id": &clean_id,
-                            "percent": overall,
-                            "status": format!("{:.0}% {}", file_pct, short_name)
-                        }));
-                    }
+                let _ = child.wait();
+                let err_str = stderr_thread.join().unwrap_or_default();
+                if !err_str.is_empty() {
+                    last_err = err_str;
                 }
             }
 
-            let _ = child.wait();
-            let err_str = stderr_thread.join().unwrap_or_default();
-            if !err_str.is_empty() {
-                last_err = err_str;
-            }
-
-            // Post-process downloaded files in target_folder
+            // Check if files downloaded into target_folder
             if target_folder.exists() {
-                let mp4_path = target_folder.join("preview.mp4");
+                if let Ok(entries) = std::fs::read_dir(&target_folder) {
+                    if entries.flatten().any(|e| e.file_name() != ".DepotDownloader") {
+                        downloaded_ok = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if !downloaded_ok {
+            if target_folder.exists() {
+                let _ = std::fs::remove_dir_all(&target_folder);
+            }
+            return Err(format!(
+                "No se pudo descargar automáticamente: Las cuentas de servicio requieren actualización en tools/depotdownloader/accounts.json ({})",
+                if last_err.is_empty() { "Steam Guard activado".to_string() } else { last_err }
+            ));
+        }
+
+        // Post-process downloaded files in target_folder or check candidate dirs
+        for base in get_steam_candidate_dirs() {
+            let item_folder = base.join(&clean_id);
+            if item_folder.exists() {
+                let mp4_path = item_folder.join("preview.mp4");
 
                 let mut has_video = false;
-                if let Ok(entries) = std::fs::read_dir(&target_folder) {
+                if let Ok(entries) = std::fs::read_dir(&item_folder) {
                     for entry in entries.flatten() {
                         if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
                             if ext.eq_ignore_ascii_case("mp4") || ext.eq_ignore_ascii_case("webm") {
@@ -2253,10 +2336,10 @@ async fn download_steam_workshop_item(app: tauri::AppHandle, id: String) -> Resu
                         "percent": 96,
                         "status": "Generando animación y optimizando fondo..."
                     }));
-                    let _ = generate_animated_preview_for_folder(&target_folder);
+                    let _ = generate_animated_preview_for_folder(&item_folder);
                 }
 
-                let proj_path = target_folder.join("project.json");
+                let proj_path = item_folder.join("project.json");
                 if !proj_path.exists() {
                     let title = fetch_steam_item_details(clean_id.clone())
                         .map(|d| d.title)
@@ -2269,25 +2352,6 @@ async fn download_steam_workshop_item(app: tauri::AppHandle, id: String) -> Resu
                     let _ = std::fs::write(&proj_path, minimal.to_string());
                 }
 
-                if let Some(info) = parse_steam_wallpaper_folder(&target_folder) {
-                    let _ = app.emit("steam-download-progress", serde_json::json!({
-                        "id": &clean_id,
-                        "percent": 100,
-                        "status": "✓ Descarga completa"
-                    }));
-                    return Ok(info);
-                }
-            }
-
-            if attempt < 3 {
-                std::thread::sleep(std::time::Duration::from_millis(2000));
-            }
-        }
-
-        // Final check across all candidate dirs
-        for base in get_steam_candidate_dirs() {
-            let item_folder = base.join(&clean_id);
-            if item_folder.exists() {
                 if let Some(info) = parse_steam_wallpaper_folder(&item_folder) {
                     let _ = app.emit("steam-download-progress", serde_json::json!({
                         "id": &clean_id,
@@ -2299,11 +2363,19 @@ async fn download_steam_workshop_item(app: tauri::AppHandle, id: String) -> Resu
             }
         }
 
-        Err(if !last_err.is_empty() {
-            format!("Error al descargar: {}", last_err.lines().next().unwrap_or("Fallo de conexión"))
+        let err_message = if !last_err.is_empty() {
+            format!("Error al descargar: {}", last_err.lines().next().unwrap_or("Fallo de conexión con Steam"))
         } else {
-            format!("No se pudo descargar el item {}.", clean_id)
-        })
+            format!("No se pudo descargar automáticamente el item {}. La cuenta de descarga requiere actualización en accounts.json.", clean_id)
+        };
+
+        let _ = app.emit("steam-download-progress", serde_json::json!({
+            "id": &clean_id,
+            "percent": 0,
+            "status": "Error en descarga"
+        }));
+
+        Err(err_message)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -2317,13 +2389,18 @@ fn sync_wallpaper_engine_desktop(_video_path: String) -> Result<(), String> {
 
 #[tauri::command(async)]
 fn launch_steamcmd_login() -> Result<String, String> {
-    let steamcmd_dir = std::path::PathBuf::from(r"C:\dev\Comparer\tools\steamcmd");
+    let cur = std::env::current_dir().unwrap_or_default();
+    let steamcmd_paths = [
+        cur.join("tools").join("steamcmd"),
+        std::path::PathBuf::from(r"tools\steamcmd"),
+        std::path::PathBuf::from(r"C:\dev\Comparer\tools\steamcmd"),
+    ];
+    let steamcmd_dir = steamcmd_paths.iter().find(|p| p.join("steamcmd.exe").exists())
+        .cloned()
+        .ok_or_else(|| "No se encontró tools/steamcmd/steamcmd.exe".to_string())?;
+
     let helper_bat = steamcmd_dir.join("login_helper.bat");
     let exe_path = steamcmd_dir.join("steamcmd.exe");
-
-    if !exe_path.exists() {
-        return Err("No se encontró tools/steamcmd/steamcmd.exe".to_string());
-    }
 
     let username = "REMOVED_STEAM_USER";
     let cmd = if helper_bat.exists() {
@@ -2338,6 +2415,44 @@ fn launch_steamcmd_login() -> Result<String, String> {
         .map_err(|e| format!("Error al abrir consola de SteamCMD: {}", e))?;
 
     Ok("Consola de SteamCMD abierta.".to_string())
+}
+
+#[tauri::command(async)]
+fn launch_steam_qr_login() -> Result<String, String> {
+    let cur = std::env::current_dir().unwrap_or_default();
+    let depot_paths = [
+        cur.join("tools").join("depotdownloader").join("DepotDownloaderMod.exe"),
+        std::path::PathBuf::from(r"tools\depotdownloader\DepotDownloaderMod.exe"),
+        std::path::PathBuf::from(r"C:\dev\Comparer\tools\depotdownloader\DepotDownloaderMod.exe"),
+    ];
+    let depot_exe = depot_paths.iter().find(|p| p.exists())
+        .cloned()
+        .ok_or_else(|| "No se encontró DepotDownloaderMod.exe".to_string())?;
+    let work_dir = depot_exe.parent().unwrap_or_else(|| std::path::Path::new("."));
+
+    let cmd = format!("start \"Inicio de sesión QR de Steam - ModComparer\" cmd /k \"\"{}\" -app 431960 -qr -remember-password\"", depot_exe.display());
+
+    let _ = std::process::Command::new("cmd.exe")
+        .current_dir(work_dir)
+        .args(["/c", &cmd])
+        .spawn()
+        .map_err(|e| format!("Error al abrir consola de código QR: {}", e))?;
+
+    Ok("Ventana de código QR abierta. Escanéalo con la app de Steam en tu móvil para vincular.".to_string())
+}
+
+#[tauri::command(async)]
+fn open_steam_workshop_item(id: String) -> Result<(), String> {
+    let clean_id = id.chars().filter(|c| c.is_ascii_digit()).collect::<String>();
+    if clean_id.is_empty() {
+        return Err("ID de Steam Workshop no válido".to_string());
+    }
+    let url = format!("steam://url/CommunityFilePage/{}", clean_id);
+    let _ = std::process::Command::new("cmd.exe")
+        .args(["/c", "start", &url])
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command(async)]
@@ -5862,7 +5977,7 @@ fn get_instance_log_status(instance_path: String) -> InstanceLogStatus {
                 }
             }
 
-            let start_last = if total > 8 { total - 8 } else { 0 };
+            let start_last = if total > 150 { total - 150 } else { 0 };
             lines = all_lines[start_last..].to_vec();
         }
     }
@@ -7306,6 +7421,8 @@ pub fn run() {
             fetch_steam_item_details,
             download_steam_workshop_item,
             launch_steamcmd_login,
+            launch_steam_qr_login,
+            open_steam_workshop_item,
             check_steam_item_installed,
             read_local_wallpaper_blob,
             get_all_instances,
@@ -7409,6 +7526,38 @@ mod tests {
             assert!(std::path::Path::new(&item.video_path).exists(), "Video path must exist on disk");
         }
         assert!(items.len() >= 3, "Should have found at least the 3 downloaded test items");
+    }
+
+    #[test]
+    fn test_downloaded_wallpapers() {
+        let items = get_all_downloaded_wallpapers_inner();
+        println!("Found {} downloaded wallpapers", items.len());
+        let missing_previews = items.iter().filter(|i| i.preview_path.is_none()).count();
+        println!("Missing previews: {}", missing_previews);
+        for item in items.iter().filter(|i| i.preview_path.is_none()) {
+            println!("  - No preview: ID={}, Title={}, is_scene={}, Video={}", item.id, item.title, item.is_scene, item.video_path);
+        }
+        for item in &items {
+            if item.file_size_mb <= 0.0 || item.file_size_mb.is_nan() {
+                println!("  - Invalid size: ID={}, Title={}, Size={}", item.id, item.title, item.file_size_mb);
+            }
+        }
+    }
+
+    #[test]
+    fn test_fetch_steam_online() {
+        let res = fetch_steam_workshop_online_inner("".to_string(), "trend".to_string(), "all".to_string(), 1);
+        match res {
+            Ok(items) => {
+                println!("Steam online items found: {}", items.len());
+                for item in items.iter().take(5) {
+                    println!("  - Online item: ID={}, Title={}, Installed={}, Preview={}", item.id, item.title, item.is_installed, item.preview_url);
+                }
+            }
+            Err(e) => {
+                println!("Steam online fetch ERROR: {}", e);
+            }
+        }
     }
 }
 
