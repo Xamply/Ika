@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Ika Launcher",
-  "version": "1.5.5",
+  "version": "1.5.6",
   "identifier": "com.modcomparer.desktop",
   "build": {
     "frontendDist": "../dist",
@@ -23,6 +23,7 @@
         "decorations": false,
         "transparent": true,
         "backgroundColor": "#00000000",
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-direct-composition-video-overlays",
         "visible": false
       }
     ],
@@ -30,13 +31,17 @@
       "csp": null,
       "assetProtocol": {
         "enable": true,
-        "scope": ["**"]
+        "scope": [
+          "**"
+        ]
       }
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": [
+      "nsis"
+    ],
     "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
@@ -48,7 +53,9 @@
     "windows": {
       "nsis": {
         "installMode": "currentUser",
-        "languages": ["Spanish"]
+        "languages": [
+          "Spanish"
+        ]
       }
     },
     "android": {

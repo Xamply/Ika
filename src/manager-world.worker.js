@@ -3,7 +3,8 @@
 // takes seconds after a cold start: here that never blocks the launcher's UI thread.
 // three.js r128 + its classic examples come from /vendor/three-r128 (the design was tuned with r128's
 // lighting and colour pipeline, newer versions change it).
-// In:  { type: "init", canvas, consts: { BASE_Y, HALF_W, HALF_H }, layout } | { type: "layout", layout } | { type: "draw", t }
+// In:  { type: "init", canvas | bitmaps: true, consts: { BASE_Y, HALF_W, HALF_H }, layout } | { type: "layout", layout } | { type: "draw", t }
+// Out (with `bitmaps`, instead of drawing on a canvas of the page): { type: "frame", bitmap } after every draw
 // Out: { type: "ready" } once the first frame is drawn | { type: "failed", error }
 
 const THREE_FILES = [
@@ -873,10 +874,15 @@ function buildWorld(T, cv) {
   return { resize, draw };
 }
 
-let world = null, pendingT = 0, raf = 0;
+let world = null, pendingT = 0, raf = 0, canvas = null, bitmaps = false;
 function frame() {
   raf = 0;
   world.draw(pendingT);
+  // Back to the page, which shows it in its next frame together with everything else.
+  if (bitmaps && canvas.width > 2) {
+    const bitmap = canvas.transferToImageBitmap();
+    self.postMessage({ type: "frame", bitmap }, [bitmap]);
+  }
 }
 
 self.onmessage = ({ data: m }) => {
@@ -885,10 +891,13 @@ self.onmessage = ({ data: m }) => {
       importScripts(...THREE_FILES.map((file) => `/vendor/three-r128/${file}`));
       ({ BASE_Y, HALF_W, HALF_H } = m.consts);
       layout = m.layout;
-      world = buildWorld(self.THREE, m.canvas);
+      bitmaps = !!m.bitmaps;
+      canvas = m.canvas || new OffscreenCanvas(2, 2);
+      world = buildWorld(self.THREE, canvas);
       if (!world) throw new Error("WebGL no disponible");
       world.resize();
-      world.draw(2);
+      pendingT = 2;
+      frame();
       self.postMessage({ type: "ready" });
     } catch (err) {
       world = null;
@@ -901,7 +910,14 @@ self.onmessage = ({ data: m }) => {
     // resizing clears the canvas: repaint even if the section is not animating right now
     if (!raf) raf = requestAnimationFrame(frame);
   } else if (m.type === "draw") {
+    // Drawn at once, not on this worker's next display frame: the page asks during its own frame,
+    // and waiting one more refresh made the island arrive in a separate frame (twice the
+    // compositing work of the scene).
     pendingT = m.t;
-    if (world && !raf) raf = requestAnimationFrame(frame);
+    if (world) {
+      if (raf) cancelAnimationFrame(raf);
+      raf = 0;
+      frame();
+    }
   }
 };

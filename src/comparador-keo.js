@@ -1,6 +1,54 @@
 // Comparador header stage: instance cards with animated neon borders (WebGL), the plasma orb with
 // its energy streams and the stat panels. Visual code from comparador-keo.html, scoped to one root
 // element; the launcher fills the texts and thumbnails and decides when it animates.
+import { onTick } from "./frame-clock.js";
+import { themedRgb, DEFAULT_THEME } from "./theme/palette.js";
+
+// The stage is drawn in Cyber Índigo; in another theme every colour of it (the sampled border
+// profiles, the streams, the sparks and the orb's light) takes that theme's (src/theme/palette.js).
+const themeNow = () => document.body.dataset.theme || DEFAULT_THEME;
+const tcCache = new Map();
+function tcRgb(rgb) {
+  const theme = themeNow();
+  if (theme === DEFAULT_THEME) return rgb;
+  const key = `${theme}|${rgb[0]},${rgb[1]},${rgb[2]}`;
+  let out = tcCache.get(key);
+  if (!out) tcCache.set(key, (out = themedRgb(rgb, theme)));
+  return out;
+}
+// '#rrggbb' / 'rgb(r,g,b)' / 'rgba(r,g,b,a)' in the current theme
+function tc(color) {
+  const h = /^#([0-9a-f]{6})$/i.exec(color);
+  if (h) return `rgb(${tcRgb([0, 2, 4].map((i) => parseInt(h[1].slice(i, i + 2), 16))).join(",")})`;
+  const m = /^rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)$/.exec(color);
+  if (!m) return color;
+  const v = tcRgb([+m[1], +m[2], +m[3]]).join(",");
+  return m[4] === undefined ? `rgb(${v})` : `rgba(${v},${m[4]})`;
+}
+// An image (the orb's light, the cube) with its colours in the current theme.
+function themedImage(img) {
+  if (themeNow() === DEFAULT_THEME) return img;
+  const c = document.createElement("canvas");
+  c.width = img.naturalWidth || img.width;
+  c.height = img.naturalHeight || img.height;
+  const x = c.getContext("2d", { willReadFrequently: true });
+  x.drawImage(img, 0, 0);
+  const data = x.getImageData(0, 0, c.width, c.height);
+  const px = data.data;
+  const seen = new Map();
+  for (let i = 0; i < px.length; i += 4) {
+    if (px[i] + px[i + 1] + px[i + 2] < 24) continue;
+    const key = ((px[i] >> 2) << 12) | ((px[i + 1] >> 2) << 6) | (px[i + 2] >> 2);
+    let v = seen.get(key);
+    if (!v) seen.set(key, (v = tcRgb([px[i], px[i + 1], px[i + 2]])));
+    px[i] = v[0];
+    px[i + 1] = v[1];
+    px[i + 2] = v[2];
+  }
+  x.putImageData(data, 0, 0);
+  return c;
+}
+
 export function createKeoStage(root) {
   // The composition is symmetric about one vertical axis, the orb's: the stage is twice that wide, so
   // the orb is its middle, and each container of the right side is the mirror of the left one
@@ -104,15 +152,18 @@ export function createKeoStage(root) {
     const PROF = BORDER_PROFILES;
 
     // ---- profile texture: 4 rows per item (line, neighbours, inner glow, outer glow), 512 samples around the loop
-    const parse = hex => { const out = []; for (let i = 0; i < hex.length; i += 6) out.push([0, 2, 4].map(o => parseInt(hex.substr(i + o, 2), 16))); return out; };
+    const parse = hex => { const out = []; for (let i = 0; i < hex.length; i += 6) out.push(tcRgb([0, 2, 4].map(o => parseInt(hex.substr(i + o, 2), 16)))); return out; };
     const resample = (arr) => { const n = arr.length, out = []; for (let i = 0; i < NP; i++){ const f = i / NP * n, a = Math.floor(f) % n, b = (a + 1) % n, w = f - Math.floor(f); out.push([0, 1, 2].map(c => arr[a][c] * (1 - w) + arr[b][c] * w)); } return out; };
-    const tex = new Uint8Array(NP * ROWS * 4);
-    ITEMS.forEach((it, r) => {
-      ['core', 'near', 'inner', 'outer'].forEach((layer, j) => {
-        const row = resample(parse(PROF[it.prof][layer]));
-        for (let i = 0; i < NP; i++){ const o = ((r * 4 + j) * NP + i) * 4; tex[o] = row[i][0]; tex[o + 1] = row[i][1]; tex[o + 2] = row[i][2]; tex[o + 3] = 255; }
+    const profileTexture = () => {
+      const tex = new Uint8Array(NP * ROWS * 4);
+      ITEMS.forEach((it, r) => {
+        ['core', 'near', 'inner', 'outer'].forEach((layer, j) => {
+          const row = resample(parse(PROF[it.prof][layer]));
+          for (let i = 0; i < NP; i++){ const o = ((r * 4 + j) * NP + i) * 4; tex[o] = row[i][0]; tex[o + 1] = row[i][1]; tex[o + 2] = row[i][2]; tex[o + 3] = 255; }
+        });
       });
-    });
+      return tex;
+    };
 
     // ---- strip geometry along each outline
     const NS = 'http://www.w3.org/2000/svg';
@@ -216,7 +267,12 @@ export function createKeoStage(root) {
     gl.enableVertexAttribArray(aCfg); gl.vertexAttribPointer(aCfg, 4, gl.FLOAT, false, 44, 24);
     gl.enableVertexAttribArray(aW);   gl.vertexAttribPointer(aW, 1, gl.FLOAT, false, 44, 40);
     const t0 = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t0);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, NP, ROWS, 0, gl.RGBA, gl.UNSIGNED_BYTE, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, NP, ROWS, 0, gl.RGBA, gl.UNSIGNED_BYTE, profileTexture());
+    window.addEventListener('ika-theme', () => {
+      gl.bindTexture(gl.TEXTURE_2D, t0);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, NP, ROWS, 0, gl.RGBA, gl.UNSIGNED_BYTE, profileTexture());
+      draw(lastT);
+    });
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
@@ -253,7 +309,7 @@ export function createKeoStage(root) {
     meas.setAttribute('width', '0'); meas.setAttribute('height', '0');
     meas.style.cssText = 'position:absolute;left:0;top:0;width:0;height:0;overflow:hidden;visibility:hidden';
     document.body.appendChild(meas);
-    const parse = hex => { const out = []; for (let i = 0; i < hex.length; i += 6) out.push([0, 2, 4].map(o => parseInt(hex.substr(i + o, 2), 16))); return out; };
+    const parse = hex => { const out = []; for (let i = 0; i < hex.length; i += 6) out.push(tcRgb([0, 2, 4].map(o => parseInt(hex.substr(i + o, 2), 16)))); return out; };
     const css = col => `rgb(${col[0]},${col[1]},${col[2]})`;
     const items = Object.keys(PROF).filter((k) => k !== 'active').map((k, ki) => {
       const core = parse(PROF[k].core), near = parse(PROF[k].near), inner = parse(PROF[k].inner), outer = parse(PROF[k].outer), n = core.length;
@@ -486,7 +542,7 @@ export function createKeoStage(root) {
     img.onload = () => {
       if (gl){
         tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, img);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, themedImage(img));
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -496,6 +552,11 @@ export function createKeoStage(root) {
       draw(lastT, lastMood);
     };
     img.src = './comparador/orb-light.png';
+    window.addEventListener('ika-theme', () => {
+      if (!ready) return;
+      if (gl && tex){ gl.bindTexture(gl.TEXTURE_2D, tex); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, themedImage(img)); }
+      draw(lastT, lastMood);
+    });
     let lastT = 3.2, lastMood = 0.8;
     function draw(t, mood){
       lastT = t; lastMood = mood;
@@ -563,17 +624,17 @@ export function createKeoStage(root) {
     function grads(){
       const lin = (x0, x1, stops) => { const g = ctx.createLinearGradient(x0, 0, x1, 0); stops.forEach(([o,c]) => g.addColorStop(o,c)); return g; };
       const ring = {
-        outer: lin(718, 915, [[0,'#0f48ff'],[.44,'#2a40ff'],[.56,'#5a1cff'],[1,'#8c14ff']]),
-        mid:   lin(718, 915, [[0,'#1c80ff'],[.44,'#3a66ff'],[.56,'#8434ff'],[1,'#b830ff']]),
-        core:  lin(718, 915, [[0,'#56b0ff'],[.45,'#7f8cff'],[.55,'#a878ff'],[1,'#d878ff']]),
-        hot:   lin(718, 915, [[0,'#b4e2ff'],[.5,'#c8bcff'],[1,'#ecbcff']]),
+        outer: lin(718, 915, [[0,tc('#0f48ff')],[.44,tc('#2a40ff')],[.56,tc('#5a1cff')],[1,tc('#8c14ff')]]),
+        mid:   lin(718, 915, [[0,tc('#1c80ff')],[.44,tc('#3a66ff')],[.56,tc('#8434ff')],[1,tc('#b830ff')]]),
+        core:  lin(718, 915, [[0,tc('#56b0ff')],[.45,tc('#7f8cff')],[.55,tc('#a878ff')],[1,tc('#d878ff')]]),
+        hot:   lin(718, 915, [[0,tc('#b4e2ff')],[.5,tc('#c8bcff')],[1,tc('#ecbcff')]]),
       };
       G = {
         ring,
         ringHot: {outer: ring.outer, mid: ring.mid, core: ring.hot},
-        L: {outer:'#0f40ff', mid:'#1a66ff', core:'#3c98ff'},
-        R: {outer:'#6014ff', mid:'#9a28ff', core:'#c070ff'},
-        stem: {outer:'#4a2cff', mid:'#6a40ff', core:'#b4a0ff'},
+        L: {outer:tc('#0f40ff'), mid:tc('#1a66ff'), core:tc('#3c98ff')},
+        R: {outer:tc('#6014ff'), mid:tc('#9a28ff'), core:tc('#c070ff')},
+        stem: {outer:tc('#4a2cff'), mid:tc('#6a40ff'), core:tc('#b4a0ff')},
       };
     }
 
@@ -614,13 +675,13 @@ export function createKeoStage(root) {
     }
     function dot(x, y, r, c){
       const g = ctx.createRadialGradient(x, y, 0, x, y, r);
-      g.addColorStop(0, c); g.addColorStop(1, 'rgba(0,0,0,0)');
+      g.addColorStop(0, c); g.addColorStop(1, tc('rgba(0,0,0,0)'));
       ctx.globalAlpha = 1; ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill();
     }
     function star(x, y, s, a){
-      ctx.globalAlpha = a; ctx.strokeStyle = '#dfe6ff'; ctx.lineWidth = 0.8; ctx.lineCap = 'round';
+      ctx.globalAlpha = a; ctx.strokeStyle = tc('#dfe6ff'); ctx.lineWidth = 0.8; ctx.lineCap = 'round';
       ctx.beginPath(); ctx.moveTo(x - s, y); ctx.lineTo(x + s, y); ctx.moveTo(x, y - s); ctx.lineTo(x, y + s); ctx.stroke();
-      dot(x, y, s * 0.9, 'rgba(170,190,255,.8)');
+      dot(x, y, s * 0.9, tc('rgba(170,190,255,.8)'));
     }
     const polar = (r, phi) => [CX + r * Math.sin(phi), CY - r * Math.cos(phi)]; // phi: 0 = top, clockwise
 
@@ -798,7 +859,7 @@ export function createKeoStage(root) {
       const c = [CX, 68];
       [[760,30],[875,27],[756,106],[880,108],[752,60],[881,60]].forEach(([x, y], i) => {
         const g = ctx.createLinearGradient(c[0], c[1], x, y);
-        g.addColorStop(0, 'rgba(130,160,255,0)'); g.addColorStop(.45, 'rgba(130,160,255,.55)'); g.addColorStop(1, 'rgba(130,160,255,0)');
+        g.addColorStop(0, tc('rgba(130,160,255,0)')); g.addColorStop(.45, tc('rgba(130,160,255,.55)')); g.addColorStop(1, tc('rgba(130,160,255,0)'));
         ctx.globalAlpha = 0.16 + 0.1 * Math.sin(t * 0.7 + i * 1.1); ctx.strokeStyle = g; ctx.lineWidth = 0.7; ctx.lineCap = 'round';
         ctx.beginPath(); ctx.moveTo(c[0], c[1]); ctx.lineTo(x, y); ctx.stroke();
       });
@@ -816,7 +877,11 @@ export function createKeoStage(root) {
       const n = line.length - 1, x = clamp01(f) * n, i = Math.min(n - 1, Math.floor(x)), w = x - i;
       return [line[i][0] + (line[i + 1][0] - line[i][0]) * w, line[i][1] + (line[i + 1][1] - line[i][1]) * w];
     }
-    const PAL = { '-1': ['#8fd8ff', '#4aa8ff', '#c4ecff'], '1': ['#e596ff', '#b56bff', '#f6c2ff'] };
+    const PAL_BASE = { '-1': ['#8fd8ff', '#4aa8ff', '#c4ecff'], '1': ['#e596ff', '#b56bff', '#f6c2ff'] };
+    let PAL = {};
+    const paintPal = () => { PAL = { '-1': PAL_BASE['-1'].map(tc), '1': PAL_BASE['1'].map(tc) }; };
+    paintPal();
+    window.addEventListener('ika-theme', () => { grads(); paintPal(); });
     const sparks = [];
     function spawnSpark(p, initial){
       const k = Math.random();
@@ -900,20 +965,21 @@ export function createKeoStage(root) {
       draw(clock());
     }
     const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
-    let running = false, base = performance.now(), frozen = 3.2, rafId = 0, lastFrame = 0;
+    let running = false, base = performance.now(), frozen = 3.2, untick = null;
     function clock(){ return running ? (performance.now() - base) / 1000 + frozen : frozen; }
-    function loop(now){
-      rafId = 0;
+    // 30 fps on the launcher's shared animation clock (frame-clock.js): it used to wake the page on
+    // every refresh of the screen to draw one frame in eight, in frames of its own.
+    function tick(){
       if (!running) return;
-      if (now - lastFrame >= 32){ lastFrame = now; const tt = clock(); draw(tt); cssTick(tt); }
-      rafId = requestAnimationFrame(loop);
+      const tt = clock(); draw(tt); cssTick(tt);
     }
     function setRunning(on){
       if (reduced) on = false;
       if (on === running) return;
       if (on){ base = performance.now(); } else { frozen = clock(); }
       running = on;
-      if (on && !rafId) rafId = requestAnimationFrame(loop);
+      if (on && !untick) untick = onTick(tick);
+      if (!on && untick){ untick(); untick = null; }
       root.querySelector('#kx-stage').classList.toggle('kx-paused', !on);
     }
     // test hook: freeze the animation at a given time
@@ -928,11 +994,29 @@ export function createKeoStage(root) {
   // canvases (as CSS animations they made the browser recomposite the blurred, blended layers at the
   // monitor's refresh rate). Same timing as the original keyframes.
   const swirlEl = root.querySelector('.kx-orb-swirl'), cubeEl = root.querySelector('.kx-cube'), totalEl = root.querySelector('.kx-num43');
+  // the total's glow goes from one blue-violet to another (in the theme's colours)
+  let glowTheme = null, glowEnds = null;
+  const totalGlow = () => {
+    if (glowTheme !== themeNow()) { glowTheme = themeNow(); glowEnds = [tcRgb([170, 180, 255]), tcRgb([180, 170, 255])]; }
+    return glowEnds;
+  };
+  // the floating cube, in the theme's colours
+  const cubeSrc = cubeEl?.getAttribute('src');
+  const paintCube = () => {
+    if (!cubeEl || !cubeSrc) return;
+    if (themeNow() === DEFAULT_THEME) { cubeEl.src = cubeSrc; return; }
+    const im = new Image();
+    im.onload = () => { const c = themedImage(im); cubeEl.src = c.toDataURL ? c.toDataURL('image/png') : cubeSrc; };
+    im.src = cubeSrc;
+  };
+  paintCube();
+  window.addEventListener('ika-theme', paintCube);
   function cssTick(t){
     swirlEl.style.transform = `rotate(${((t / 16.0) * 360) % 360}deg)`;
     cubeEl.style.transform = `translateY(${(-0.09999999999999987 + 2.7 * Math.cos((TAU * t) / 4.2)).toFixed(2)}px)`;
     const k = 0.5 - 0.5 * Math.cos((TAU * t) / 3.6);
-    totalEl.style.textShadow = `0 0 ${(10 + 6 * k).toFixed(1)}px rgba(${Math.round(170 + 10 * k)},${Math.round(180 - 10 * k)},255,${(0.45 + 0.4 * k).toFixed(2)}),0 0 ${(2 + k).toFixed(1)}px rgba(255,255,255,${(0.55 + 0.25 * k).toFixed(2)})`;
+    const [g0, g1] = totalGlow();
+    totalEl.style.textShadow = `0 0 ${(10 + 6 * k).toFixed(1)}px rgba(${Math.round(g0[0] + (g1[0] - g0[0]) * k)},${Math.round(g0[1] + (g1[1] - g0[1]) * k)},${Math.round(g0[2] + (g1[2] - g0[2]) * k)},${(0.45 + 0.4 * k).toFixed(2)}),0 0 ${(2 + k).toFixed(1)}px rgba(255,255,255,${(0.55 + 0.25 * k).toFixed(2)})`;
   }
 
   return {

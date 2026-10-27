@@ -1,5 +1,5 @@
 [package]
-name = "app"
+name = "ika-launcher"
 version = "0.1.0"
 description = "A Tauri App"
 authors = ["you"]
@@ -47,14 +47,32 @@ sha2 = "0.10"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 # Old Minecraft logs (*.log.gz) in the console section.
 flate2 = "1"
+# AVIF for the images of groups (instance icons and covers, profile covers): pure Rust, no
+# assembler needed.
+ravif = { version = "0.13", default-features = false, features = ["threading"] }
 
 # Direct WebView2 access (memory target level / visibility while minimized).
 # Same versions tauri/wry already use, so nothing new is downloaded.
 [target.'cfg(windows)'.dependencies]
 # DPAPI (CryptProtectData) keeps the device key usable only on this PC.
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Threading", "Win32_System_ProcessStatus"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Threading", "Win32_System_ProcessStatus", "Win32_UI_WindowsAndMessaging"] }
 webview2-com = "0.38"
 windows-core = "0.61"
+# Complete DWM frame capture for live glass, using the Windows SDK crate already in use.
+windows = { version = "0.61.3", features = [
+    "Foundation",
+    "Graphics_Capture",
+    "Graphics_DirectX_Direct3D11",
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_System_WinRT_Graphics_Capture",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 # The development build is the one used day to day: unoptimized, hashing and unzipping every
 # mod of an instance took seconds and kept every core busy. The dependencies (sha1, zip, regex,

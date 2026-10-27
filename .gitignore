@@ -38,3 +38,40 @@ rendered_*.png
 test_*.png
 test_*.html
 extracted_stops.txt
+
+# ---------------------------------------------------------------------------
+# Never published: secrets, internal notes, prototypes and local tooling
+# ---------------------------------------------------------------------------
+# secrets (API keys, signing keys): only .env.example goes in the repository
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.pfx
+
+# internal notes and service documentation
+RENDIMIENTO-ESTADO.md
+ideas posibles.txt
+# the server (Cloudflare Worker) lives only on this PC: its code is not published
+skins-service/
+
+# HTML prototypes, scripts and design files used while building the launcher
+circ_*.html
+comparador-keo.html
+gestor-instancias.html
+placas*.html
+app.py
+mod_scanner.py
+requirements.txt
+run.bat
+debug_cdp.cjs
+*.grd
+*.asl
+*.psd
+
+# local tools, downloads and original assets
+tools/
+src-tauri/tools/
+_assets_originales/
+META-INF/

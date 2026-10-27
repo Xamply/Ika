@@ -45,43 +45,151 @@ fn running_key(instance_path: &str) -> String {
 }
 
 #[cfg(target_os = "windows")]
-fn kill_process(pid: u32) -> bool {
+pub fn kill_process(pid: u32) -> bool {
+    // 1. Run taskkill with /T first to wipe the entire child tree while the parent PID is still valid
+    use std::os::windows::process::CommandExt;
+    let _ = std::process::Command::new("taskkill")
+        .args(["/F", "/T", "/PID", &pid.to_string()])
+        .creation_flags(0x08000000)
+        .output();
+
+    // 2. Also terminate the process directly to guarantee instantaneous death
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
     unsafe {
         let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
-        if handle.is_null() {
-            return false;
+        if !handle.is_null() {
+            let _ = TerminateProcess(handle, 1);
+            CloseHandle(handle);
         }
-        let ok = TerminateProcess(handle, 1) != 0;
-        CloseHandle(handle);
-        ok
+    }
+    true
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn kill_process(_pid: u32) -> bool {
+    false
+}
+
+/// Kills any Crash Assistant companion processes registered in the instance's local folder.
+pub fn kill_crash_assistant(instance_path: &str) {
+    let base = std::path::Path::new(instance_path);
+    let inst_dir = instance_dir(instance_path).unwrap_or_else(|| base.to_path_buf());
+    let possible_dirs = [
+        inst_dir.join(".minecraft").join("local").join("crash_assistant"),
+        inst_dir.join("local").join("crash_assistant"),
+        base.join(".minecraft").join("local").join("crash_assistant"),
+        base.join("local").join("crash_assistant"),
+    ];
+
+    for dir in possible_dirs {
+        if !dir.is_dir() {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if name.ends_with(".info") && !name.ends_with("username.info") && !name.ends_with("_args.info") {
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        let trimmed = content.trim();
+                        // Content format is "<app_pid> : <timestamp>"
+                        let pid_str = trimmed.split(':').next().unwrap_or("").trim();
+                        if let Ok(app_pid) = pid_str.parse::<u32>() {
+                            if app_pid > 0 {
+                                kill_process(app_pid);
+                            }
+                        }
+                    }
+                    let _ = std::fs::remove_file(&path);
+                } else if name.ends_with("_args.info") || name.ends_with(".tmp") {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
+    }
+}
+
+/// Closes or terminates any window matching the target title substring.
+#[cfg(target_os = "windows")]
+pub fn kill_windows_by_title(target_substr: &str) {
+    use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowTextW, GetWindowThreadProcessId};
+
+    unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let substr = unsafe { &*(lparam as *const String) };
+        let mut buf = [0u16; 512];
+        let len = GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+        if len > 0 {
+            let title = String::from_utf16_lossy(&buf[..len as usize]);
+            if title.to_lowercase().contains(substr) {
+                let mut pid: u32 = 0;
+                GetWindowThreadProcessId(hwnd, &mut pid);
+                if pid > 0 {
+                    kill_process(pid);
+                }
+            }
+        }
+        1
+    }
+
+    let lower = target_substr.to_lowercase();
+    unsafe {
+        EnumWindows(Some(enum_proc), &lower as *const String as LPARAM);
     }
 }
 
 #[cfg(not(target_os = "windows"))]
-fn kill_process(_pid: u32) -> bool {
-    false
-}
+pub fn kill_windows_by_title(_target_substr: &str) {}
 
 /// Force-closes the game started from this instance (it hangs, or the user wants out now). Its
 /// exit is then reported as a close, not as a crash.
 #[tauri::command(async)]
 pub fn stop_game(instance_path: String) -> Result<(), String> {
     let key = running_key(&instance_path);
+    let raw_key = instance_path.replace('/', "\\").trim_end_matches('\\').to_lowercase();
+    let stopped = &crate::mc::STOPPED_GAMES;
+    if let Ok(mut lock) = stopped.lock() {
+        let set = lock.get_or_insert_with(Default::default);
+        set.insert(key.clone());
+        set.insert(raw_key.clone());
+    }
+
+    // 1. Immediately kill any Crash Assistant companion processes registered in this instance
+    kill_crash_assistant(&instance_path);
+
+    // 2. Kill the main Minecraft / launcher child process
     let pid = crate::mc::RUNNING_GAMES
         .lock()
         .ok()
-        .and_then(|m| m.as_ref().and_then(|m| m.get(&key).map(|entry| entry.0)))
-        .ok_or("El juego no está en ejecución")?;
-    let stopped = &crate::mc::STOPPED_GAMES;
-    stopped.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert(key.clone());
-    if !kill_process(pid) {
-        if let Some(set) = stopped.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
-            set.remove(&key);
-        }
-        return Err("No se pudo cerrar el juego".to_string());
+        .and_then(|m| m.as_ref().and_then(|m| m.get(&key).or_else(|| m.get(&raw_key)).map(|entry| entry.0)));
+
+    if let Some(pid) = pid {
+        kill_process(pid);
     }
+
+    // 3. Immediately hunt down and close any Crash Assistant GUI window that may have appeared
+    kill_windows_by_title("crash assistant");
+
+    // 4. Clean up any remaining crash_assistant java processes in background and watch for 2 seconds
+    let path_clone = instance_path.clone();
+    std::thread::spawn(move || {
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            let _ = std::process::Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-Command", "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*crash_assistant*' -or $_.CommandLine -like '*_app.jar*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"])
+                .creation_flags(0x08000000)
+                .output();
+        }
+
+        for _ in 0..6 {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            kill_crash_assistant(&path_clone);
+            kill_windows_by_title("crash assistant");
+        }
+    });
+
     Ok(())
 }
 

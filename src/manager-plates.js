@@ -4,6 +4,8 @@
 // The plates are drawn here (as layers that are drawn once and then only moved: see buildPlates);
 // the island is drawn by a worker (manager-world.worker.js).
 
+import { onTick } from "./frame-clock.js";
+
 const NS = "http://www.w3.org/2000/svg";
 function el(tag, attrs, parent) {
   const e = document.createElementNS(NS, tag);
@@ -662,9 +664,17 @@ export function createPlatesScene(stage, canvas) {
   sizeWaves();
   let world = null;
   let running = false;
-  let raf = 0, timer = 0;
+  let showWorldFrame = () => {};
+  let untick = null;
+  // Draws one frame at once (the first one, or the only one without motion); the rest come from
+  // the launcher's shared clock (frame-clock.js), in the same display frames as its other
+  // animations.
+  let raf = 0;
   const request = () => {
-    if (!raf) raf = requestAnimationFrame(frame);
+    if (!raf) raf = requestAnimationFrame((now) => {
+      raf = 0;
+      if (running) frame(now);
+    });
   };
   const t0 = performance.now();
   const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -675,12 +685,34 @@ export function createPlatesScene(stage, canvas) {
     const b = canvas.getBoundingClientRect(), st = stage.getBoundingClientRect();
     return { width: b.width, height: b.height, stageLeft: st.left - b.left, stageTop: st.top - b.top, stageWidth: st.width, dpr: devicePixelRatio || 1 };
   };
+  // The worker hands each frame back as an ImageBitmap (no copy) that is shown in this page's own
+  // next frame. Drawn straight onto a canvas it controlled, the island reached the screen on its
+  // own, a few ms before the rest of the frame: two compositions of the whole window per frame.
+  let shown = null, nextBitmap = null;
+  const show = (bmp) => {
+    if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
+      canvas.width = bmp.width;
+      canvas.height = bmp.height;
+    }
+    shown.transferFromImageBitmap(bmp);
+  };
+  showWorldFrame = () => {
+    if (nextBitmap) {
+      show(nextBitmap);
+      nextBitmap = null;
+    }
+  };
   try {
-    const offscreen = canvas.transferControlToOffscreen();
+    try { shown = canvas.getContext("bitmaprenderer"); } catch (_) { shown = null; }
+    const offscreen = shown ? null : canvas.transferControlToOffscreen();
     const worker = new Worker(new URL("./manager-world.worker.js", import.meta.url));
     let ready = false, lastLayout = "";
     worker.onmessage = ({ data }) => {
-      if (data.type === "ready") {
+      if (data.type === "frame") {
+        nextBitmap?.close();
+        nextBitmap = data.bitmap;
+        if (!running) showWorldFrame(); // a repaint after a resize while the scene is still
+      } else if (data.type === "ready") {
         ready = true;
         canvas.classList.add("is-ready");
         if (running) request();
@@ -692,7 +724,8 @@ export function createPlatesScene(stage, canvas) {
     };
     const layout = worldLayout();
     lastLayout = JSON.stringify(layout);
-    worker.postMessage({ type: "init", canvas: offscreen, consts: { BASE_Y, HALF_W, HALF_H }, layout }, [offscreen]);
+    if (offscreen) worker.postMessage({ type: "init", canvas: offscreen, consts: { BASE_Y, HALF_W, HALF_H }, layout }, [offscreen]);
+    else worker.postMessage({ type: "init", bitmaps: true, consts: { BASE_Y, HALF_W, HALF_H }, layout });
     world = {
       resize() {
         const next = worldLayout(), key = JSON.stringify(next);
@@ -708,35 +741,15 @@ export function createPlatesScene(stage, canvas) {
     console.warn("Gestor: no se pudo cargar el mundo 3D:", err);
   }
 
-  // 30 fps: the motions are slow (light running along the edges, water, fire), and the launcher
-  // shares the GPU with Wallpaper Engine, which stutters when this scene takes it every frame.
-  const FRAME_MS = 1000 / 30;
-  let lastFrame = 0;
-  // The next frame is asked for when it is nearly due. Asked for at once, the page ran its whole
-  // frame routine at every refresh of the screen (240 times per second at 240 Hz) to draw 30.
-  // `early`: how long before it is due; a bit over one refresh of the screen (so a late timer
-  // does not cost a frame), which is learnt from two frames in a row (`chained`: when the one
-  // before asked for this one). Until then, and again when a frame comes late, enough for a
-  // 60 Hz screen.
-  let early = 12, chained = 0;
+  // 30 fps (the shared clock's rate): the motions are slow (light running along the edges, water,
+  // fire), and the launcher shares the GPU with Wallpaper Engine, which stutters when this scene
+  // takes it every frame.
   function frame(now) {
-    raf = 0;
-    if (!running) return;
-    if (chained) early = Math.min(12, Math.max(3, (now - chained) * 1.25));
-    chained = 0;
-    const since = now - lastFrame;
-    if (since < FRAME_MS - 2) {
-      chained = now;
-      return request();
-    }
-    if (since > FRAME_MS + 10) early = 12;
-    lastFrame = now;
     const t = (now - t0) / 1000;
+    showWorldFrame(); // the island drawn since the previous tick
+    if (world) world.draw(t); // first: the worker draws the island while this thread does the rest
     plates.draw(t, reduce); // without motion this is the only frame: every halo in its place
     paintWaves(t);
-    if (world) world.draw(t);
-    clearTimeout(timer);
-    if (!reduce) timer = setTimeout(request, FRAME_MS - early);
   }
 
   const ro = new ResizeObserver(() => {
@@ -759,13 +772,15 @@ export function createPlatesScene(stage, canvas) {
       if (running) return;
       running = true;
       world?.resize();
-      request();
+      if (reduce) request();
+      else untick = onTick(frame);
     },
     stop() {
       running = false;
       cancelAnimationFrame(raf);
-      clearTimeout(timer);
       raf = 0;
+      untick?.();
+      untick = null;
     },
     resize() {
       world?.resize();

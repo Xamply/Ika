@@ -2,8 +2,17 @@ import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { createKeoStage } from "./comparador-keo.js";
 import { createPlatesScene, PLATES, BASE_Y } from "./manager-plates.js";
+import { onTick } from "./frame-clock.js";
+import { crtOpen, crtClose, installCrtModals, WINDOW_ANIMS, getWindowAnim, setWindowAnim } from "./crt-fx.js";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
+import { getLang, getLocale, initI18n, setLanguage } from "./i18n.js";
+import { DEFAULT_THEME, THEMES, THEME_IDS, themedRgb } from "./theme/palette.js";
+import { createLaikaTribute } from "./laika.js";
+import { AUTO_ID, themeFromPixels, installAutoTheme, sampleWallpaper } from "./theme/auto.js";
+
+// English (if chosen): the page is translated now, and whatever appears later as it appears
+initI18n();
 // three.js + skinview3d (most of the bundle) are loaded on demand, the first time the
 // user menu with the 3D skin is opened: see loadSkinLibs().
 import modrinthLogo from "./assets/modrinth.png";
@@ -110,6 +119,8 @@ const el = {
   homeActiveLoader: document.getElementById("home-active-loader"),
   homeActiveMods: document.getElementById("home-active-mods"),
   instanceCategoryPills: document.getElementById("instance-category-pills"),
+  instanceFilterSearchBar: document.getElementById("instance-filter-search-bar"),
+  instPillGlider: document.getElementById("inst-pill-glider"),
   inputSearchInstance: document.getElementById("input-search-instance"),
   btnClearInstanceSearch: document.getElementById("btn-clear-instance-search"),
   btnHomeToggleFav: document.getElementById("btn-home-toggle-fav"),
@@ -132,6 +143,7 @@ const el = {
   homeConsoleHeadline: document.getElementById("home-console-headline"),
   homeConsoleSub: document.getElementById("home-console-sub"),
   homeConsolePreviewLogs: document.getElementById("home-console-preview-logs"),
+  btnHcpScrollBottom: document.getElementById("btn-hcp-scroll-bottom"),
   btnHomeGoConsole: document.getElementById("btn-home-go-console"),
   hcpPulseDot: document.getElementById("hcp-pulse-dot"),
   hcpStatusBanner: document.getElementById("hcp-status-banner"),
@@ -792,11 +804,149 @@ function undockToCursor(dock, ev) {
   startHoldingAndBouncingCyberWindow(dock, null, title, ev);
 }
 
+function isConsoleDockVisible() {
+  const dock = document.getElementById("home-console-preview-dock");
+  if (!dock) return false;
+  if (state.currentView && state.currentView !== "inicio") return false;
+  if (
+    dock.classList.contains("hidden") ||
+    dock.classList.contains("is-minimized") ||
+    dock.classList.contains("is-minimizing-anim") ||
+    dock.classList.contains("is-holding-minimized")
+  ) {
+    return false;
+  }
+  return true;
+}
+
+let isBlurSyncInFlight = false;
+let pendingBlurCoords = null;
+let lastSentBlurRect = null;
+
+function requestBlurSync(force = false) {
+  const blurEnabled = localStorage.getItem("ika_ui_console_blur") !== "false";
+  const win32Enabled = localStorage.getItem("ika_extras_win32_window") === "true";
+  const isWe = document.body.classList.contains("has-we-active");
+  const visible = Boolean(blurEnabled && win32Enabled && isConsoleDockVisible() && !isWe);
+
+  if (!visible) {
+    if (!force && lastSentBlurRect && lastSentBlurRect.visible === false) return;
+    lastSentBlurRect = { visible: false };
+    invoke("sync_console_blur_rect", { visible: false, x: 0, y: 0, width: 0, height: 0 }).catch(() => {});
+    return;
+  }
+
+  if (!force && lastSentBlurRect && lastSentBlurRect.visible === true) return;
+  lastSentBlurRect = { visible: true };
+  invoke("sync_console_blur_rect", { visible: true, x: 40, y: 70, width: 520, height: 330 }).catch(() => {});
+}
+
+function syncConsoleBlurRect(immediate = false, force = false) {
+  requestBlurSync(force);
+}
+
+window.addEventListener("resize", () => {
+  syncConsoleBlurRect();
+});
+window.addEventListener("focus", () => {
+  syncConsoleBlurRect(true);
+});
+try {
+  listen("tauri://move", () => {
+    syncConsoleBlurRect(true, true);
+  });
+} catch (_) {}
+
+let isClosingLauncherSettingsModal = false;
+let isClosingInstanceSettingsModal = false;
+let blurZOrderTimer = null;
+let lastConsoleBlurBehind = null;
+
+function updateConsoleBlurZOrder(immediate = false) {
+  const isAnyModalOpen = Boolean(
+    document.querySelector(".modal-overlay:not(.hidden)") ||
+    isClosingLauncherSettingsModal ||
+    isClosingInstanceSettingsModal
+  );
+
+  const isWeActive = document.body.classList.contains("has-we-active");
+
+  if (blurZOrderTimer) {
+    clearTimeout(blurZOrderTimer);
+    blurZOrderTimer = null;
+  }
+
+  // If opening a modal (or still closing one, or Wallpaper Engine active), blur window sits behind app immediately
+  if (isAnyModalOpen || isWeActive) {
+    if (lastConsoleBlurBehind === true) return;
+    lastConsoleBlurBehind = true;
+    invoke("set_console_blur_behind_app", { behind: true }).catch(() => {});
+    return;
+  }
+
+  // If closing all modals, wait until the exit transition and browser compositor frame
+  // have completely finished and committed to screen before bringing blur to the front!
+  if (lastConsoleBlurBehind === false) return;
+
+  const applyFront = () => {
+    const stillOpen = Boolean(
+      document.querySelector(".modal-overlay:not(.hidden)") ||
+      isClosingLauncherSettingsModal ||
+      isClosingInstanceSettingsModal
+    );
+    if (stillOpen) return;
+    lastConsoleBlurBehind = false;
+    invoke("set_console_blur_behind_app", { behind: false }).catch(() => {});
+  };
+
+  if (immediate) {
+    applyFront();
+  } else {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        applyFront();
+      });
+    });
+  }
+}
+
+function setupConsoleBlurObserver() {
+  const dock = document.getElementById("home-console-preview-dock");
+  if (dock) {
+  try {
+    dock.addEventListener("transitionend", () => {
+      syncConsoleBlurRect(true);
+    });
+  } catch (_) {}
+  }
+  try {
+    const modalObserver = new MutationObserver(() => {
+      updateConsoleBlurZOrder();
+    });
+    document.querySelectorAll(".modal-overlay").forEach((el) => {
+      modalObserver.observe(el, { attributes: true, attributeFilter: ["class"] });
+    });
+  } catch (_) {}
+
+  // Trigger initial blur sync so it appears immediately at startup
+  setTimeout(() => syncConsoleBlurRect(true, true), 100);
+  setTimeout(() => syncConsoleBlurRect(true, true), 400);
+  setTimeout(() => syncConsoleBlurRect(true, true), 1200);
+}
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", setupConsoleBlurObserver);
+} else {
+  setupConsoleBlurObserver();
+}
+
 function makeDraggable(element, handle, options = {}) {
   if (!element || !handle) return;
   handle.style.cursor = "grab";
   handle.style.userSelect = "none";
   handle.style.webkitUserSelect = "none";
+  element.addEventListener("dragstart", (ev) => {
+    if (element.classList.contains("is-dragging") || handle.contains(ev.target)) ev.preventDefault();
+  });
 
   let isDragging = false;
   let startX = 0;
@@ -820,6 +970,13 @@ function makeDraggable(element, handle, options = {}) {
       if (!isMin) return;
     }
 
+    // With text selected (or a selection starting), the browser began its own "drag the selected
+    // text" a few pixels in and cancelled this drag: the window barely moved. No selection, no
+    // native drag while the window is moved.
+    e.preventDefault();
+    const sel = window.getSelection?.();
+    if (sel && !sel.isCollapsed) sel.removeAllRanges();
+
     const captureTarget = isMin ? element : handle;
     const container = options.container || element.offsetParent || document.body;
     const containerRect = container.getBoundingClientRect();
@@ -830,31 +987,36 @@ function makeDraggable(element, handle, options = {}) {
       captureTarget.setPointerCapture(e.pointerId);
     } catch (_) {}
 
-    element.classList.add("is-dragging");
-    handle.style.cursor = "grabbing";
-
     const currentLeft = elemRect.left - containerRect.left;
     const currentTop = elemRect.top - containerRect.top;
-
-    element.style.position = "absolute";
-    element.style.right = "auto";
-    element.style.bottom = "auto";
-    element.style.transform = "none";
-    element.style.margin = "0";
-    element.style.left = `${currentLeft}px`;
-    element.style.top = `${currentTop}px`;
 
     startX = e.clientX;
     startY = e.clientY;
     initialLeft = currentLeft;
     initialTop = currentTop;
     let dragMoved = false;
+    let dragActivated = false;
 
     const onPointerMove = (ev) => {
       if (!isDragging) return;
       const dx = ev.clientX - startX;
       const dy = ev.clientY - startY;
-      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+
+      if (!dragActivated) {
+        if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+          dragActivated = true;
+          dragMoved = true;
+          element.style.position = "absolute";
+          element.style.right = "auto";
+          element.style.bottom = "auto";
+          element.style.transform = "none";
+          element.style.margin = "0";
+          element.classList.add("is-dragging");
+          handle.style.cursor = "grabbing";
+        } else {
+          return;
+        }
+      } else {
         dragMoved = true;
       }
 
@@ -881,6 +1043,13 @@ function makeDraggable(element, handle, options = {}) {
 
       element.style.left = `${newLeft}px`;
       element.style.top = `${newTop}px`;
+      const blurBg = element.querySelector(".hcp-we-blur-bg");
+      if (blurBg) {
+        const clientX = containerRect.left + newLeft;
+        const clientY = containerRect.top + newTop;
+        blurBg.style.setProperty("--dock-x", `${Math.round(clientX)}px`);
+        blurBg.style.setProperty("--dock-y", `${Math.round(clientY)}px`);
+      }
       if (isCyberWin || element.classList.contains("is-minimized")) {
         updateEdgePanelsDragOver(ev.clientX, ev.clientY);
       }
@@ -889,6 +1058,9 @@ function makeDraggable(element, handle, options = {}) {
     const onPointerUp = (ev) => {
       if (!isDragging) return;
       isDragging = false;
+      const wasDragging = element.classList.contains("is-dragging");
+      element.classList.remove("is-dragging");
+      handle.style.cursor = "grab";
       clearEdgePanelsDragOver();
       const isCyberWin = element.classList.contains("home-cyber-window") || element.classList.contains("home-console-preview-dock");
       if (element.classList.contains("is-minimized") || isCyberWin) {
@@ -912,6 +1084,12 @@ function makeDraggable(element, handle, options = {}) {
           element.dataset.sqTop = `${parseFloat(element.style.top) || 0}`;
         }
         if (isCyberWin) saveWindowsLayout();
+      }
+      const blurBg = element.querySelector(".hcp-we-blur-bg");
+      if (blurBg) {
+        const finalRect = element.getBoundingClientRect();
+        blurBg.style.setProperty("--dock-x", `${Math.round(finalRect.left)}px`);
+        blurBg.style.setProperty("--dock-y", `${Math.round(finalRect.top)}px`);
       }
       try {
         captureTarget.releasePointerCapture(ev.pointerId);
@@ -1181,6 +1359,13 @@ function makeResizable(element, options = {}) {
         if (dir.includes("w")) element.style.left = `${newLeft}px`;
         if (dir.includes("n")) element.style.top = `${newTop}px`;
 
+        const blurBg = element.querySelector(".hcp-we-blur-bg");
+        if (blurBg) {
+          const rect = element.getBoundingClientRect();
+          blurBg.style.setProperty("--dock-x", `${Math.round(rect.left)}px`);
+          blurBg.style.setProperty("--dock-y", `${Math.round(rect.top)}px`);
+        }
+
         element.dataset.openWidth = `${newWidth}`;
         element.dataset.openHeight = `${newHeight}`;
         element.dataset.customFloatingWidth = `${newWidth}`;
@@ -1239,7 +1424,7 @@ const STORAGE_WINDOWS_LAYOUT_KEY = "modcomparer_cyber_windows_layout_v1";
 // origin: `tauri dev` and a compiled launcher don't share it, and it goes away with the WebView
 // data. A copy lives in ika_root/home-layout.json: it is loaded into localStorage before the page
 // initializes, and rewritten whenever one of these keys is saved.
-const HOME_LAYOUT_KEYS = /^(modcomparer_cyber_windows_layout_v1|modcomparer_float_size_.+|ika_welcome_dock_pos|ika_pixel_clock_pos)$/;
+const HOME_LAYOUT_KEYS = /^(modcomparer_cyber_windows_layout_v1|modcomparer_float_size_.+|ika_welcome_dock_pos|ika_pixel_clock_pos|ika_clock_scale)$/;
 
 let homeLayoutFileTimer = 0;
 function saveHomeLayoutFile() {
@@ -1255,7 +1440,7 @@ function saveHomeLayoutFile() {
 }
 
 const DEFAULT_HOME_LAYOUT = {
-  "ika_pixel_clock_pos": "{\"left\":2104,\"top\":872}",
+  "ika_pixel_clock_pos": "{\"left\":229,\"top\":134}",
   "ika_welcome_dock_pos": "{\"left\":175,\"top\":310,\"dockedSide\":null,\"dockedIndex\":-1}",
   "modcomparer_float_size_home-console-preview-dock": "{\"width\":\"533\",\"height\":\"327\"}",
   "modcomparer_cyber_windows_layout_v1": "{\"home-console-preview-dock\":{\"left\":\"1935px\",\"top\":\"407px\",\"width\":\"533px\",\"height\":\"327px\",\"customFloatingWidth\":\"533\",\"customFloatingHeight\":\"327\",\"zIndex\":\"93\",\"isMinimized\":false,\"isDockedInPanel\":false,\"dockedSide\":null,\"dockedIndex\":-1,\"isDockedExpanded\":false,\"dockedFlex\":\"\",\"dockedHeight\":\"327px\"},\"home-novedades-dock\":{\"left\":\"12px\",\"top\":\"12px\",\"width\":\"395px\",\"height\":\"381px\",\"customFloatingWidth\":\"380\",\"customFloatingHeight\":\"669\",\"zIndex\":\"10\",\"isMinimized\":false,\"isDockedInPanel\":true,\"dockedSide\":\"right\",\"dockedIndex\":0,\"isDockedExpanded\":true,\"dockedFlex\":\"0 0 381px\",\"dockedHeight\":\"381px\"},\"home-coleccion-dock\":{\"left\":\"12px\",\"top\":\"398px\",\"width\":\"392px\",\"height\":\"468px\",\"customFloatingWidth\":\"500\",\"customFloatingHeight\":\"1146\",\"zIndex\":\"10\",\"isMinimized\":false,\"isDockedInPanel\":true,\"dockedSide\":\"left\",\"dockedIndex\":1,\"isDockedExpanded\":true,\"dockedFlex\":\"0 0 468px\",\"dockedHeight\":\"468px\"},\"home-accesos-dock\":{\"left\":\"165px\",\"top\":\"717px\",\"width\":\"275px\",\"height\":\"296px\",\"customFloatingWidth\":\"275\",\"customFloatingHeight\":\"296\",\"zIndex\":\"87\",\"isMinimized\":false,\"isDockedInPanel\":false,\"dockedSide\":null,\"dockedIndex\":-1,\"isDockedExpanded\":false,\"dockedFlex\":\"\",\"dockedHeight\":\"296px\"},\"home-actividad-dock\":{\"left\":\"12px\",\"top\":\"12px\",\"width\":\"392px\",\"height\":\"374px\",\"customFloatingWidth\":\"430\",\"customFloatingHeight\":\"404\",\"zIndex\":\"10\",\"isMinimized\":false,\"isDockedInPanel\":true,\"dockedSide\":\"left\",\"dockedIndex\":0,\"isDockedExpanded\":true,\"dockedFlex\":\"0 0 374px\",\"dockedHeight\":\"374px\"}}"
@@ -2038,6 +2223,7 @@ function minimizeCyberWindowWithAnimation(dock, windowTitle, triggerBtn = null) 
 
   if (dock.id === "home-console-preview-dock") {
     stopHcpDinoGame();
+    syncConsoleBlurRect(true);
   }
 
   dock.classList.add("is-minimizing-anim");
@@ -2148,6 +2334,7 @@ function restoreCyberWindow(dock) {
     dock.style.bottom = "auto";
     if (dock.id === "home-console-preview-dock") {
       updateHomeConsolePreview();
+      syncConsoleBlurRect(true);
     }
     saveWindowsLayout();
   }, 340);
@@ -2425,6 +2612,12 @@ function openCarouselInstanceContextMenu(x, y, inst, idx) {
   if (titleEl) titleEl.textContent = displayName;
   if (subEl) subEl.textContent = `Minecraft ${mcVer} · ${loader}`;
 
+  const stopBtn = document.getElementById("ctx-carousel-btn-stop");
+  const playBtn = document.getElementById("ctx-carousel-btn-play");
+  const isActive = Boolean(inst && isInstanceGameActive(inst.path));
+  if (stopBtn) stopBtn.classList.toggle("hidden", !isActive);
+  if (playBtn) playBtn.classList.toggle("hidden", isActive);
+
   menu.classList.remove("is-closing");
   menu.classList.remove("hidden");
 
@@ -2465,6 +2658,14 @@ function closeCarouselContextMenu() {
 }
 
 function initCarouselContextMenu() {
+  document.getElementById("ctx-carousel-btn-stop")?.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    const inst = carouselContextMenuTargetInst;
+    closeCarouselContextMenu();
+    if (!inst) return;
+    await stopInstanceImmediately(inst);
+  });
+
   document.getElementById("ctx-carousel-btn-play")?.addEventListener("click", (e) => {
     e.stopPropagation();
     const inst = carouselContextMenuTargetInst;
@@ -2864,8 +3065,8 @@ function recordRecentActivity(category, title, desc) {
   if (title && title.toLowerCase().includes("seleccionada")) return;
   const activities = getRecentActivities();
   const now = new Date();
-  const dateFormatted = now.toLocaleDateString("es-ES", { day: "2-digit", month: "2-digit", year: "numeric" });
-  const timeFormatted = now.toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const dateFormatted = now.toLocaleDateString(getLocale(), { day: "2-digit", month: "2-digit", year: "numeric" });
+  const timeFormatted = now.toLocaleTimeString(getLocale(), { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 
   const categoryLabels = {
     launch: "JUEGO INICIADO",
@@ -2905,8 +3106,8 @@ function renderRecentActivityTimeline() {
 
   if (!activities || activities.length === 0) {
     const now = new Date();
-    const dStr = now.toLocaleDateString("es-ES", { day: "2-digit", month: "2-digit", year: "numeric" });
-    const tStr = now.toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    const dStr = now.toLocaleDateString(getLocale(), { day: "2-digit", month: "2-digit", year: "numeric" });
+    const tStr = now.toLocaleTimeString(getLocale(), { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 
     const activeInst = (homeInstancesList && homeInstancesList[homeCurrentInstanceIndex]) ||
                        (homeInstancesAll && homeInstancesAll[0]);
@@ -2932,7 +3133,7 @@ function renderRecentActivityTimeline() {
         title: "Fondo animado configurado",
         desc: "Sincronizado con MotionBGs y controles de transformación activos",
         dateFormatted: dStr,
-        timeFormatted: new Date(now.getTime() - 180000).toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+        timeFormatted: new Date(now.getTime() - 180000).toLocaleTimeString(getLocale(), { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
         timestamp: now.getTime() - 180000,
         fullDate: `${dStr}`
       },
@@ -2943,7 +3144,7 @@ function renderRecentActivityTimeline() {
         title: "Indexación de mods completada",
         desc: "Verificación de dependencias y hashes lista para jugar",
         dateFormatted: dStr,
-        timeFormatted: new Date(now.getTime() - 420000).toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+        timeFormatted: new Date(now.getTime() - 420000).toLocaleTimeString(getLocale(), { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
         timestamp: now.getTime() - 420000,
         fullDate: `${dStr}`
       }
@@ -3674,6 +3875,10 @@ function init() {
       switchView(btn.dataset.view);
     });
   });
+  initHoverPrewarm();
+  initHexIconBounce();
+  // Every window opens and closes like a CRT tube (Wallpapers and Exportar handle theirs).
+  installCrtModals({ exclude: ["modal-wallpapers", "modal-share"] });
   window.addEventListener("resize", () => updateViewSwitcherGlider());
   requestAnimationFrame(() => updateViewSwitcherGlider());
   if (document.fonts?.ready) {
@@ -3888,15 +4093,17 @@ function init() {
       hideDockTip();
       moreMenu.classList.toggle("hidden");
       if (moreMenu.classList.contains("hidden")) return;
-      // "Detener juego" only while this instance's game is running: what the page knows right
-      // away, then what the backend says (the page forgets it if it reloads mid-game)
+      // "Detener instancia" while this instance is active (opening/preparing or running)
       const stopItem = document.getElementById("menu-item-stop-game");
       const inst = resolveDockActiveInstance();
       if (stopItem) {
-        stopItem.classList.toggle("hidden", !(inst && GAME_PROCESS_STATES.has(gameStates.get(normInstancePath(inst.path))?.state)));
-        if (inst) {
+        const isGameActive = Boolean(inst && isInstanceGameActive(inst.path));
+        stopItem.classList.toggle("hidden", !isGameActive);
+        if (inst && !isGameActive) {
           invoke("game_stats", { instancePath: inst.path })
-            .then((stats) => stopItem.classList.toggle("hidden", !stats.running))
+            .then((stats) => {
+              if (stats.running) stopItem.classList.remove("hidden");
+            })
             .catch(() => {});
         }
       }
@@ -4040,12 +4247,23 @@ function loadUsersFromStorage() {
     const raw = localStorage.getItem(STORAGE_USERS_KEY);
     state.users = raw ? JSON.parse(raw) : [];
     if (!Array.isArray(state.users)) state.users = [];
+    let usersModified = false;
+    for (const u of state.users) {
+      if (u.statusQuote && u.statusQuote.includes("El reto es enorme")) {
+        u.statusQuote = "";
+        usersModified = true;
+      }
+    }
+    if (localStorage.getItem("ika_user_status_quote")?.includes("El reto es enorme")) {
+      localStorage.removeItem("ika_user_status_quote");
+    }
     const active = localStorage.getItem(STORAGE_ACTIVE_USER_KEY);
     if (active && state.users.some((u) => u.username.toLowerCase() === active.toLowerCase())) {
       state.activeUser = state.users.find((u) => u.username.toLowerCase() === active.toLowerCase());
     } else {
       state.activeUser = null;
     }
+    if (usersModified) saveUsersToStorage();
   } catch (err) {
     console.error("Error loading users from localStorage:", err);
     state.users = [];
@@ -4272,15 +4490,30 @@ function initFloatingPixelClock() {
   // last position as a floating block (kept while it is docked)
   let floatPos = null;
 
+  let currentClockScale = 1.0;
+  const initialSaved = readSaved();
+  if (typeof initialSaved.scale === "number" && initialSaved.scale >= 0.5 && initialSaved.scale <= 2.5) {
+    currentClockScale = initialSaved.scale;
+  } else {
+    try {
+      const s = parseFloat(localStorage.getItem("ika_clock_scale"));
+      if (!isNaN(s) && s >= 0.5 && s <= 2.5) currentClockScale = s;
+    } catch (_) {}
+  }
+
   function save() {
     const side = dockedSide();
     const state = {
       ...(floatPos || {}),
       dockedSide: side,
       dockedIndex: side && clock.parentElement ? Array.from(clock.parentElement.children).indexOf(clock) : -1,
+      scale: currentClockScale,
     };
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    } catch (_) {}
+    try {
+      localStorage.setItem("ika_clock_scale", currentClockScale.toString());
     } catch (_) {}
     saveHomeLayoutFile();
   }
@@ -4293,12 +4526,16 @@ function initFloatingPixelClock() {
     clock.style.left = "";
     clock.style.top = "";
     clock.style.right = "";
+    const innerEl = clock.querySelector(".pixel-clock-inner");
+    if (innerEl) innerEl.style.zoom = "1";
     zone.insertBefore(clock, before);
   }
 
   function undock() {
     clock.classList.remove("is-docked-in-panel");
     delete clock.dataset.dockedSide;
+    const innerEl = clock.querySelector(".pixel-clock-inner");
+    if (innerEl) innerEl.style.zoom = currentClockScale.toString();
     stageSlot.before(clock);
   }
 
@@ -4311,12 +4548,27 @@ function initFloatingPixelClock() {
         return clientY < r.top + r.height / 2;
       }) || null;
 
+  // Ensure clock is not accidentally hidden
+  clock.classList.remove("hidden");
+
   // Restore saved position or docked state
   const saved = readSaved();
   if (typeof saved.left === "number" && typeof saved.top === "number") {
-    floatPos = { left: saved.left, top: saved.top };
+    // If coordinates were saved outside viewport, reset to safe position
+    let left = saved.left;
+    let top = saved.top;
+    if (left < 10 || left > (window.innerWidth || 1920) - 100 || top < 20 || top > (window.innerHeight || 1080) - 100) {
+      left = 229;
+      top = 134;
+    }
+    floatPos = { left, top };
     clock.style.left = `${floatPos.left}px`;
     clock.style.top = `${floatPos.top}px`;
+    clock.style.right = "auto";
+  } else {
+    floatPos = { left: 229, top: 134 };
+    clock.style.left = "229px";
+    clock.style.top = "134px";
     clock.style.right = "auto";
   }
 
@@ -4330,6 +4582,138 @@ function initFloatingPixelClock() {
   placeDockedPixelClock();
 
   let use24h = localStorage.getItem("ika_clock_24h") === "true";
+
+  // Its style (Aspecto visual > Inicio). Pixel Neón is the panel above; the others are desktop
+  // widgets drawn into .clock-alt (style.css, "Clock styles").
+  const CLOCK_STYLES = [
+    ["pixel", "Pixel Neón"],
+    ["minecraft", "Minecraft"],
+    ["ios", "iOS"],
+    ["pixel-g", "Pixel"],
+    ["oneui", "One UI"],
+    ["mond", "Mond"],
+    ["words", "Palabras"],
+    ["ring", "Anillo"],
+  ];
+  const altEl = document.getElementById("clock-alt");
+  let clockStyle = localStorage.getItem("ika_clock_style");
+  if (!CLOCK_STYLES.some(([id]) => id === clockStyle)) clockStyle = "pixel";
+  function setClockStyle(id) {
+    clockStyle = id;
+    clock.dataset.style = id;
+    try {
+      localStorage.setItem("ika_clock_style", id);
+    } catch {}
+    if (altEl) altEl.innerHTML = "";
+    updateClock();
+    document.querySelectorAll(".clock-style-opt").forEach((o) => {
+      o.classList.toggle("is-active", o.dataset.style === id);
+      o.setAttribute("aria-checked", String(o.dataset.style === id));
+    });
+  }
+
+  // The time in words ("son las once y dieciséis" / "it's eleven sixteen").
+  const ES_N = ["cero", "uno", "dos", "tres", "cuatro", "cinco", "seis", "siete", "ocho", "nueve", "diez", "once", "doce", "trece", "catorce", "quince", "dieciséis", "diecisiete", "dieciocho", "diecinueve", "veinte", "veintiuno", "veintidós", "veintitrés", "veinticuatro", "veinticinco", "veintiséis", "veintisiete", "veintiocho", "veintinueve"];
+  const ES_T = { 3: "treinta", 4: "cuarenta", 5: "cincuenta" };
+  const esNum = (n) => (n < 30 ? ES_N[n] : ES_T[Math.floor(n / 10)] + (n % 10 ? ` y ${ES_N[n % 10]}` : ""));
+  const EN_N = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen"];
+  const EN_T = { 2: "twenty", 3: "thirty", 4: "forty", 5: "fifty" };
+  const enNum = (n) => (n < 20 ? EN_N[n] : EN_T[Math.floor(n / 10)] + (n % 10 ? `-${EN_N[n % 10]}` : ""));
+  function timeInWords(h24, m) {
+    const h = h24 % 12 || 12;
+    if (getLang() === "en") {
+      return ["it's", enNum(h), m === 0 ? "o'clock" : m < 10 ? `oh ${enNum(m)}` : enNum(m)];
+    }
+    const hw = h === 1 ? "una" : esNum(h);
+    const lead = h === 1 ? "es la" : "son las";
+    const tail = m === 0 ? "en punto" : m === 15 ? "y cuarto" : m === 30 ? "y media" : `y ${esNum(m)}`;
+    return [lead, hw, tail];
+  }
+
+  // Draws the widget styles into .clock-alt.
+  function drawWidget(now, hoursStr, minutes, ampm) {
+    if (!altEl || clockStyle === "pixel") return;
+    const loc = getLocale();
+    const cap = (t) => t.charAt(0).toUpperCase() + t.slice(1);
+    const am = ampm ? `<span class="ca-ampm">${ampm}</span>` : "";
+    const longDate = cap(now.toLocaleDateString(loc, { weekday: "long", day: "numeric", month: "long" }));
+    const shortDate = now.toLocaleDateString(loc, { weekday: "short", day: "numeric", month: "short" }).replace(/\./g, "");
+    let html = "";
+    if (clockStyle === "ios") {
+      // iOS shows no AM/PM on the lock screen
+      html = `<div class="ca-date">${longDate}</div><div class="ca-time">${Number(hoursStr)}:${minutes}</div>`;
+    } else if (clockStyle === "minecraft") {
+      const h24 = String(now.getHours()).padStart(2, "0");
+      const monthsEs = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"];
+      const monthsEn = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+      const monthName = (getLang() === "en" ? monthsEn : monthsEs)[now.getMonth()];
+      const dayNum = now.getDate();
+      const year = now.getFullYear();
+      html = `<div class="ca-time">${h24}:${minutes}</div><div class="ca-date">${monthName} ${dayNum}, ${year}</div>`;
+    } else if (clockStyle === "pixel-g") {
+      html = `<span class="ca-h">${hoursStr}</span><span class="ca-m">${minutes}</span><div class="ca-date">${shortDate}</div>`;
+    } else if (clockStyle === "oneui") {
+      const [wd, ...rest] = longDate.split(" ");
+      html = `<div class="ca-time">${hoursStr}:${minutes}${am}</div><div class="ca-date"><b>${wd}</b> ${rest.join(" ")}</div>`;
+    } else if (clockStyle === "mond") {
+      const day = now.toLocaleDateString(loc, { weekday: "long" }).toUpperCase();
+      const date = now.toLocaleDateString(loc, { day: "numeric", month: "long", year: "numeric" }).replace(/ de /g, " ").toUpperCase();
+      html = `<div class="ca-day">${day}</div><div class="ca-date">${date}</div><div class="ca-time">— ${hoursStr}:${minutes}${ampm ? ` ${ampm}` : ""} —</div>`;
+    } else if (clockStyle === "words") {
+      const [l1, l2, l3] = timeInWords(now.getHours(), now.getMinutes());
+      html = `<div class="ca-l1">${l1}</div><div class="ca-l2">${l2}</div><div class="ca-l3">${l3}</div>`;
+    } else if (clockStyle === "ring") {
+      const r = 86;
+      const len = 2 * Math.PI * r;
+      const off = len * (1 - now.getSeconds() / 60);
+      html = `<svg class="ca-ring" viewBox="0 0 184 184" aria-hidden="true"><circle class="ca-track" cx="92" cy="92" r="${r}"></circle><circle class="ca-arc" cx="92" cy="92" r="${r}" stroke-dasharray="${len.toFixed(1)}" stroke-dashoffset="${off.toFixed(1)}"></circle></svg><div class="ca-center"><div class="ca-time">${hoursStr}:${minutes}</div><div class="ca-date">${shortDate.toUpperCase()}</div></div>`;
+    }
+    // the ring's arc glides from where it was (rebuilding it each second would jump)
+    if (clockStyle === "ring") {
+      const arc = altEl.querySelector(".ca-arc");
+      if (arc) {
+        const r = 86;
+        const len = 2 * Math.PI * r;
+        arc.style.transition = now.getSeconds() === 0 ? "none" : "";
+        arc.setAttribute("stroke-dashoffset", (len * (1 - now.getSeconds() / 60)).toFixed(1));
+        altEl.querySelector(".ca-time").textContent = `${hoursStr}:${minutes}`;
+        altEl.querySelector(".ca-date").textContent = shortDate.toUpperCase();
+        return;
+      }
+    }
+    if (altEl.innerHTML !== html) altEl.innerHTML = html;
+  }
+
+  // the picker: each style as a small sample of itself
+  const SAMPLES = {
+    pixel: "09:41",
+    minecraft: "09:41",
+    ios: "9:41",
+    "pixel-g": "<i>09</i>41",
+    oneui: "09:41",
+    mond: "MARTES",
+    words: "son las<b>nueve</b>",
+    ring: "9:41",
+  };
+  const styleGrid = document.getElementById("clock-style-grid");
+  if (styleGrid) {
+    for (const [id, name] of CLOCK_STYLES) {
+      const opt = document.createElement("button");
+      opt.type = "button";
+      opt.className = "clock-style-opt";
+      opt.dataset.style = id;
+      opt.setAttribute("role", "radio");
+      const sample = document.createElement("span");
+      sample.className = "cs-sample";
+      sample.innerHTML = SAMPLES[id];
+      const label = document.createElement("span");
+      label.className = "clock-style-name";
+      label.textContent = name;
+      opt.append(sample, label);
+      opt.addEventListener("click", () => setClockStyle(id));
+      styleGrid.appendChild(opt);
+    }
+  }
 
   function updateClock() {
     const now = new Date();
@@ -4347,19 +4731,21 @@ function initFloatingPixelClock() {
     // Colon blink: dim for the first half second, like the old step-start animation,
     // but only 2 repaints per second instead of one per monitor frame.
     timeEl.innerHTML = `${hoursStr}<span class="pixel-clock-colon is-dim">:</span>${minutes}`;
+
     setTimeout(() => {
       const colon = timeEl.querySelector(".pixel-clock-colon");
       if (colon) colon.classList.remove("is-dim");
     }, 500);
     if (secEl) secEl.textContent = seconds;
+    drawWidget(now, hoursStr, minutes, ampm);
     if (ampmEl) {
       ampmEl.textContent = ampm;
       ampmEl.style.display = use24h ? "none" : "inline-block";
     }
 
     if (dateEl) {
-      const days = ["DOM", "LUN", "MAR", "MIÉ", "JUE", "VIE", "SÁB"];
-      const months = ["ENE", "FEB", "MAR", "ABR", "MAY", "JUN", "JUL", "AGO", "SEP", "OCT", "NOV", "DIC"];
+      const days = getLang() === "en" ? ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"] : ["DOM", "LUN", "MAR", "MIÉ", "JUE", "VIE", "SÁB"];
+      const months = getLang() === "en" ? ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"] : ["ENE", "FEB", "MAR", "ABR", "MAY", "JUN", "JUL", "AGO", "SEP", "OCT", "NOV", "DIC"];
       const dayName = days[now.getDay()];
       const dayNum = now.getDate();
       const monthName = months[now.getMonth()];
@@ -4368,7 +4754,8 @@ function initFloatingPixelClock() {
     }
   }
 
-  updateClock();
+  setClockStyle(clockStyle);
+  window.ikaClockStyle = setClockStyle;
   setInterval(updateClock, 1000);
 
   const statusDot = document.querySelector(".pixel-clock-status-dot");
@@ -4391,12 +4778,13 @@ function initFloatingPixelClock() {
 
   if (modeBtn) modeBtn.addEventListener("click", toggleTimeFormat);
   timeEl.addEventListener("click", toggleTimeFormat);
+  altEl?.addEventListener("click", toggleTimeFormat);
 
   // Directly draggable on click and drag
   clock.addEventListener("pointerdown", (e) => {
     if (e.button !== 0) return;
-    // Don't drag if clicking mode button
-    if (e.target.closest("#pixel-clock-mode-btn")) return;
+    // Don't drag if clicking mode button or resize handle
+    if (e.target.closest("#pixel-clock-mode-btn") || e.target.closest("#clock-resize-handle")) return;
 
     const startX = e.clientX;
     const startY = e.clientY;
@@ -4487,6 +4875,130 @@ function initFloatingPixelClock() {
     window.addEventListener("pointerup", onPointerUp);
     window.addEventListener("pointercancel", onPointerUp);
   });
+
+  const clockScaleSlider = document.getElementById("setting-ui-clock-scale");
+  const clockScaleVal = document.getElementById("setting-ui-clock-scale-val");
+  const btnResetClockScale = document.getElementById("btn-reset-clock-scale");
+
+  function applyClockScale(scale, saveToStorage = true, clampViewport = false) {
+    currentClockScale = Math.round(Math.max(0.5, Math.min(2.5, scale)) * 100) / 100;
+    clock.style.setProperty("--clock-scale", currentClockScale);
+    const innerEl = clock.querySelector(".pixel-clock-inner");
+    if (innerEl) {
+      if (!dockedSide()) {
+        innerEl.style.zoom = currentClockScale.toString();
+      } else {
+        innerEl.style.zoom = "1";
+      }
+    }
+    if (clockScaleSlider) clockScaleSlider.value = Math.round(currentClockScale * 100);
+    if (clockScaleVal) clockScaleVal.textContent = `${Math.round(currentClockScale * 100)}%`;
+
+    // Only clamp during active user resize if requested
+    if (clampViewport && !dockedSide() && window.innerWidth > 300) {
+      const curLeft = parseInt(clock.style.left, 10);
+      const curTop = parseInt(clock.style.top, 10);
+      if (!isNaN(curLeft) && !isNaN(curTop)) {
+        const maxLeft = Math.max(10, window.innerWidth - clock.offsetWidth - 20);
+        const maxTop = Math.max(56, window.innerHeight - clock.offsetHeight - 140);
+        const clampedLeft = Math.max(10, Math.min(curLeft, maxLeft));
+        const clampedTop = Math.max(56, Math.min(curTop, maxTop));
+        if (clampedLeft !== curLeft || clampedTop !== curTop) {
+          clock.style.left = `${clampedLeft}px`;
+          clock.style.top = `${clampedTop}px`;
+          if (floatPos) {
+            floatPos.left = clampedLeft;
+            floatPos.top = clampedTop;
+          }
+        }
+      }
+    }
+
+    if (saveToStorage) {
+      try {
+        localStorage.setItem("ika_clock_scale", currentClockScale.toString());
+      } catch (_) {}
+      save();
+    }
+  }
+
+  // Apply initial scale without moving or clamping
+  applyClockScale(currentClockScale, false, false);
+
+  if (clockScaleSlider) {
+    clockScaleSlider.addEventListener("input", (e) => {
+      const val = parseFloat(e.target.value) / 100;
+      applyClockScale(val, true);
+    });
+  }
+
+  if (btnResetClockScale) {
+    btnResetClockScale.addEventListener("click", () => {
+      applyClockScale(1.0, true);
+    });
+  }
+
+  // Proportional resize handle interaction
+  const resizeHandle = document.getElementById("clock-resize-handle");
+  if (resizeHandle) {
+    resizeHandle.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0 || dockedSide()) return;
+      e.stopPropagation();
+      e.preventDefault();
+      try {
+        resizeHandle.setPointerCapture(e.pointerId);
+      } catch (_) {}
+      resizeHandle.classList.add("is-resizing");
+      document.body.style.cursor = "nwse-resize";
+
+      const clockRect = clock.getBoundingClientRect();
+      const originX = clockRect.left;
+      const originY = clockRect.top;
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const baseDist = Math.hypot(startX - originX, startY - originY);
+      const startScale = currentClockScale;
+
+      const onResizeMove = (ev) => {
+        if (ev.clientX < originX + 20 || ev.clientY < originY + 20) {
+          applyClockScale(0.5, false);
+          return;
+        }
+        const curDist = Math.hypot(ev.clientX - originX, ev.clientY - originY);
+        if (baseDist <= 0) return;
+        let newScale = startScale * (curDist / baseDist);
+        newScale = Math.round(Math.max(0.5, Math.min(2.5, newScale)) * 100) / 100;
+        applyClockScale(newScale, false);
+      };
+
+      const onResizeUp = (ev) => {
+        try {
+          resizeHandle.releasePointerCapture(ev.pointerId);
+        } catch (_) {}
+        resizeHandle.classList.remove("is-resizing");
+        document.body.style.cursor = "";
+        window.removeEventListener("pointermove", onResizeMove);
+        window.removeEventListener("pointerup", onResizeUp);
+        window.removeEventListener("pointercancel", onResizeUp);
+
+        applyClockScale(currentClockScale, true);
+      };
+
+      window.addEventListener("pointermove", onResizeMove);
+      window.addEventListener("pointerup", onResizeUp);
+      window.addEventListener("pointercancel", onResizeUp);
+    });
+  }
+
+  // Ctrl + Wheel / Alt + Wheel on clock to resize proportionally
+  clock.addEventListener("wheel", (e) => {
+    if ((e.ctrlKey || e.altKey) && !dockedSide()) {
+      e.preventDefault();
+      e.stopPropagation();
+      const step = e.deltaY < 0 ? 0.05 : -0.05;
+      applyClockScale(currentClockScale + step, true);
+    }
+  }, { passive: false });
 }
 
 function updateHomeWelcomeUser() {
@@ -4496,93 +5008,253 @@ function updateHomeWelcomeUser() {
   nameEl.textContent = displayName;
 }
 
+// The hexagon buttons of a dock tray (the profile dock's and the right dock's): their name above
+// them while the pointer (or the focus) is on them, and a colour-split glitch when pressed.
+const HEX_PALETTES = [
+  ["#00f0ff", "#ff0055"],
+  ["#fee12b", "#00f0ff"],
+];
+let hexTurn = 0;
+function wireHexTray(dock, tip) {
+  if (!dock) return;
+  const showTip = (btn) => {
+    if (!tip) return;
+    const label = btn.dataset.tip || btn.getAttribute("title");
+    if (!label) return;
+    tip.textContent = label;
+    const wrap = (tip.offsetParent || dock).getBoundingClientRect();
+    if (!wrap) return;
+    const rect = btn.getBoundingClientRect();
+    tip.style.left = `${Math.round(rect.left + rect.width / 2 - wrap.left)}px`;
+    tip.style.top = `${Math.round(rect.top - wrap.top - 8)}px`;
+    tip.classList.add("is-visible");
+  };
+  const hideTip = () => tip?.classList.remove("is-visible");
+  const glitchHex = (btn) => {
+    const icon = btn.querySelector(".cyber-hex-icon") || btn;
+    const [a, b] = HEX_PALETTES[hexTurn++ % HEX_PALETTES.length];
+    const whiteGlow = "drop-shadow(0 0 2px rgba(255, 255, 255, 1)) drop-shadow(0 0 5.5px rgba(255, 255, 255, 0.85))";
+    const split = (px) => `${whiteGlow} drop-shadow(${-px}px 0 0 ${a}) drop-shadow(${px}px 0 0 ${b})`;
+    icon._glitch?.cancel();
+    icon._glitch = icon.animate(
+      // colour split only: the size is the press sink and release bounce (initHexIconBounce)
+      [
+        { filter: whiteGlow },
+        { filter: split(3), offset: 0.2 },
+        { filter: split(-2), offset: 0.45 },
+        { filter: split(1), offset: 0.72 },
+        { filter: whiteGlow },
+      ],
+      { duration: 420, easing: "steps(12, end)" }
+    );
+  };
+  dock.querySelectorAll(".cyber-hex-btn").forEach((btn) => {
+    btn.addEventListener("pointerenter", () => showTip(btn));
+    btn.addEventListener("focus", () => showTip(btn));
+    btn.addEventListener("pointerleave", hideTip);
+    btn.addEventListener("blur", hideTip);
+    btn.addEventListener("pointerdown", () => {
+      hideTip();
+      glitchHex(btn);
+    });
+  });
+}
+
 function renderUserBadge() {
   updateHomeWelcomeUser();
   if (!el.userBadgeContainer) return;
   el.userBadgeContainer.innerHTML = "";
 
-  if (!state.activeUser) {
-    // Unregistered state: Grayscale Steve avatar with "Agregar usuario"
-    const badge = document.createElement("div");
-    badge.className = "user-badge-btn";
-    badge.id = "btn-user-badge";
-    badge.title = "Haz clic para agregar un usuario";
-    badge.innerHTML = `
-      <div class="user-avatar-wrap">
-        <img src="${NO_ACCOUNT_AVATAR}" alt="Sin cuenta" class="user-avatar-img is-unregistered" />
-      </div>
-      <div class="user-badge-info">
-        <span class="user-badge-unregistered-label">Agregar usuario</span>
-      </div>
-      <div class="user-badge-gear-wrap">
-        <button type="button" class="user-badge-gear-btn" title="Configuración del Launcher">
-          <svg class="user-badge-gear-icon" viewBox="0 0 24 24" width="23" height="23" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <line x1="3" y1="6" x2="21" y2="6"></line>
-            <circle cx="8" cy="6" r="2.4" fill="currentColor"></circle>
-            <line x1="3" y1="12" x2="21" y2="12"></line>
-            <circle cx="16" cy="12" r="2.4" fill="currentColor"></circle>
-            <line x1="3" y1="18" x2="21" y2="18"></line>
-            <circle cx="10" cy="18" r="2.4" fill="currentColor"></circle>
-          </svg>
-        </button>
-      </div>
-    `;
-    badge.addEventListener("click", (e) => {
-      e.stopPropagation();
-      openAddUserModal();
-    });
-    const gearBtn = badge.querySelector(".user-badge-gear-btn");
-    if (gearBtn) {
-      gearBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        openLauncherSettingsModal();
-      });
-    }
-    el.userBadgeContainer.appendChild(badge);
-  } else {
-    // Active user registered: MC skin head + status dot + display name + handle
-    const badge = document.createElement("div");
-    badge.className = "user-badge-btn";
-    badge.id = "btn-user-badge";
-    const displayName = state.activeUser.displayName || state.activeUser.username;
-    badge.title = `Cuenta activa: ${displayName}`;
+  const isUnregistered = !state.activeUser;
+  const displayName = isUnregistered
+    ? "Agregar usuario"
+    : (state.activeUser.displayName || state.activeUser.username);
+  const handle = isUnregistered
+    ? "@invitado"
+    : `@${state.activeUser.username.toLowerCase()}`;
+  const badgeTitle = isUnregistered
+    ? "Haz clic para agregar un usuario"
+    : `Cuenta activa: ${displayName}`;
 
-    badge.innerHTML = `
-      <div class="user-avatar-wrap">
-        <img alt="${escapeHtml(state.activeUser.username)}" class="user-avatar-img" />
-        <span class="user-status-dot"></span>
+  // Custom cover or default
+  const savedCover = localStorage.getItem("ika_custom_cover_bg");
+  const coverBgStyle = savedCover
+    ? `background-image: url('${savedCover}');`
+    : `background-image: url('/profile-cyber-bg.jpg');`;
+
+  const dock = document.createElement("div");
+  dock.className = "cyber-profile-dock";
+  dock.id = "cyber-profile-dock";
+
+  dock.innerHTML = `
+    <!-- 1. Left Profile Card Button -->
+    <div class="cyber-profile-card user-badge-btn" id="btn-user-badge" title="${escapeHtml(badgeTitle)}">
+      <!-- Background Layer with Cover -->
+      <div class="cyber-profile-bg-layer">
+        <div class="cyber-profile-custom-cover" style="${coverBgStyle}"></div>
       </div>
-      <div class="user-badge-info">
-        <span class="user-badge-name">${escapeHtml(displayName)}</span>
-        <span class="user-badge-handle">@${escapeHtml(state.activeUser.username.toLowerCase())}</span>
+
+      <!-- Moving Gradient Border SVG (Soft, Smooth, Zero-Sync: Profile Top Left 22s, Profile Bottom Right 27s) -->
+      <svg class="cyber-profile-border-svg" viewBox="0 0 300 96" preserveAspectRatio="none">
+        <!-- Top contour (dockGradProfileTop, 22s Left) -->
+        <path class="cyber-glow-layer"
+              d="M 2,50 L 2,30 Q 2,2 30,2 L 274,2 L 298,26"
+              fill="none" stroke="url(#dockGradProfileTop)" stroke-width="3.2" opacity="0.30"
+              stroke-linecap="round" stroke-linejoin="round" filter="url(#hairlineNeonGlow)" />
+        <path class="cyber-core-layer"
+              d="M 2,50 L 2,30 Q 2,2 30,2 L 274,2 L 298,26"
+              fill="none" stroke="url(#dockGradProfileTop)" stroke-width="1.4"
+              stroke-linecap="round" stroke-linejoin="round" />
+
+        <!-- Bottom contour (dockGradProfileBottom, 27s Right) -->
+        <path class="cyber-glow-layer"
+              d="M 298,26 L 230,94 L 30,94 Q 2,94 2,66 L 2,50"
+              fill="none" stroke="url(#dockGradProfileBottom)" stroke-width="3.2" opacity="0.30"
+              stroke-linecap="round" stroke-linejoin="round" filter="url(#hairlineNeonGlow)" />
+        <path class="cyber-core-layer"
+              d="M 298,26 L 230,94 L 30,94 Q 2,94 2,66 L 2,50"
+              fill="none" stroke="url(#dockGradProfileBottom)" stroke-width="1.4"
+              stroke-linecap="round" stroke-linejoin="round" />
+      </svg>
+
+      <!-- Avatar inside Profile Card -->
+      <div class="cyber-avatar-wrap">
+        <img alt="${escapeHtml(isUnregistered ? 'Sin cuenta' : state.activeUser.username)}"
+             class="user-avatar-img cyber-avatar-img ${isUnregistered ? 'is-unregistered' : ''}"
+             ${isUnregistered ? `src="${NO_ACCOUNT_AVATAR}"` : ''} />
+        <span class="cyber-status-dot ${isUnregistered ? 'is-offline' : ''}"></span>
       </div>
-      <div class="user-badge-gear-wrap">
-        <button type="button" class="user-badge-gear-btn" title="Configuración del Launcher">
-          <svg class="user-badge-gear-icon" viewBox="0 0 24 24" width="23" height="23" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <line x1="3" y1="6" x2="21" y2="6"></line>
-            <circle cx="8" cy="6" r="2.4" fill="currentColor"></circle>
-            <line x1="3" y1="12" x2="21" y2="12"></line>
-            <circle cx="16" cy="12" r="2.4" fill="currentColor"></circle>
-            <line x1="3" y1="18" x2="21" y2="18"></line>
-            <circle cx="10" cy="18" r="2.4" fill="currentColor"></circle>
-          </svg>
-        </button>
+
+      <!-- User Information (Display Name + Handle) -->
+      <div class="cyber-profile-info">
+        <span class="cyber-profile-name">${escapeHtml(displayName)}${!isUnregistered && window.ikaVerified?.has(state.activeUser.username) ? window.ikaVerified.html : ""}</span>
+        <span class="cyber-profile-handle">${escapeHtml(handle)}</span>
       </div>
-    `;
-    setUserHeadImg(badge.querySelector(".user-avatar-img"), state.activeUser);
-    badge.addEventListener("click", (e) => {
+
+
+    </div>
+
+    <!-- 2. Right Actions Tray (3 Hexagonal Buttons: Tuerca, Amigos, Comunidad) -->
+    <div class="cyber-actions-tray">
+      <div class="cyber-tray-bg-layer"></div>
+
+      <svg class="cyber-tray-border-svg" viewBox="0 0 310 70" preserveAspectRatio="none">
+        <!-- Tray Top & Angled Side (dockGradTrayTop, 25s Left, Phase 1200) -->
+        <path class="cyber-glow-layer"
+              d="M 2,68 L 68,2 L 226,2 Q 238,2 244,8 L 304,68"
+              fill="none" stroke="url(#dockGradTrayTop)" stroke-width="3.2" opacity="0.30"
+              stroke-linecap="round" stroke-linejoin="round" filter="url(#hairlineNeonGlow)" />
+        <path class="cyber-core-layer"
+              d="M 2,68 L 68,2 L 226,2 Q 238,2 244,8 L 304,68"
+              fill="none" stroke="url(#dockGradTrayTop)" stroke-width="1.4"
+              stroke-linecap="round" stroke-linejoin="round" />
+
+        <!-- Tray Bottom Edge (dockGradTrayBottom, 31s Right, Phase 1800) -->
+        <path class="cyber-glow-layer"
+              d="M 304,68 L 2,68"
+              fill="none" stroke="url(#dockGradTrayBottom)" stroke-width="3.2" opacity="0.30"
+              stroke-linecap="round" stroke-linejoin="round" filter="url(#hairlineNeonGlow)" />
+        <path class="cyber-core-layer"
+              d="M 304,68 L 2,68"
+              fill="none" stroke="url(#dockGradTrayBottom)" stroke-width="1.4"
+              stroke-linecap="round" stroke-linejoin="round" />
+      </svg>
+
+      <div class="cyber-tray-buttons">
+        <!-- 1. Gear: Preferencias / Launcher Settings -->
+        <div class="cyber-hex-item">
+          <button type="button" class="cyber-hex-btn is-gear user-badge-gear-btn" id="btn-pref-gear" data-tip="Preferencias" title="Preferencias">
+            <svg class="cyber-hex-icon" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="3.2"></circle>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+            </svg>
+          </button>
+        </div>
+
+        <!-- 2. Friends: Amigos -->
+        <div class="cyber-hex-item">
+          <button type="button" class="cyber-hex-btn is-friends" id="btn-user-friends" data-tip="Amigos" title="Amigos">
+            <svg class="cyber-hex-icon" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path>
+              <circle cx="9" cy="7" r="3.6"></circle>
+              <path d="M22 21v-2a4 4 0 0 0-3-3.87"></path>
+              <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+            </svg>
+          </button>
+        </div>
+
+        <!-- 3. Community / Groups: Grupos -->
+        <div class="cyber-hex-item">
+          <button type="button" class="cyber-hex-btn is-community" id="btn-user-community" data-tip="Grupos" title="Grupos">
+            <svg class="cyber-hex-icon is-comm-icon" viewBox="0 0 24 24" width="25" height="25" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
+              <!-- Center User (Bold & Clear) -->
+              <circle cx="12" cy="6.8" r="3.4"></circle>
+              <path d="M 6.2,20 C 6.2,15.4 8.6,13.5 12,13.5 C 15.4,13.5 17.8,15.4 17.8,20 Z"></path>
+              <!-- Left User -->
+              <circle cx="4.8" cy="9.5" r="2.4"></circle>
+              <path d="M 1.2,19.5 C 1.2,16.5 3,14.6 6,14.6"></path>
+              <!-- Right User -->
+              <circle cx="19.2" cy="9.5" r="2.4"></circle>
+              <path d="M 18,14.6 C 21,14.6 22.8,16.5 22.8,19.5"></path>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Floating Tooltip for Tray Buttons (Top level inside dock to render over profile card) -->
+    <div id="cyber-tray-tip" class="cyber-dock-tip" role="tooltip"></div>
+  `;
+
+  const profileCard = dock.querySelector("#btn-user-badge");
+  if (profileCard) {
+    profileCard.addEventListener("click", (e) => {
       e.stopPropagation();
-      toggleUserContextMenu();
+      if (isUnregistered) {
+        openAddUserModal();
+      } else {
+        toggleUserContextMenu();
+      }
     });
-    const gearBtn = badge.querySelector(".user-badge-gear-btn");
-    if (gearBtn) {
-      gearBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        openLauncherSettingsModal();
-      });
-    }
-    el.userBadgeContainer.appendChild(badge);
   }
+
+  if (!isUnregistered) {
+    const avatarImg = dock.querySelector(".user-avatar-img");
+    if (avatarImg) {
+      setUserHeadImg(avatarImg, state.activeUser);
+    }
+  }
+
+  // Tray Button Tooltips & Glitch (isolated to hex buttons, zero effect on cyber dock)
+  wireHexTray(dock, dock.querySelector("#cyber-tray-tip"));
+
+  // Action Buttons Events
+  const gearBtn = dock.querySelector("#btn-pref-gear");
+  if (gearBtn) {
+    gearBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openLauncherSettingsModal();
+    });
+  }
+
+  const friendsBtn = dock.querySelector("#btn-user-friends");
+  if (friendsBtn) {
+    friendsBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      window.ikaSocial?.open();
+    });
+  }
+
+  const communityBtn = dock.querySelector("#btn-user-community");
+  if (communityBtn) {
+    communityBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      window.ikaGroups?.open();
+    });
+  }
+
+  el.userBadgeContainer.appendChild(dock);
   requestAnimationFrame(syncBottomDockButtonsWidth);
 }
 
@@ -4591,26 +5263,41 @@ function renderUserBadge() {
 // ==========================================
 function applyProfileCover(dataUrl) {
   const header = document.querySelector(".profile-settings-header");
-  if (!header) return;
-  if (dataUrl) {
-    header.style.setProperty("background-image", `url("${dataUrl}")`, "important");
-    header.style.setProperty("background-repeat", "no-repeat", "important");
-    header.style.setProperty("background-size", "cover", "important");
-    header.style.setProperty("background-position", "center", "important");
-  } else {
-    header.style.setProperty("background-image", 'url("/cyber_doodle_pattern.svg")', "important");
-    header.style.setProperty("background-repeat", "repeat", "important");
-    header.style.setProperty("background-size", "220px 220px", "important");
-    header.style.setProperty("background-position", "center", "important");
+  if (header) {
+    if (dataUrl) {
+      header.style.setProperty("background-image", `url("${dataUrl}")`, "important");
+      header.style.setProperty("background-repeat", "no-repeat", "important");
+      header.style.setProperty("background-size", "cover", "important");
+      header.style.setProperty("background-position", "center", "important");
+    } else {
+      header.style.setProperty("background-image", 'url("/cyber_doodle_pattern.svg")', "important");
+      header.style.setProperty("background-repeat", "repeat", "important");
+      header.style.setProperty("background-size", "220px 220px", "important");
+      header.style.setProperty("background-position", "center", "important");
+    }
+  }
+  const badgeCover = document.querySelector(".cyber-profile-custom-cover");
+  if (badgeCover) {
+    if (dataUrl) {
+      badgeCover.style.backgroundImage = `url("${dataUrl}")`;
+    } else {
+      badgeCover.style.backgroundImage = 'url("/profile-cyber-bg.jpg")';
+    }
   }
 }
 
-let isClosingLauncherSettingsModal = false;
+// isClosingLauncherSettingsModal declared above
 
 function openLauncherSettingsModal() {
   const modal = document.getElementById("modal-launcher-settings");
   if (!modal) return;
   isClosingLauncherSettingsModal = false;
+  if (blurZOrderTimer) {
+    clearTimeout(blurZOrderTimer);
+    blurZOrderTimer = null;
+  }
+  lastConsoleBlurBehind = true;
+  invoke("set_console_blur_behind_app", { behind: true }).catch(() => {});
 
   // Ensure modal box opens at its saved position without jumping
   const modalBox = document.getElementById("modal-settings-box") || modal.querySelector(".modal-settings-box");
@@ -4645,7 +5332,11 @@ function openLauncherSettingsModal() {
   const displayName = (activeUser && (activeUser.displayName || activeUser.username)) || localStorage.getItem("ika_user_display_name") || "(Faally) Bryan Olazabal";
   const rawHandle = (activeUser && activeUser.username) ? activeUser.username : (localStorage.getItem("ika_user_handle") || "Faally_XB");
   const handle = rawHandle.startsWith("@") ? rawHandle : `@${rawHandle}`;
-  const statusQuote = (activeUser && activeUser.statusQuote) || localStorage.getItem("ika_user_status_quote") || "El reto es enorme, pero la transformación comienza por pequeños actos, desde el interior hacia lo colectivo.";
+  let statusQuote = (activeUser && activeUser.statusQuote) || localStorage.getItem("ika_user_status_quote") || "";
+  if (statusQuote.includes("El reto es enorme")) {
+    statusQuote = "";
+    localStorage.removeItem("ika_user_status_quote");
+  }
 
   const displayNameEl = document.getElementById("profile-display-name");
   const handleEl = document.getElementById("profile-handle");
@@ -4665,6 +5356,7 @@ function openLauncherSettingsModal() {
   if (editQuoteInput) editQuoteInput.value = statusQuote;
 
   // 2. Reset navigation to default List View
+  window.ikaLaika?.close();
   const listView = document.getElementById("settings-nav-list-view");
   const detailView = document.getElementById("settings-detail-subview");
   const searchWrap = document.getElementById("profile-settings-search-wrap");
@@ -4683,10 +5375,23 @@ function openLauncherSettingsModal() {
     document.querySelectorAll(".settings-nav-row").forEach((row) => row.classList.remove("hidden"));
   }
 
-  // Populate Extras: Hide welcome text
+  // Populate Extras: Hide welcome text & Native blur window
   const hideWelcomeCb = document.getElementById("setting-hide-welcome-text");
   if (hideWelcomeCb) {
     hideWelcomeCb.checked = localStorage.getItem("ika_hide_welcome_text") === "true";
+  }
+  const extrasConsoleBlurCb = document.getElementById("setting-extras-console-blur");
+  const isBlurActive = localStorage.getItem("ika_ui_console_blur") !== "false";
+  if (extrasConsoleBlurCb) {
+    extrasConsoleBlurCb.checked = isBlurActive;
+  }
+  const extrasWin32Cb = document.getElementById("setting-extras-win32-window");
+  if (extrasWin32Cb) {
+    extrasWin32Cb.checked = localStorage.getItem("ika_extras_win32_window") === "true";
+  }
+  const win32Wrap = document.getElementById("wrap-extras-win32-window");
+  if (win32Wrap) {
+    win32Wrap.classList.toggle("hidden", !isBlurActive);
   }
 
   // 3. Populate Settings Values
@@ -4711,7 +5416,8 @@ function openLauncherSettingsModal() {
   const langSelect = document.getElementById("setting-launcher-language");
   const langPill = document.getElementById("val-global-lang-pill");
   if (langSelect) {
-    const savedLang = localStorage.getItem("ika_launcher_language") || "es";
+    // the language the launcher is in (it only changes by choosing another, which reloads)
+    const savedLang = getLang();
     langSelect.value = savedLang;
     if (langPill) langPill.textContent = savedLang === "en" ? "English" : "Español";
   }
@@ -4748,6 +5454,7 @@ function openLauncherSettingsModal() {
 function closeLauncherSettingsModal(immediate = false) {
   const modal = document.getElementById("modal-launcher-settings");
   if (!modal || modal.classList.contains("hidden")) return;
+  window.ikaLaika?.close();
 
   // Auto-save modified settings on close
   try {
@@ -4757,8 +5464,6 @@ function closeLauncherSettingsModal(immediate = false) {
     const closeAction = document.getElementById("setting-launcher-close-action");
     if (closeAction) localStorage.setItem("ika_launcher_close_action", closeAction.value);
 
-    const langSelect = document.getElementById("setting-launcher-language");
-    if (langSelect) localStorage.setItem("ika_launcher_language", langSelect.value);
 
     const javaPathInput = document.getElementById("setting-global-java-path");
     if (javaPathInput) localStorage.setItem("ika_launcher_java_path", javaPathInput.value.trim());
@@ -4796,8 +5501,9 @@ function closeLauncherSettingsModal(immediate = false) {
       if (hEl) hEl.textContent = `@${newHandle}`;
       if (state.activeUser) state.activeUser.username = newHandle;
     }
-    if (editQuoteInput && editQuoteInput.value.trim()) {
-      const newQuote = editQuoteInput.value.trim();
+    if (editQuoteInput) {
+      let newQuote = editQuoteInput.value.trim();
+      if (newQuote.includes("El reto es enorme")) newQuote = "";
       localStorage.setItem("ika_user_status_quote", newQuote);
       if (state.activeUser) state.activeUser.statusQuote = newQuote;
     }
@@ -4810,10 +5516,11 @@ function closeLauncherSettingsModal(immediate = false) {
   const accountDropdown = document.getElementById("profile-account-dropdown");
   if (accountDropdown) accountDropdown.classList.add("hidden");
 
-  if (immediate) {
+  if (immediate === true) {
     modal.classList.add("hidden");
     modal.classList.remove("is-closing", "is-opening", "preview-appearance");
     isClosingLauncherSettingsModal = false;
+    updateConsoleBlurZOrder();
     return;
   }
 
@@ -4826,10 +5533,11 @@ function closeLauncherSettingsModal(immediate = false) {
     modal.classList.add("hidden");
     modal.classList.remove("is-closing", "preview-appearance");
     isClosingLauncherSettingsModal = false;
-  }, 240);
+    updateConsoleBlurZOrder();
+  }, 360);
 }
 
-let isClosingInstanceSettingsModal = false;
+// isClosingInstanceSettingsModal declared above
 
 function openInstanceSettingsModal() {
   const modal = document.getElementById("modal-instance-settings");
@@ -4882,7 +5590,7 @@ function openInstanceSettingsModal() {
 function closeInstanceSettingsModal(immediate = false) {
   const modal = document.getElementById("modal-instance-settings");
   if (!modal || modal.classList.contains("hidden")) return;
-  if (immediate) {
+  if (immediate === true) {
     modal.classList.add("hidden");
     modal.classList.remove("is-closing", "is-opening", "has-saved-success");
     const box = modal.querySelector(".modal-settings-box");
@@ -4912,7 +5620,8 @@ function closeInstanceSettingsModal(immediate = false) {
       box.classList.remove("has-saved-success");
     }
     isClosingInstanceSettingsModal = false;
-  }, 260);
+    updateConsoleBlurZOrder();
+  }, 360);
 }
 
 function initSettingsModals() {
@@ -4927,8 +5636,8 @@ function initSettingsModals() {
   const ramValLauncher = document.getElementById("val-global-ram");
   const ramPillLauncher = document.getElementById("val-global-ram-pill");
 
-  if (btnCloseLauncher) btnCloseLauncher.addEventListener("click", closeLauncherSettingsModal);
-  if (btnCancelLauncher) btnCancelLauncher.addEventListener("click", closeLauncherSettingsModal);
+  if (btnCloseLauncher) btnCloseLauncher.addEventListener("click", () => closeLauncherSettingsModal(false));
+  if (btnCancelLauncher) btnCancelLauncher.addEventListener("click", () => closeLauncherSettingsModal(false));
 
   // Close Settings or Cover Adjuster on Escape key
   document.addEventListener("keydown", (e) => {
@@ -4955,12 +5664,33 @@ function initSettingsModals() {
     });
   }
 
+  // Sistema: start with Windows (off unless the player turns it on)
+  const autostartSwitch = document.getElementById("setting-autostart");
+  if (autostartSwitch) {
+    invoke("autostart_enabled")
+      .then((on) => (autostartSwitch.checked = !!on))
+      .catch(() => {});
+    autostartSwitch.addEventListener("change", async () => {
+      const want = autostartSwitch.checked;
+      try {
+        await invoke("set_autostart", { enabled: want });
+        showToast(want ? "Ika se abrirá al iniciar Windows." : "Ika ya no se abrirá al iniciar Windows.");
+      } catch (err) {
+        autostartSwitch.checked = !want;
+        showToast(String(err));
+      }
+    });
+  }
+
   // Language Pill sync
   const langSelectLauncher = document.getElementById("setting-launcher-language");
   const langPillLauncher = document.getElementById("val-global-lang-pill");
-  if (langSelectLauncher && langPillLauncher) {
+  if (langSelectLauncher) {
+    langSelectLauncher.value = getLang();
+    // the launcher reloads in the chosen language
     langSelectLauncher.addEventListener("change", () => {
-      langPillLauncher.textContent = langSelectLauncher.value === "en" ? "English" : "Español";
+      if (langPillLauncher) langPillLauncher.textContent = langSelectLauncher.value === "en" ? "English" : "Español";
+      if (langSelectLauncher.value !== getLang()) setLanguage(langSelectLauncher.value);
     });
   }
 
@@ -5153,6 +5883,12 @@ function initSettingsModals() {
     renderSettingsBreadcrumb("appearance", secKey);
   }
 
+  const laikaTribute = createLaikaTribute({
+    onBack: () => showListView(),
+    onClose: () => closeLauncherSettingsModal(),
+  });
+  window.ikaLaika = laikaTribute;
+
   function showDetailPanel(targetKey) {
     if (!listView || !detailView) return;
     currentDetailPanelKey = targetKey;
@@ -5165,6 +5901,9 @@ function initSettingsModals() {
     });
     const targetEl = document.getElementById(`settings-panel-${targetKey}`);
     if (targetEl) targetEl.classList.remove("hidden");
+    // Acerca de Ika Launcher is the tribute to Laika, over the whole window
+    if (targetKey === "update") laikaTribute.open();
+    else laikaTribute.close();
 
     if (targetKey === "appearance") {
       showAppearanceMainView();
@@ -5182,6 +5921,7 @@ function initSettingsModals() {
 
   function showListView() {
     if (!listView || !detailView) return;
+    laikaTribute.close();
     currentAppearanceSec = null;
     detailView.classList.add("hidden");
     listView.classList.remove("hidden");
@@ -5211,6 +5951,45 @@ function initSettingsModals() {
     });
   }
 
+  // Aspecto visual > Inicio: the windows' opening / closing animation. Choosing one plays it on
+  // Preferences itself, as a preview.
+  const animGrid = document.getElementById("window-anim-grid");
+  if (animGrid) {
+    const mark = () => animGrid.querySelectorAll(".window-anim-opt").forEach((o) => {
+      o.classList.toggle("is-active", o.dataset.anim === getWindowAnim());
+      o.setAttribute("aria-checked", String(o.dataset.anim === getWindowAnim()));
+    });
+    for (const [id, name] of WINDOW_ANIMS) {
+      const opt = document.createElement("button");
+      opt.type = "button";
+      opt.className = "window-anim-opt";
+      opt.dataset.anim = id;
+      opt.setAttribute("role", "radio");
+      opt.innerHTML = `<span class="wa-sample wa-${id}"><i></i></span><span class="wa-name"></span>`;
+      opt.querySelector(".wa-name").textContent = name;
+      opt.addEventListener("click", () => {
+        setWindowAnim(id);
+        mark();
+        const box = document.getElementById("modal-settings-box");
+        if (box) crtOpen(box);
+      });
+      animGrid.appendChild(opt);
+    }
+    mark();
+  }
+
+  // Extras: Recientes / Favoritos always white (the default), or only over a very light wallpaper
+  const pillsWhiteCb = document.getElementById("setting-pills-white");
+  const pillsWhite = localStorage.getItem("ika_pills_white") !== "false";
+  document.body.classList.toggle("pills-always-white", pillsWhite);
+  if (pillsWhiteCb) {
+    pillsWhiteCb.checked = pillsWhite;
+    pillsWhiteCb.addEventListener("change", (e) => {
+      localStorage.setItem("ika_pills_white", String(e.target.checked));
+      document.body.classList.toggle("pills-always-white", e.target.checked);
+    });
+  }
+
   // Extras: Ocultar / Mostrar texto de bienvenida
   const hideWelcomeCb = document.getElementById("setting-hide-welcome-text");
   const homeWelcomeDock = document.getElementById("home-welcome-dock");
@@ -5231,10 +6010,57 @@ function initSettingsModals() {
     });
   }
 
+  // Extras: Ventana blur nativa experimental
+  const extrasBlurCb = document.getElementById("setting-extras-console-blur");
+  if (extrasBlurCb) {
+    extrasBlurCb.checked = localStorage.getItem("ika_ui_console_blur") !== "false";
+    extrasBlurCb.addEventListener("change", (e) => {
+      const enabled = e.target.checked;
+      localStorage.setItem("ika_ui_console_blur", enabled ? "true" : "false");
+      const consoleCb = document.getElementById("setting-ui-console-blur");
+      if (consoleCb) consoleCb.checked = enabled;
+      applyConsoleBlurEffect(enabled);
+    });
+  }
+
+  // Control de desenfoque translúcido (Blur) vs opacidad pura en la consola
+  const applyConsoleBlurEffect = (enabled) => {
+    const consoleDock = document.getElementById("home-console-preview-dock");
+    const consoleView = document.getElementById("view-consola");
+    const consoleBlurBg = document.getElementById("hcp-we-blur-bg");
+    if (consoleDock) consoleDock.classList.toggle("no-blur", !enabled);
+    if (consoleView) consoleView.classList.toggle("no-blur", !enabled);
+    document.body.classList.toggle("no-console-blur", !enabled);
+    if (consoleBlurBg) {
+      if (enabled) {
+        consoleBlurBg.style.display = "";
+        consoleBlurBg.style.opacity = document.body.classList.contains("has-we-active") ? "1" : "0";
+      } else {
+        consoleBlurBg.style.opacity = "0";
+        consoleBlurBg.style.display = "none";
+      }
+    }
+    const extrasCb = document.getElementById("setting-extras-console-blur");
+    if (extrasCb && extrasCb.checked !== enabled) {
+      extrasCb.checked = enabled;
+    }
+    const consoleCb = document.getElementById("setting-ui-console-blur");
+    if (consoleCb && consoleCb.checked !== enabled) {
+      consoleCb.checked = enabled;
+    }
+    const win32Wrap = document.getElementById("wrap-extras-win32-window");
+    if (win32Wrap) {
+      win32Wrap.classList.toggle("hidden", !enabled);
+    }
+    syncConsoleBlurRect(true, true);
+  };
+
   // Switches de personalización por sección
   const SECTION_SWITCH_KEYS = [
-    { id: "setting-ui-show-clock", key: "ika_ui_show_clock", targetId: "pixel-clock-container" },
-    { id: "setting-ui-hud-glow", key: "ika_ui_hud_glow" },
+    { id: "setting-ui-show-clock", key: "ika_ui_show_clock", targetId: "home-pixel-clock" },
+    { id: "setting-ui-console-blur", key: "ika_ui_console_blur", onToggle: applyConsoleBlurEffect },
+    { id: "setting-extras-console-blur", key: "ika_ui_console_blur", onToggle: applyConsoleBlurEffect },
+    { id: "setting-extras-win32-window", key: "ika_extras_win32_window", onToggle: () => syncConsoleBlurRect(true, true) },
     { id: "setting-ui-console-autoscroll", key: "ika_ui_console_autoscroll" },
     { id: "setting-ui-console-colors", key: "ika_ui_console_colors" },
     { id: "setting-ui-diff-glow", key: "ika_ui_diff_glow" },
@@ -5245,16 +6071,24 @@ function initSettingsModals() {
     { id: "setting-ui-server-motd", key: "ika_ui_server_motd" }
   ];
 
-  SECTION_SWITCH_KEYS.forEach(({ id, key, targetId }) => {
+  SECTION_SWITCH_KEYS.forEach(({ id, key, targetId, onToggle }) => {
     const cb = document.getElementById(id);
     if (!cb) return;
     const saved = localStorage.getItem(key);
     if (saved !== null) {
       cb.checked = saved === "true";
     }
+    // For clock, force visible if not explicitly hidden by user
+    if (key === "ika_ui_show_clock") {
+      cb.checked = true;
+      localStorage.setItem("ika_ui_show_clock", "true");
+    }
     if (targetId) {
       const targetEl = document.getElementById(targetId);
       if (targetEl) targetEl.classList.toggle("hidden", !cb.checked);
+    }
+    if (onToggle) {
+      onToggle(cb.checked);
     }
     cb.addEventListener("change", () => {
       localStorage.setItem(key, cb.checked ? "true" : "false");
@@ -5262,8 +6096,33 @@ function initSettingsModals() {
         const targetEl = document.getElementById(targetId);
         if (targetEl) targetEl.classList.toggle("hidden", !cb.checked);
       }
+      if (onToggle) {
+        onToggle(cb.checked);
+      }
     });
   });
+
+  // Barra de instancias carrusel: Translúcido (Opacidad / Blur) vs Difuminado (Degradado)
+  const instBarEffectSelect = document.getElementById("setting-ui-inst-bar-effect");
+  const applyInstBarEffect = (effectVal) => {
+    const pillsCont = document.getElementById("instance-category-pills");
+    if (pillsCont) {
+      pillsCont.classList.toggle("effect-difuminado", effectVal === "difuminado");
+    }
+    if (typeof updateInstPillGlider === "function") {
+      requestAnimationFrame(() => updateInstPillGlider(false));
+    }
+  };
+  const savedInstBarEffect = localStorage.getItem("ika_inst_bar_effect") || "translucent";
+  if (instBarEffectSelect) {
+    instBarEffectSelect.value = savedInstBarEffect;
+    instBarEffectSelect.addEventListener("change", (e) => {
+      const val = e.target.value;
+      localStorage.setItem("ika_inst_bar_effect", val);
+      applyInstBarEffect(val);
+    });
+  }
+  applyInstBarEffect(savedInstBarEffect);
 
   if (modalLauncher) {
     modalLauncher.querySelectorAll(".settings-nav-row").forEach((row) => {
@@ -5647,6 +6506,7 @@ function initSettingsModals() {
 
         closeCoverAdjusterModal();
         showToast("¡Portada de perfil actualizada con éxito!");
+        window.dispatchEvent(new Event("ika-cover-changed"));
       } catch (err) {
         console.error("Error al guardar portada:", err);
         showToast("Error al procesar la imagen de portada.");
@@ -5660,6 +6520,7 @@ function initSettingsModals() {
       applyProfileCover(null);
       closeCoverAdjusterModal();
       showToast("Portada restablecida al patrón predeterminado.");
+      window.dispatchEvent(new Event("ika-cover-changed"));
     });
   }
 
@@ -5796,8 +6657,6 @@ function initSettingsModals() {
       // 2. Comportamiento y Lenguaje
       const closeAction = document.getElementById("setting-launcher-close-action");
       if (closeAction) localStorage.setItem("ika_launcher_close_action", closeAction.value);
-      const langSelect = document.getElementById("setting-launcher-language");
-      if (langSelect) localStorage.setItem("ika_launcher_language", langSelect.value);
 
       // 3. Java & JVM
       const javaPathInput = document.getElementById("setting-global-java-path");
@@ -5822,7 +6681,8 @@ function initSettingsModals() {
 
       const newName = editNameInput?.value.trim() || "(Faally) Bryan Olazabal";
       const newHandle = editHandleInput?.value.trim().replace(/^@/, '') || "Faally_XB";
-      const newQuote = editQuoteInput?.value.trim() || "El reto es enorme, pero la transformación comienza por pequeños actos, desde el interior hacia lo colectivo.";
+      let newQuote = editQuoteInput?.value.trim() || "";
+      if (newQuote.includes("El reto es enorme")) newQuote = "";
 
       localStorage.setItem("ika_user_display_name", newName);
       localStorage.setItem("ika_user_handle", newHandle);
@@ -5874,39 +6734,15 @@ function initSettingsModals() {
     });
   }
 
-  const btnOpenLogs = document.getElementById("btn-open-launcher-logs");
-  if (btnOpenLogs) {
-    btnOpenLogs.addEventListener("click", () => {
-      showToast("Carpeta de registros (logs): ./logs/");
-    });
-  }
-
-  const btnClearCache = document.getElementById("btn-clear-launcher-cache");
-  if (btnClearCache) {
-    btnClearCache.addEventListener("click", () => {
-      showToast("Caché de texturas y skins limpiada con éxito.");
-    });
-  }
-
-  const btnCheckUpdates = document.getElementById("btn-check-updates");
-  if (btnCheckUpdates) {
-    btnCheckUpdates.addEventListener("click", () => {
-      showToast("Comprobando actualizaciones... Tienes la versión más reciente (v1.5.5 Cyber Edition).");
-    });
-  }
-
-  const btnOpenGithub = document.getElementById("btn-open-github-repo");
-  if (btnOpenGithub) {
-    btnOpenGithub.addEventListener("click", () => {
-      invoke("open_browser", { url: "https://github.com/Xamply/Ika" }).catch(() => {
-        window.open("https://github.com/Xamply/Ika", "_blank");
-      });
-    });
-  }
-
   const btnReset = document.getElementById("btn-reset-launcher-settings");
   if (btnReset) {
-    btnReset.addEventListener("click", () => {
+    btnReset.addEventListener("click", async () => {
+      const ok = await showConfirmDialog({
+        title: "RESTABLECER CONFIGURACIÓN",
+        message: "¿Restaurar los ajustes del launcher a sus valores predeterminados?",
+        confirmText: "Restablecer",
+      });
+      if (!ok) return;
       if (ramInputLauncher) {
         ramInputLauncher.value = "4096";
         if (ramValLauncher) ramValLauncher.textContent = "4096 MB (4 GB)";
@@ -5934,8 +6770,8 @@ function initSettingsModals() {
   const ramInputInst = document.getElementById("setting-inst-ram");
   const ramValInst = document.getElementById("val-inst-ram");
 
-  if (btnCloseInst) btnCloseInst.addEventListener("click", closeInstanceSettingsModal);
-  if (btnCancelInst) btnCancelInst.addEventListener("click", closeInstanceSettingsModal);
+  if (btnCloseInst) btnCloseInst.addEventListener("click", () => closeInstanceSettingsModal(false));
+  if (btnCancelInst) btnCancelInst.addEventListener("click", () => closeInstanceSettingsModal(false));
 
   if (ramInputInst && ramValInst) {
     ramInputInst.addEventListener("input", () => {
@@ -6060,6 +6896,7 @@ function syncBottomDockButtonsWidth() {
   const wpBtn = document.getElementById("btn-quick-wallpaper");
   const userBtn = document.getElementById("btn-user-badge");
   if (!wpBtn || !userBtn) return;
+  if (userBtn.classList.contains("cyber-profile-card")) return;
   const wpWidth = wpBtn.getBoundingClientRect().width;
   if (wpWidth > 0) {
     userBtn.style.width = `${Math.round(wpWidth)}px`;
@@ -6250,7 +7087,16 @@ function skinToHeadDataUrl(skinUrl) {
         const ctx = c.getContext("2d");
         ctx.imageSmoothingEnabled = false;
         ctx.drawImage(img, 8, 8, 8, 8, 0, 0, 128, 128);
-        ctx.drawImage(img, 40, 8, 8, 8, 0, 0, 128, 128);
+        // the hat layer, unless it is fully opaque: old skins left it painted solid (often
+        // black), and Minecraft ignores it then too
+        const probe = document.createElement("canvas");
+        probe.width = probe.height = 8;
+        const pctx = probe.getContext("2d");
+        pctx.drawImage(img, 40, 8, 8, 8, 0, 0, 8, 8);
+        const alpha = pctx.getImageData(0, 0, 8, 8).data;
+        let opaque = true;
+        for (let i = 3; i < alpha.length; i += 4) if (alpha[i] < 255) opaque = false;
+        if (!opaque) ctx.drawImage(img, 40, 8, 8, 8, 0, 0, 128, 128);
         resolve(c.toDataURL("image/png"));
       } catch {
         resolve(null);
@@ -6258,6 +7104,1159 @@ function skinToHeadDataUrl(skinUrl) {
     };
     img.onerror = () => resolve(null);
     img.src = skinUrl;
+  });
+}
+
+// A Minecraft head is 8x8 pixels. Shown at a size that isn't a whole number of screen pixels per
+// skin pixel, some rows and columns come out thicker than others, and the smaller the head the
+// stranger it looks. Each head (img.px-head) takes the nearest size that is a whole multiple of 8
+// screen pixels to the one its CSS asks for.
+function fitPixelHead(img) {
+  if (!img || !img.isConnected) return;
+  let base = Number(img.dataset.headSize);
+  if (!base) {
+    base = img.offsetWidth; // the layout size, untouched by entrance animations
+    if (!base) return; // not laid out yet (hidden): the next render fits it
+    img.dataset.headSize = String(base);
+  }
+  const dpr = window.devicePixelRatio || 1;
+  const size = (Math.max(1, Math.round((base * dpr) / 8)) * 8) / dpr;
+  img.style.width = img.style.height = `${size}px`;
+}
+
+function fitPixelHeads(root = document) {
+  for (const img of root.querySelectorAll("img.px-head")) fitPixelHead(img);
+}
+
+// on another screen (or another Windows scale) the sizes are worked out again
+(function watchPixelRatio() {
+  matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`).addEventListener(
+    "change",
+    () => {
+      fitPixelHeads();
+      watchPixelRatio();
+    },
+    { once: true }
+  );
+})();
+
+// `src` drawn into a w x h picture (cropped to fill it, centered) as WebP base64, at the size it
+// is shown instead of the size it came in. Tiny pixel art (block faces, 16 px icons) is enlarged
+// without smoothing.
+function fitImageBase64(src, w, h, quality = 0.8) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    if (!/^(data|blob):/.test(src)) img.crossOrigin = "anonymous";
+    img.onload = () => {
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        const scale = Math.max(w / img.naturalWidth, h / img.naturalHeight);
+        const sw = w / scale;
+        const sh = h / scale;
+        ctx.imageSmoothingEnabled = img.naturalWidth >= w / 2;
+        ctx.imageSmoothingQuality = "high";
+        ctx.drawImage(img, (img.naturalWidth - sw) / 2, (img.naturalHeight - sh) / 2, sw, sh, 0, 0, w, h);
+        resolve(canvas.toDataURL("image/webp", quality).split(",")[1]);
+      } catch (err) {
+        reject(err);
+      }
+    };
+    img.onerror = () => reject(new Error("No se pudo leer la imagen"));
+    img.src = src;
+  });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Images that go to the service (group instances, profile covers) are made as small as they can
+// be: cropped to exactly the shape they are shown in, at that size; AVIF (encoded in Rust, about
+// a third smaller than WebP; WebP if that fails); small pixel art kept at its own size as a PNG
+// of a few hundred bytes. Each carries `ph`: 4x3 colors (48 characters) shown, blurred, while it
+// loads.
+// ---------------------------------------------------------------------------------------------
+const loadImage = (src) =>
+  new Promise((resolve, reject) => {
+    const img = new Image();
+    if (!/^(data|blob):/.test(src)) img.crossOrigin = "anonymous";
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("No se pudo leer la imagen"));
+    img.src = src;
+  });
+
+function bytesToBase64(bytes) {
+  let text = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) text += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(text);
+}
+
+// 4x3 average colors of an image, as base64url
+function placeholderOf(img) {
+  const c = document.createElement("canvas");
+  c.width = 4;
+  c.height = 3;
+  const ctx = c.getContext("2d");
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(img, 0, 0, 4, 3);
+  const d = ctx.getImageData(0, 0, 4, 3).data;
+  const rgb = new Uint8Array(36);
+  for (let i = 0; i < 12; i++) rgb.set(d.subarray(i * 4, i * 4 + 3), i * 3);
+  return bytesToBase64(rgb).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+// `ph` as a picture to stretch (smoothly, so it is a soft blur of those colors)
+const placeholderUrls = new Map();
+function placeholderUrl(ph) {
+  if (!ph) return null;
+  if (!placeholderUrls.has(ph)) {
+    try {
+      const rgb = Uint8Array.from(atob(ph.replace(/-/g, "+").replace(/_/g, "/")), (ch) => ch.charCodeAt(0));
+      const c = document.createElement("canvas");
+      c.width = 4;
+      c.height = 3;
+      const ctx = c.getContext("2d");
+      const data = ctx.createImageData(4, 3);
+      for (let i = 0; i < 12; i++) data.data.set([rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2], 255], i * 4);
+      ctx.putImageData(data, 0, 0);
+      placeholderUrls.set(ph, c.toDataURL());
+    } catch {
+      placeholderUrls.set(ph, null);
+    }
+  }
+  return placeholderUrls.get(ph);
+}
+
+// `src` cropped to fill w x h and encoded as small as it can be: {data (base64), ph}.
+async function encodeImage(src, w, h, quality = 60) {
+  const img = await loadImage(src);
+  const ph = placeholderOf(img);
+  const nw = img.naturalWidth;
+  const nh = img.naturalHeight;
+  // pixel art (block faces, 16 px icons): its own pixels, losslessly; enlarged where shown
+  if (nw <= 64 && nh <= 64 && nw < w) {
+    const c = document.createElement("canvas");
+    c.width = nw;
+    c.height = nh;
+    c.getContext("2d").drawImage(img, 0, 0);
+    return { data: c.toDataURL("image/png").split(",")[1], ph };
+  }
+  const c = document.createElement("canvas");
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext("2d");
+  const scale = Math.max(w / nw, h / nh);
+  const sw = w / scale;
+  const sh = h / scale;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(img, (nw - sw) / 2, (nh - sh) / 2, sw, sh, 0, 0, w, h);
+  try {
+    const rgba = bytesToBase64(new Uint8Array(ctx.getImageData(0, 0, w, h).data.buffer));
+    return { data: await invoke("encode_avif", { rgba, width: w, height: h, quality }), ph };
+  } catch {
+    return { data: c.toDataURL("image/webp", Math.min(0.9, quality / 80)).split(",")[1], ph };
+  }
+}
+
+// An image the launcher itself carries (its covers, block faces): referenced, never uploaded.
+const builtinPath = (src) => (typeof src === "string" && /^(\.?\/)(?!\/)[A-Za-z0-9_\-/]+\.(png|jpe?g|webp|avif)$/.test(src) ? src : null);
+
+// `src` as an image the service keeps: {ref, ph}. Built-in ones only by name; the others
+// encoded at w x h and uploaded (once: the service keeps each image a single time).
+async function serviceImage(username, src, w, h, quality = 60) {
+  const builtin = builtinPath(src);
+  if (builtin) {
+    const ph = await loadImage(builtin).then(placeholderOf, () => undefined);
+    return { ref: `builtin:${builtin}`, ph };
+  }
+  const { data, ph } = await encodeImage(src, w, h, quality);
+  const { ref } = await invoke("group_image_upload", { username, image: data });
+  return { ref, ph };
+}
+
+// Where a kept image is: the creator's on the service, or the launcher's own.
+function imageUrl(serviceUrl, owner, image) {
+  const ref = image?.ref || "";
+  if (ref.startsWith("builtin:")) return builtinPath(ref.slice(8));
+  if (ref.startsWith("img:") && serviceUrl) return `${serviceUrl}/img/${encodeURIComponent(String(owner || "").toLowerCase())}/${ref.slice(4)}`;
+  return null;
+}
+
+// Images load only when they come near the screen (a carousel's far cards wait), over their
+// colors (`ph`).
+const lazyImages = new IntersectionObserver(
+  (entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      lazyImages.unobserve(e.target);
+      e.target._lazyLoad?.();
+    }
+  },
+  { rootMargin: "300px" }
+);
+
+// Images already loaded once (address -> natural width), kept decoded: a card drawn again shows
+// them at once instead of going back to their colors and fading in again (a flicker).
+const loadedImages = new Map();
+function rememberLoaded(url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => {
+      loadedImages.set(url, img.naturalWidth);
+      // decoded now, so painting it later is immediate
+      img.decode().then(() => resolve(img), () => resolve(img));
+    };
+    img.onerror = reject;
+    img.src = url;
+  });
+}
+
+// As a background (covers): the placeholder first, the image once loaded.
+function lazyBackground(node, url, ph, fallback = null) {
+  if (url && loadedImages.has(url)) {
+    node.style.backgroundImage = `url("${url}")`;
+    return;
+  }
+  const first = placeholderUrl(ph) || fallback;
+  node.style.backgroundImage = first ? `url("${first}")` : "";
+  if (!url || url === first) return;
+  node._lazyLoad = () => rememberLoaded(url).then(() => (node.style.backgroundImage = `url("${url}")`), () => {});
+  lazyImages.observe(node);
+}
+
+// As an <img> (icons): pixel art stays sharp when enlarged.
+function lazyImg(img, url, ph) {
+  const show = () => {
+    if (loadedImages.get(url) <= 64) img.style.imageRendering = "pixelated";
+    img.style.background = "";
+    img.src = url;
+  };
+  if (loadedImages.has(url)) return show();
+  const first = placeholderUrl(ph);
+  if (first) img.style.background = `url("${first}") center / 100% 100%`;
+  img._lazyLoad = () => rememberLoaded(url).then(show, () => {});
+  lazyImages.observe(img);
+}
+
+// =========================================================
+// VERIFIED PROFILES: names the service marks as verified (the launcher's creator). A name on the
+// service can only be used by the device that owns it, so the badge can't be borrowed.
+// =========================================================
+const ikaVerified = (() => {
+  const KEY = "ika_verified_names"; // {at, names}
+  const FRESH_MS = 12 * 60 * 60 * 1000;
+  let cache = { at: 0, names: [] };
+  try {
+    cache = JSON.parse(localStorage.getItem(KEY) || "null") || cache;
+  } catch {}
+  let names = new Set(cache.names || []);
+  // a rosette with a check: 16 points around, alternating radius
+  const rosette = Array.from({ length: 32 }, (_, i) => {
+    const a = (i / 32) * Math.PI * 2 - Math.PI / 2;
+    const r = i % 2 ? 9.3 : 11;
+    return `${(12 + r * Math.cos(a)).toFixed(2)},${(12 + r * Math.sin(a)).toFixed(2)}`;
+  }).join(" ");
+  const html = `<span class="ika-verified" title="Verificado · Creador de Ika Launcher"><svg viewBox="0 0 24 24" aria-hidden="true"><defs><linearGradient id="ikaVerifiedGrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#22d3ee"/><stop offset="1" stop-color="#a855f7"/></linearGradient></defs><polygon points="${rosette}" fill="url(#ikaVerifiedGrad)"/><path d="M7.6 12.3l3 3 5.8-6.2" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>`;
+  const has = (name) => names.has(String(name || "").trim().replace(/^@/, "").toLowerCase());
+  const badge = () => {
+    const t = document.createElement("template");
+    t.innerHTML = html;
+    return t.content.firstChild;
+  };
+  async function load() {
+    if (Date.now() - (cache.at || 0) < FRESH_MS) return;
+    try {
+      const service = await invoke("skins_service_status");
+      if (!service) return;
+      const res = await fetch(`${service}/verified`, { signal: AbortSignal.timeout(6000) });
+      if (!res.ok) return;
+      const list = ((await res.json()).names || []).map((n) => String(n).toLowerCase());
+      cache = { at: Date.now(), names: list };
+      localStorage.setItem(KEY, JSON.stringify(cache));
+      const changed = list.length !== names.size || list.some((n) => !names.has(n));
+      names = new Set(list);
+      if (changed) {
+        renderUserBadge();
+        window.ikaGroups?.render();
+        window.ikaSocial?.render?.();
+      }
+    } catch {}
+  }
+  setTimeout(load, 3000);
+  return { has, badge, html };
+})();
+window.ikaVerified = ikaVerified;
+
+// =========================================================
+// IMAGE FRAMING (#modal-crop): zoom and move an image inside the exact shape it will be shown
+// in; answers the framed part (or null if cancelled).
+// =========================================================
+const ikaCropper = (() => {
+  const $ = (id) => document.getElementById(id);
+  const modal = $("modal-crop");
+  const viewport = $("crop-viewport");
+  const img = $("crop-img");
+  const zoom = $("crop-zoom");
+  let job = null; // {resolve, outW, outH}
+  let base = 1; // scale that just covers the frame
+  let factor = 1; // zoom on top of it (1..4)
+  let x = 0;
+  let y = 0;
+
+  const scale = () => base * factor;
+  function clampAndPaint() {
+    const vw = viewport.clientWidth;
+    const vh = viewport.clientHeight;
+    const w = img.naturalWidth * scale();
+    const h = img.naturalHeight * scale();
+    x = Math.min(0, Math.max(vw - w, x));
+    y = Math.min(0, Math.max(vh - h, y));
+    img.style.transform = `translate(${x}px, ${y}px) scale(${scale()})`;
+    zoom.value = String(Math.round(factor * 100));
+  }
+  function reset() {
+    const vw = viewport.clientWidth;
+    const vh = viewport.clientHeight;
+    base = Math.max(vw / img.naturalWidth, vh / img.naturalHeight);
+    factor = 1;
+    x = (vw - img.naturalWidth * base) / 2;
+    y = (vh - img.naturalHeight * base) / 2;
+    clampAndPaint();
+  }
+  // zooms keeping the point (px, py) of the frame where it is
+  function zoomTo(next, px = viewport.clientWidth / 2, py = viewport.clientHeight / 2) {
+    const before = scale();
+    factor = Math.min(4, Math.max(1, next));
+    const ratio = scale() / before;
+    x = px - (px - x) * ratio;
+    y = py - (py - y) * ratio;
+    clampAndPaint();
+  }
+
+  function finish(result) {
+    const done = job;
+    job = null;
+    modal.classList.add("hidden");
+    done?.resolve(result);
+  }
+
+  function apply() {
+    if (!job) return;
+    const s = scale();
+    const c = document.createElement("canvas");
+    c.width = job.outW;
+    c.height = job.outH;
+    const ctx = c.getContext("2d");
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(img, -x / s, -y / s, viewport.clientWidth / s, viewport.clientHeight / s, 0, 0, job.outW, job.outH);
+    finish(c.toDataURL("image/webp", 0.95));
+  }
+
+  async function load(src) {
+    img.src = src;
+    await img.decode();
+    reset();
+  }
+
+  // {src, aspect (width / height), title, outW, outH}
+  function open({ src, aspect, title, outW, outH }) {
+    if (job) finish(null);
+    return new Promise(async (resolve) => {
+      job = { resolve, outW, outH };
+      $("crop-title").textContent = title || "AJUSTAR IMAGEN";
+      modal.querySelector(".crop-modal-box").classList.toggle("is-square", aspect <= 1.2);
+      viewport.style.aspectRatio = String(aspect);
+      modal.classList.remove("hidden");
+      try {
+        await load(src);
+      } catch {
+        finish(null);
+        showToast("No se pudo abrir esa imagen.");
+      }
+    });
+  }
+
+  if (modal) {
+    let drag = null;
+    viewport.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      viewport.setPointerCapture(e.pointerId);
+      drag = { px: e.clientX, py: e.clientY, x, y };
+      viewport.classList.add("is-dragging");
+    });
+    viewport.addEventListener("pointermove", (e) => {
+      if (!drag) return;
+      x = drag.x + (e.clientX - drag.px);
+      y = drag.y + (e.clientY - drag.py);
+      clampAndPaint();
+    });
+    const endDrag = () => {
+      drag = null;
+      viewport.classList.remove("is-dragging");
+    };
+    viewport.addEventListener("pointerup", endDrag);
+    viewport.addEventListener("pointercancel", endDrag);
+    viewport.addEventListener(
+      "wheel",
+      (e) => {
+        e.preventDefault();
+        const r = viewport.getBoundingClientRect();
+        zoomTo(factor * Math.exp(-e.deltaY * 0.0015), e.clientX - r.left, e.clientY - r.top);
+      },
+      { passive: false }
+    );
+    zoom.addEventListener("input", () => zoomTo(Number(zoom.value) / 100));
+    $("btn-crop-reset").addEventListener("click", reset);
+    $("btn-crop-apply").addEventListener("click", apply);
+    $("btn-close-crop").addEventListener("click", () => finish(null));
+    $("btn-crop-other").addEventListener("click", async () => {
+      const data = await pickImageFile();
+      if (data) load(data).catch(() => showToast("No se pudo abrir esa imagen."));
+    });
+    let downOnBackdrop = false;
+    modal.addEventListener("mousedown", (e) => (downOnBackdrop = e.target === modal));
+    modal.addEventListener("click", (e) => {
+      if (e.target === modal && downOnBackdrop) finish(null);
+    });
+    // above the window that opened it: its keys are the cropper's while it is open
+    window.addEventListener(
+      "keydown",
+      (e) => {
+        if (!job) return;
+        const step = e.shiftKey ? 20 : 4;
+        if (e.key === "Escape") finish(null);
+        else if (e.key === "Enter") apply();
+        else if (e.key === "ArrowLeft") (x += step), clampAndPaint();
+        else if (e.key === "ArrowRight") (x -= step), clampAndPaint();
+        else if (e.key === "ArrowUp") (y += step), clampAndPaint();
+        else if (e.key === "ArrowDown") (y -= step), clampAndPaint();
+        else if (e.key === "+" || e.key === "=") zoomTo(factor * 1.1);
+        else if (e.key === "-") zoomTo(factor / 1.1);
+        else return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      },
+      true
+    );
+  }
+
+  return { open };
+})();
+window.ikaCropper = ikaCropper;
+
+// =========================================================
+// INSTANCE PICKER (#modal-pick-inst): one of your instances, chosen from a wide grid like Mi
+// colección, with a search. Answers the instance (or null if cancelled).
+// =========================================================
+const ikaInstancePicker = (() => {
+  const $ = (id) => document.getElementById(id);
+  const modal = $("modal-pick-inst");
+  const grid = $("pick-inst-grid");
+  const search = $("input-pick-inst");
+  const ok = $("btn-pick-inst-ok");
+  let job = null; // {resolve, taken: Set of normalized paths}
+  let chosen = null;
+
+  const nameOf = (inst) => getCustomInstanceNamesMap()[inst.path] || inst.name || inst.folder_name || "Instancia";
+  const all = () => (homeInstancesAll && homeInstancesAll.length ? homeInstancesAll : homeInstancesList || []);
+
+  function iconOf(inst, img) {
+    const icons = getCustomInstanceIconsMap();
+    const custom = icons[inst.path] || icons[inst.folder_name] || icons[inst.name];
+    const blockFace = getUniqueBlockFaceForInstance(inst.path, inst.name);
+    const asBlock = () => {
+      img.src = blockFace;
+      img.classList.add("is-block-face");
+    };
+    if (custom) img.src = custom;
+    else if (inst.icon_path) {
+      img.src = convertFileSrc(inst.icon_path);
+      img.onerror = asBlock;
+    } else asBlock();
+  }
+
+  function choose(inst) {
+    chosen = inst;
+    for (const slot of grid.children) slot.classList.toggle("is-active", slot._inst === inst);
+    $("pick-inst-chosen").replaceChildren();
+    if (inst) {
+      const label = document.createElement("span");
+      label.textContent = "Elegida: ";
+      const strong = document.createElement("strong");
+      strong.textContent = nameOf(inst);
+      $("pick-inst-chosen").append(label, strong);
+    } else {
+      $("pick-inst-chosen").textContent = "Elige una instancia";
+    }
+    ok.disabled = !inst;
+  }
+
+  function render() {
+    const q = search.value.trim().toLowerCase();
+    const list = all()
+      .filter((i) => !q || [nameOf(i), i.mc_version, i.loader].some((t) => String(t || "").toLowerCase().includes(q)))
+      .sort((a, b) => nameOf(a).localeCompare(nameOf(b), "es", { sensitivity: "base" }));
+    const slots = list.map((inst) => {
+      const taken = job?.taken.has(normInstancePath(inst.path));
+      const slot = document.createElement("button");
+      slot.type = "button";
+      slot.className = `pick-slot${taken ? " is-taken" : ""}${chosen === inst ? " is-active" : ""}`;
+      slot.disabled = !!taken;
+      slot._inst = inst;
+      const art = document.createElement("div");
+      art.className = "pick-slot-art";
+      const img = document.createElement("img");
+      img.alt = "";
+      img.loading = "lazy";
+      img.decoding = "async";
+      iconOf(inst, img);
+      art.appendChild(img);
+      if (taken) {
+        const tag = document.createElement("span");
+        tag.className = "pick-slot-tag";
+        tag.textContent = "Ya publicada";
+        art.appendChild(tag);
+      }
+      const name = document.createElement("div");
+      name.className = "pick-slot-name";
+      name.textContent = nameOf(inst);
+      const meta = document.createElement("div");
+      meta.className = "pick-slot-meta";
+      meta.textContent = [inst.mc_version, inst.loader].filter(Boolean).join(" · ");
+      slot.append(art, name, meta);
+      slot.addEventListener("click", () => choose(inst));
+      slot.addEventListener("dblclick", () => finish(inst));
+      return slot;
+    });
+    grid.replaceChildren(...slots);
+    const empty = $("pick-inst-empty");
+    empty.textContent = all().length ? `Ninguna instancia coincide con «${search.value.trim()}».` : "Todavía no tienes instancias.";
+    empty.classList.toggle("hidden", slots.length > 0);
+  }
+
+  function finish(result) {
+    const done = job;
+    job = null;
+    modal.classList.add("hidden");
+    done?.resolve(result);
+  }
+
+  // {title, okText, taken: paths that can't be chosen (shown as already published), initial}
+  function open({ title = "ELEGIR INSTANCIA", okText = "Elegir", taken = [], initial = null } = {}) {
+    if (job) finish(null);
+    return new Promise((resolve) => {
+      job = { resolve, taken: new Set(taken.map(normInstancePath)) };
+      $("pick-inst-title").textContent = title;
+      ok.textContent = okText;
+      search.value = "";
+      chosen = null;
+      render();
+      const first = initial && all().find((i) => i.path === initial && !job.taken.has(normInstancePath(i.path)));
+      choose(first || null);
+      modal.classList.remove("hidden");
+      setTimeout(() => search.focus(), 30);
+    });
+  }
+
+  if (modal) {
+    search.addEventListener("input", render);
+    $("pick-inst-search-form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      const enabled = [...grid.children].filter((s) => !s.disabled);
+      if (enabled.length === 1) finish(enabled[0]._inst);
+      else if (chosen) finish(chosen);
+    });
+    ok.addEventListener("click", () => chosen && finish(chosen));
+    $("btn-pick-inst-cancel").addEventListener("click", () => finish(null));
+    $("btn-close-pick-inst").addEventListener("click", () => finish(null));
+    let downOnBackdrop = false;
+    modal.addEventListener("mousedown", (e) => (downOnBackdrop = e.target === modal));
+    modal.addEventListener("click", (e) => {
+      if (e.target === modal && downOnBackdrop) finish(null);
+    });
+    // above the window that opened it: Esc closes only this one
+    window.addEventListener(
+      "keydown",
+      (e) => {
+        if (!job || e.key !== "Escape") return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        finish(null);
+      },
+      true
+    );
+  }
+
+  return { open };
+})();
+window.ikaInstancePicker = ikaInstancePicker;
+
+// =========================================================
+// MOTION for Amigos / Grupos: what appears slides in (staggered), and the selected option of a
+// segmented control is a pill that glides to it.
+// =========================================================
+// Courtesy limits on what the launcher sends (publishing, uploading, requests): they stop a
+// double click, a retry loop or someone clicking non-stop before it reaches the service, and say
+// so plainly. The service enforces the real limits itself (a modified launcher skips these).
+const ikaThrottle = (() => {
+  const sent = new Map(); // action -> times it was done
+  // the seconds to wait before `action` may happen again (0: now)
+  function waitFor(action, max, perMs, now) {
+    const recent = (sent.get(action) || []).filter((t) => now - t < perMs);
+    sent.set(action, recent);
+    return recent.length >= max ? Math.max(1, Math.ceil((perMs - (now - recent[0])) / 1000)) : 0;
+  }
+  const wait = (seconds) => (seconds >= 90 ? `${Math.ceil(seconds / 60)} min` : `${seconds} s`);
+  // the message to show, or "" when it may go ahead (then it counts for every rule)
+  function check(rules) {
+    const now = Date.now();
+    const seconds = Math.max(...rules.map(([action, max, perMs]) => waitFor(action, max, perMs, now)));
+    if (seconds) return `Vas muy rápido. Espera ${wait(seconds)} e inténtalo de nuevo.`;
+    for (const [action] of rules) sent.get(action).push(now);
+    return "";
+  }
+  return { check };
+})();
+
+// =========================================================
+// TYPING EFFECT in every window: what is typed in a text field pops in letter by letter, like in
+// Exportar. The field's own text is made transparent (its caret, selection and placeholder
+// stay) and the letters are drawn on a layer over it, laid out like the field.
+// =========================================================
+(function initTypingFx() {
+  const SKIP_TYPES = new Set(["password", "number", "range", "checkbox", "radio", "file", "color", "date", "time", "hidden", "submit", "button"]);
+  const attached = new Set();
+  const COPY = ["fontFamily", "fontSize", "fontWeight", "fontStyle", "letterSpacing", "textTransform", "lineHeight", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth", "borderTopStyle", "borderRightStyle", "borderBottomStyle", "borderLeftStyle", "boxSizing"];
+
+  function place(input, layer) {
+    const cs = getComputedStyle(input);
+    for (const k of COPY) layer.style[k] = cs[k];
+    layer.style.borderColor = "transparent";
+    layer.style.left = `${input.offsetLeft}px`;
+    layer.style.top = `${input.offsetTop}px`;
+    layer.style.width = `${input.offsetWidth}px`;
+    layer.style.height = `${input.offsetHeight}px`;
+    layer.style.justifyContent = cs.textAlign === "center" ? "center" : cs.textAlign === "right" || cs.textAlign === "end" ? "flex-end" : "flex-start";
+    layer.style.color = input.dataset.typeColor || "";
+    layer.style.borderRadius = cs.borderRadius;
+  }
+
+  function render(input, layer, prev) {
+    const val = input.value;
+    if (val === prev.value) return;
+    if (!val) layer.textContent = "";
+    else if (val.startsWith(prev.value)) {
+      const added = val.slice(prev.value.length);
+      [...added].forEach((ch, i) => {
+        const span = document.createElement("span");
+        span.className = "share-char-glyph share-char-new";
+        span.textContent = ch === " " ? "\u00A0" : ch;
+        if (added.length > 1) span.style.animationDelay = `${Math.min(i * 18, 120)}ms`;
+        layer.appendChild(span);
+      });
+    } else if (prev.value.startsWith(val)) {
+      for (let i = prev.value.length - val.length; i > 0 && layer.lastChild; i--) layer.removeChild(layer.lastChild);
+    } else {
+      layer.replaceChildren(
+        ...[...val].map((ch, i) => {
+          const span = document.createElement("span");
+          const fresh = i >= prev.value.length || ch !== prev.value[i];
+          span.className = fresh ? "share-char-glyph share-char-new" : "share-char-glyph";
+          span.textContent = ch === " " ? "\u00A0" : ch;
+          if (fresh && val.length > 1) span.style.animationDelay = `${Math.min(i * 18, 120)}ms`;
+          return span;
+        })
+      );
+    }
+    prev.value = val;
+    layer.scrollLeft = input.scrollLeft;
+  }
+
+  function attach(input) {
+    if (attached.has(input) || input.dataset.typeFx === "off" || input.id === "input-share-target-user") return;
+    if (input.tagName !== "INPUT" || SKIP_TYPES.has((input.type || "text").toLowerCase())) return;
+    const parent = input.parentElement;
+    if (!parent) return;
+    attached.add(input);
+    if (getComputedStyle(parent).position === "static") parent.style.position = "relative";
+    const layer = document.createElement("div");
+    layer.className = "ika-type-layer";
+    layer.setAttribute("aria-hidden", "true");
+    input.after(layer);
+    // the letters' color is the field's; the field itself goes transparent over its own caret
+    input.dataset.typeColor = getComputedStyle(input).color;
+    input.style.setProperty("color", "transparent", "important");
+    input.style.setProperty("-webkit-text-fill-color", "transparent", "important");
+    if (!input.style.caretColor) input.style.setProperty("caret-color", input.dataset.typeColor, "important");
+    input.style.setProperty("position", getComputedStyle(input).position === "static" ? "relative" : getComputedStyle(input).position);
+    const prev = { value: "" };
+    const update = () => {
+      place(input, layer);
+      render(input, layer, prev);
+    };
+    input.addEventListener("input", update);
+    input.addEventListener("focus", update);
+    input.addEventListener("scroll", () => (layer.scrollLeft = input.scrollLeft));
+    input._typeFx = update;
+    if (typeof ResizeObserver !== "undefined") new ResizeObserver(() => place(input, layer)).observe(input);
+    update();
+  }
+
+  // fields inside windows, also those added later
+  const scan = (root) => root.querySelectorAll?.(".modal-overlay input").forEach(attach);
+  scan(document);
+  new MutationObserver((records) => {
+    for (const r of records) for (const n of r.addedNodes) if (n.nodeType === 1) n.matches?.(".modal-overlay input") ? attach(n) : scan(n);
+  }).observe(document.body, { childList: true, subtree: true });
+
+  // values set from code (a field emptied after sending) don't fire "input": looked at while
+  // a window is open
+  setInterval(() => {
+    for (const input of attached) {
+      if (!input.isConnected) {
+        attached.delete(input);
+        continue;
+      }
+      if (input.offsetParent) input._typeFx?.();
+    }
+  }, 250);
+})();
+
+// =========================================================
+// TYPING EFFECT in every window: what is typed in a text field pops in letter by letter, like in
+// Exportar. The field's own text is made transparent (its caret, selection and placeholder
+// stay) and the letters are drawn on a layer over it, laid out like the field.
+// =========================================================
+(function initTypingFx() {
+  const SKIP_TYPES = new Set(["password", "number", "range", "checkbox", "radio", "file", "color", "date", "time", "hidden", "submit", "button"]);
+  const attached = new Set();
+  const COPY = ["fontFamily", "fontSize", "fontWeight", "fontStyle", "letterSpacing", "textTransform", "lineHeight", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth", "borderTopStyle", "borderRightStyle", "borderBottomStyle", "borderLeftStyle", "boxSizing"];
+
+  function place(input, layer) {
+    const cs = getComputedStyle(input);
+    for (const k of COPY) layer.style[k] = cs[k];
+    layer.style.borderColor = "transparent";
+    layer.style.left = `${input.offsetLeft}px`;
+    layer.style.top = `${input.offsetTop}px`;
+    layer.style.width = `${input.offsetWidth}px`;
+    layer.style.height = `${input.offsetHeight}px`;
+    layer.style.justifyContent = cs.textAlign === "center" ? "center" : cs.textAlign === "right" || cs.textAlign === "end" ? "flex-end" : "flex-start";
+    layer.style.color = input.dataset.typeColor || "";
+    layer.style.borderRadius = cs.borderRadius;
+  }
+
+  function render(input, layer, prev) {
+    const val = input.value;
+    if (val === prev.value) return;
+    if (!val) layer.textContent = "";
+    else if (val.startsWith(prev.value)) {
+      const added = val.slice(prev.value.length);
+      [...added].forEach((ch, i) => {
+        const span = document.createElement("span");
+        span.className = "share-char-glyph share-char-new";
+        span.textContent = ch === " " ? "\u00A0" : ch;
+        if (added.length > 1) span.style.animationDelay = `${Math.min(i * 18, 120)}ms`;
+        layer.appendChild(span);
+      });
+    } else if (prev.value.startsWith(val)) {
+      for (let i = prev.value.length - val.length; i > 0 && layer.lastChild; i--) layer.removeChild(layer.lastChild);
+    } else {
+      layer.replaceChildren(
+        ...[...val].map((ch, i) => {
+          const span = document.createElement("span");
+          const fresh = i >= prev.value.length || ch !== prev.value[i];
+          span.className = fresh ? "share-char-glyph share-char-new" : "share-char-glyph";
+          span.textContent = ch === " " ? "\u00A0" : ch;
+          if (fresh && val.length > 1) span.style.animationDelay = `${Math.min(i * 18, 120)}ms`;
+          return span;
+        })
+      );
+    }
+    prev.value = val;
+    layer.scrollLeft = input.scrollLeft;
+  }
+
+  function attach(input) {
+    if (attached.has(input) || input.dataset.typeFx === "off" || input.id === "input-share-target-user") return;
+    if (input.tagName !== "INPUT" || SKIP_TYPES.has((input.type || "text").toLowerCase())) return;
+    const parent = input.parentElement;
+    if (!parent) return;
+    attached.add(input);
+    if (getComputedStyle(parent).position === "static") parent.style.position = "relative";
+    const layer = document.createElement("div");
+    layer.className = "ika-type-layer";
+    layer.setAttribute("aria-hidden", "true");
+    input.after(layer);
+    // the letters' color is the field's; the field itself goes transparent over its own caret
+    input.dataset.typeColor = getComputedStyle(input).color;
+    input.style.setProperty("color", "transparent", "important");
+    input.style.setProperty("-webkit-text-fill-color", "transparent", "important");
+    if (!input.style.caretColor) input.style.setProperty("caret-color", input.dataset.typeColor, "important");
+    input.style.setProperty("position", getComputedStyle(input).position === "static" ? "relative" : getComputedStyle(input).position);
+    const prev = { value: "" };
+    const update = () => {
+      place(input, layer);
+      render(input, layer, prev);
+    };
+    input.addEventListener("input", update);
+    input.addEventListener("focus", update);
+    input.addEventListener("scroll", () => (layer.scrollLeft = input.scrollLeft));
+    input._typeFx = update;
+    if (typeof ResizeObserver !== "undefined") new ResizeObserver(() => place(input, layer)).observe(input);
+    update();
+  }
+
+  // fields inside windows, also those added later
+  const scan = (root) => root.querySelectorAll?.(".modal-overlay input").forEach(attach);
+  scan(document);
+  new MutationObserver((records) => {
+    for (const r of records) for (const n of r.addedNodes) if (n.nodeType === 1) n.matches?.(".modal-overlay input") ? attach(n) : scan(n);
+  }).observe(document.body, { childList: true, subtree: true });
+
+  // values set from code (a field emptied after sending) don't fire "input": looked at while
+  // a window is open
+  setInterval(() => {
+    for (const input of attached) {
+      if (!input.isConnected) {
+        attached.delete(input);
+        continue;
+      }
+      if (input.offsetParent) input._typeFx?.();
+    }
+  }, 250);
+})();
+
+// =========================================================
+// TYPING EFFECT in every window: what is typed in a text field pops in letter by letter, like in
+// Exportar. The field's own text is made transparent (its caret, selection and placeholder
+// stay) and the letters are drawn on a layer over it, laid out like the field.
+// =========================================================
+(function initTypingFx() {
+  const SKIP_TYPES = new Set(["password", "number", "range", "checkbox", "radio", "file", "color", "date", "time", "hidden", "submit", "button"]);
+  const attached = new Set();
+  const COPY = ["fontFamily", "fontSize", "fontWeight", "fontStyle", "letterSpacing", "textTransform", "lineHeight", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth", "borderTopStyle", "borderRightStyle", "borderBottomStyle", "borderLeftStyle", "boxSizing"];
+
+  function place(input, layer) {
+    const cs = getComputedStyle(input);
+    for (const k of COPY) layer.style[k] = cs[k];
+    layer.style.borderColor = "transparent";
+    layer.style.left = `${input.offsetLeft}px`;
+    layer.style.top = `${input.offsetTop}px`;
+    layer.style.width = `${input.offsetWidth}px`;
+    layer.style.height = `${input.offsetHeight}px`;
+    layer.style.justifyContent = cs.textAlign === "center" ? "center" : cs.textAlign === "right" || cs.textAlign === "end" ? "flex-end" : "flex-start";
+    layer.style.color = input.dataset.typeColor || "";
+    layer.style.borderRadius = cs.borderRadius;
+  }
+
+  function render(input, layer, prev) {
+    const val = input.value;
+    if (val === prev.value) return;
+    if (!val) layer.textContent = "";
+    else if (val.startsWith(prev.value)) {
+      const added = val.slice(prev.value.length);
+      [...added].forEach((ch, i) => {
+        const span = document.createElement("span");
+        span.className = "share-char-glyph share-char-new";
+        span.textContent = ch === " " ? "\u00A0" : ch;
+        if (added.length > 1) span.style.animationDelay = `${Math.min(i * 18, 120)}ms`;
+        layer.appendChild(span);
+      });
+    } else if (prev.value.startsWith(val)) {
+      for (let i = prev.value.length - val.length; i > 0 && layer.lastChild; i--) layer.removeChild(layer.lastChild);
+    } else {
+      layer.replaceChildren(
+        ...[...val].map((ch, i) => {
+          const span = document.createElement("span");
+          const fresh = i >= prev.value.length || ch !== prev.value[i];
+          span.className = fresh ? "share-char-glyph share-char-new" : "share-char-glyph";
+          span.textContent = ch === " " ? "\u00A0" : ch;
+          if (fresh && val.length > 1) span.style.animationDelay = `${Math.min(i * 18, 120)}ms`;
+          return span;
+        })
+      );
+    }
+    prev.value = val;
+    layer.scrollLeft = input.scrollLeft;
+  }
+
+  function attach(input) {
+    if (attached.has(input) || input.dataset.typeFx === "off" || input.id === "input-share-target-user") return;
+    if (input.tagName !== "INPUT" || SKIP_TYPES.has((input.type || "text").toLowerCase())) return;
+    const parent = input.parentElement;
+    if (!parent) return;
+    attached.add(input);
+    if (getComputedStyle(parent).position === "static") parent.style.position = "relative";
+    const layer = document.createElement("div");
+    layer.className = "ika-type-layer";
+    layer.setAttribute("aria-hidden", "true");
+    input.after(layer);
+    // the letters' color is the field's; the field itself goes transparent over its own caret
+    input.dataset.typeColor = getComputedStyle(input).color;
+    input.style.setProperty("color", "transparent", "important");
+    input.style.setProperty("-webkit-text-fill-color", "transparent", "important");
+    if (!input.style.caretColor) input.style.setProperty("caret-color", input.dataset.typeColor, "important");
+    input.style.setProperty("position", getComputedStyle(input).position === "static" ? "relative" : getComputedStyle(input).position);
+    const prev = { value: "" };
+    const update = () => {
+      place(input, layer);
+      render(input, layer, prev);
+    };
+    input.addEventListener("input", update);
+    input.addEventListener("focus", update);
+    input.addEventListener("scroll", () => (layer.scrollLeft = input.scrollLeft));
+    input._typeFx = update;
+    if (typeof ResizeObserver !== "undefined") new ResizeObserver(() => place(input, layer)).observe(input);
+    update();
+  }
+
+  // fields inside windows, also those added later
+  const scan = (root) => root.querySelectorAll?.(".modal-overlay input").forEach(attach);
+  scan(document);
+  new MutationObserver((records) => {
+    for (const r of records) for (const n of r.addedNodes) if (n.nodeType === 1) n.matches?.(".modal-overlay input") ? attach(n) : scan(n);
+  }).observe(document.body, { childList: true, subtree: true });
+
+  // values set from code (a field emptied after sending) don't fire "input": looked at while
+  // a window is open
+  setInterval(() => {
+    for (const input of attached) {
+      if (!input.isConnected) {
+        attached.delete(input);
+        continue;
+      }
+      if (input.offsetParent) input._typeFx?.();
+    }
+  }, 250);
+})();
+
+// =========================================================
+// TYPING EFFECT in every window: what is typed in a text field pops in letter by letter, like in
+// Exportar. The field's own text is made transparent (its caret, selection and placeholder
+// stay) and the letters are drawn on a layer over it, laid out like the field.
+// =========================================================
+(function initTypingFx() {
+  const SKIP_TYPES = new Set(["password", "number", "range", "checkbox", "radio", "file", "color", "date", "time", "hidden", "submit", "button"]);
+  const attached = new Set();
+  const COPY = ["fontFamily", "fontSize", "fontWeight", "fontStyle", "letterSpacing", "textTransform", "lineHeight", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth", "borderTopStyle", "borderRightStyle", "borderBottomStyle", "borderLeftStyle", "boxSizing"];
+
+  function place(input, layer) {
+    const cs = getComputedStyle(input);
+    for (const k of COPY) layer.style[k] = cs[k];
+    layer.style.borderColor = "transparent";
+    layer.style.left = `${input.offsetLeft}px`;
+    layer.style.top = `${input.offsetTop}px`;
+    layer.style.width = `${input.offsetWidth}px`;
+    layer.style.height = `${input.offsetHeight}px`;
+    layer.style.justifyContent = cs.textAlign === "center" ? "center" : cs.textAlign === "right" || cs.textAlign === "end" ? "flex-end" : "flex-start";
+    layer.style.color = input.dataset.typeColor || "";
+    layer.style.borderRadius = cs.borderRadius;
+  }
+
+  function render(input, layer, prev) {
+    const val = input.value;
+    if (val === prev.value) return;
+    if (!val) layer.textContent = "";
+    else if (val.startsWith(prev.value)) {
+      const added = val.slice(prev.value.length);
+      [...added].forEach((ch, i) => {
+        const span = document.createElement("span");
+        span.className = "share-char-glyph share-char-new";
+        span.textContent = ch === " " ? "\u00A0" : ch;
+        if (added.length > 1) span.style.animationDelay = `${Math.min(i * 18, 120)}ms`;
+        layer.appendChild(span);
+      });
+    } else if (prev.value.startsWith(val)) {
+      for (let i = prev.value.length - val.length; i > 0 && layer.lastChild; i--) layer.removeChild(layer.lastChild);
+    } else {
+      layer.replaceChildren(
+        ...[...val].map((ch, i) => {
+          const span = document.createElement("span");
+          const fresh = i >= prev.value.length || ch !== prev.value[i];
+          span.className = fresh ? "share-char-glyph share-char-new" : "share-char-glyph";
+          span.textContent = ch === " " ? "\u00A0" : ch;
+          if (fresh && val.length > 1) span.style.animationDelay = `${Math.min(i * 18, 120)}ms`;
+          return span;
+        })
+      );
+    }
+    prev.value = val;
+    layer.scrollLeft = input.scrollLeft;
+  }
+
+  function attach(input) {
+    if (attached.has(input) || input.dataset.typeFx === "off" || input.id === "input-share-target-user") return;
+    if (input.tagName !== "INPUT" || SKIP_TYPES.has((input.type || "text").toLowerCase())) return;
+    const parent = input.parentElement;
+    if (!parent) return;
+    attached.add(input);
+    if (getComputedStyle(parent).position === "static") parent.style.position = "relative";
+    const layer = document.createElement("div");
+    layer.className = "ika-type-layer";
+    layer.setAttribute("aria-hidden", "true");
+    input.after(layer);
+    // the letters' color is the field's; the field itself goes transparent over its own caret
+    input.dataset.typeColor = getComputedStyle(input).color;
+    input.style.setProperty("color", "transparent", "important");
+    input.style.setProperty("-webkit-text-fill-color", "transparent", "important");
+    if (!input.style.caretColor) input.style.setProperty("caret-color", input.dataset.typeColor, "important");
+    input.style.setProperty("position", getComputedStyle(input).position === "static" ? "relative" : getComputedStyle(input).position);
+    const prev = { value: "" };
+    const update = () => {
+      place(input, layer);
+      render(input, layer, prev);
+    };
+    input.addEventListener("input", update);
+    input.addEventListener("focus", update);
+    input.addEventListener("scroll", () => (layer.scrollLeft = input.scrollLeft));
+    input._typeFx = update;
+    if (typeof ResizeObserver !== "undefined") new ResizeObserver(() => place(input, layer)).observe(input);
+    update();
+  }
+
+  // fields inside windows, also those added later
+  const scan = (root) => root.querySelectorAll?.(".modal-overlay input").forEach(attach);
+  scan(document);
+  new MutationObserver((records) => {
+    for (const r of records) for (const n of r.addedNodes) if (n.nodeType === 1) n.matches?.(".modal-overlay input") ? attach(n) : scan(n);
+  }).observe(document.body, { childList: true, subtree: true });
+
+  // values set from code (a field emptied after sending) don't fire "input": looked at while
+  // a window is open
+  setInterval(() => {
+    for (const input of attached) {
+      if (!input.isConnected) {
+        attached.delete(input);
+        continue;
+      }
+      if (input.offsetParent) input._typeFx?.();
+    }
+  }, 250);
+})();
+
+// Things appearing: up a little and in, one after another.
+function animateIn(nodes, { y = 14, scale = 0.97, stagger = 45, duration = 460, delay = 0 } = {}) {
+  [...nodes].forEach((node, i) => {
+    node.animate(
+      [
+        { opacity: 0, transform: `translateY(${y}px) scale(${scale})` },
+        { opacity: 1, transform: "none" },
+      ],
+      { duration, delay: delay + Math.min(i, 12) * stagger, easing: "cubic-bezier(0.16, 1, 0.3, 1)", fill: "backwards" }
+    );
+  });
+}
+
+// A segmented control (`container` with buttons, the selected one `.is-active`): its pill
+// (.seg-thumb) glides to the selected button.
+function glideThumb(container, instant = false) {
+  if (!container) return;
+  let thumb = container.querySelector(":scope > .seg-thumb");
+  if (!thumb) {
+    thumb = document.createElement("span");
+    thumb.className = "seg-thumb";
+    container.prepend(thumb);
+    instant = true;
+  }
+  const active = container.querySelector(":scope > .is-active");
+  if (!active || !active.offsetWidth) {
+    thumb.style.opacity = "0";
+    return;
+  }
+  if (instant) thumb.style.transition = "none";
+  thumb.style.opacity = "1";
+  thumb.style.width = `${active.offsetWidth}px`;
+  thumb.style.transform = `translateX(${active.offsetLeft}px)`;
+  if (instant) {
+    thumb.offsetWidth; // applies the position before transitions come back
+    thumb.style.transition = "";
+  }
+}
+
+// A small menu at the pointer: [{label, danger, onClick}]
+function showContextMenu(x, y, items) {
+  document.querySelector(".ika-ctx")?.remove();
+  const menu = document.createElement("div");
+  menu.className = "ika-ctx";
+  for (const item of items) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = `ika-ctx-item${item.danger ? " is-danger" : ""}`;
+    b.innerHTML = item.icon || "";
+    b.append(item.label);
+    b.addEventListener("click", () => {
+      close();
+      item.onClick();
+    });
+    menu.appendChild(b);
+  }
+  document.body.appendChild(menu);
+  const r = menu.getBoundingClientRect();
+  menu.style.left = `${Math.min(x, innerWidth - r.width - 8)}px`;
+  menu.style.top = `${Math.min(y, innerHeight - r.height - 8)}px`;
+  menu.animate(
+    [
+      { opacity: 0, transform: "scale(0.92) translateY(-4px)" },
+      { opacity: 1, transform: "none" },
+    ],
+    { duration: 180, easing: "cubic-bezier(0.16, 1, 0.3, 1)" }
+  );
+  const close = () => {
+    menu.remove();
+    removeEventListener("pointerdown", outside, true);
+    removeEventListener("keydown", onKey, true);
+    removeEventListener("wheel", close, true);
+  };
+  const outside = (e) => !menu.contains(e.target) && close();
+  const onKey = (e) => {
+    if (e.key !== "Escape") return;
+    e.stopImmediatePropagation();
+    close();
+  };
+  setTimeout(() => {
+    addEventListener("pointerdown", outside, true);
+    addEventListener("keydown", onKey, true);
+    addEventListener("wheel", close, true);
+  });
+}
+
+// The launcher's links, in the right dock (an empty one is "coming soon")
+const IKA_LINKS = {
+  github: "https://github.com/Xamply/Ika",
+  discord: "https://discord.gg/XbhaSDp65",
+  patreon: "https://patreon.com/Faallyxmp?utm_source=ika-launcher",
+};
+wireHexTray(document.getElementById("cyber-right-dock"), document.getElementById("cyber-right-tray-tip"));
+(function initDockLinks() {
+  for (const [key, label] of [
+    ["github", "GitHub"],
+    ["discord", "Discord"],
+    ["patreon", "Patreon"],
+  ]) {
+    document.getElementById(`btn-link-${key}`)?.addEventListener("click", () => {
+      const url = IKA_LINKS[key];
+      if (!url) return showToast(`El ${label} de Ika llegará pronto.`);
+      invoke("open_browser", { url }).catch(() => window.open(url, "_blank"));
+    });
+  }
+})();
+
+// Asks for an image file; answers its data URL (null if none was chosen).
+function pickImageFile() {
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "image/png,image/jpeg,image/webp,image/gif";
+    input.addEventListener("change", () => {
+      const file = input.files?.[0];
+      if (!file) return resolve(null);
+      const r = new FileReader();
+      r.onload = () => resolve(r.result);
+      r.onerror = () => resolve(null);
+      r.readAsDataURL(file);
+    });
+    input.click();
   });
 }
 
@@ -6316,6 +8315,8 @@ function forgetUserHead(username) {
 const headRequestOf = new WeakMap(); // img -> latest request, so a late lookup can't overwrite a newer one
 function setUserHeadImg(img, user) {
   if (!img) return;
+  img.classList.add("px-head");
+  requestAnimationFrame(() => fitPixelHead(img));
   const request = {};
   headRequestOf.set(img, request);
   img.onerror = () => {
@@ -6894,7 +8895,6 @@ function toggleUserContextMenu() {
           <span class="user-menu-acc-name">${escapeHtml(user.displayName || user.username)}</span>
           <span class="user-menu-acc-handle">@${escapeHtml(user.username.toLowerCase())}</span>
         </div>
-        ${isCurrent ? '<span class="user-menu-check">✓</span>' : ""}
         ${ACCOUNT_DELETE_BTN_HTML}
       `;
       setUserHeadImg(item.querySelector(".user-menu-acc-avatar"), user);
@@ -6956,6 +8956,9 @@ function openAddUserModal() {
   if (el.inputUsername) {
     el.inputUsername.value = "";
   }
+  setAddUserStatus("");
+  resetAddUserCheck();
+  addUserTakenOk = "";
   if (el.modalAddUser) {
     el.modalAddUser.classList.remove("hidden");
   }
@@ -6968,16 +8971,97 @@ function closeAddUserModal() {
   if (el.modalAddUser) {
     el.modalAddUser.classList.add("hidden");
   }
+  resetAddUserCheck();
 }
 
-function handleSaveUser() {
-  if (!el.inputUsername) return;
+function setAddUserStatus(text, kind = "") {
+  const status = document.getElementById("add-user-status");
+  if (!status) return;
+  status.textContent = text || "";
+  status.className = `user-modal-status${kind ? ` is-${kind}` : ""}`;
+}
+
+// A new name is checked on the service before it is added. Free: Cloudflare's check appears in
+// this same window and the account is saved only once the profile exists (closing it adds
+// nothing). Another PC's: the player is told now, and may still use it only to play. Already
+// this PC's: added at once. Offline: added, and its profile is created later from Amigos.
+let addUserTakenOk = ""; // a name another PC owns that the player chose to use anyway
+let addUserBusy = false;
+let addUserCheck = null; // {name, check} while Cloudflare's check is shown
+
+function resetAddUserCheck() {
+  addUserCheck?.check.cancel();
+  addUserCheck = null;
+  document.getElementById("add-user-human")?.classList.add("hidden");
+  if (el.btnSaveUser) {
+    el.btnSaveUser.disabled = false;
+    el.btnSaveUser.textContent = "Guardar Usuario";
+  }
+}
+
+async function handleSaveUser() {
+  if (!el.inputUsername || addUserBusy) return;
   const username = el.inputUsername.value.trim();
   if (!username) {
     showToast("Escribe un nombre de usuario válido.");
     el.inputUsername.focus();
     return;
   }
+  const known = state.users.some((u) => u.username.toLowerCase() === username.toLowerCase());
+  if (!known && /^[A-Za-z0-9_]{2,16}$/.test(username) && addUserTakenOk !== username.toLowerCase()) {
+    if (addUserCheck?.name === username) return; // waiting for the check below
+    resetAddUserCheck();
+    addUserBusy = true;
+    if (el.btnSaveUser) {
+      el.btnSaveUser.disabled = true;
+      el.btnSaveUser.textContent = "Comprobando…";
+    }
+    setAddUserStatus("");
+    let nameState;
+    try {
+      nameState = await window.ikaIdentity.status(username);
+    } finally {
+      addUserBusy = false;
+      if (el.btnSaveUser) {
+        el.btnSaveUser.disabled = false;
+        el.btnSaveUser.textContent = "Guardar Usuario";
+      }
+    }
+    if (el.modalAddUser?.classList.contains("hidden") || el.inputUsername.value.trim() !== username) return;
+    if (nameState === "taken") {
+      addUserTakenOk = username.toLowerCase();
+      setAddUserStatus(`«${username}» ya pertenece a otra persona en Ika. Elige otro nombre, o pulsa de nuevo para usarlo igualmente solo para jugar (sin Amigos ni Grupos).`, "warn");
+      return;
+    }
+    if (nameState === "offline") {
+      setAddUserStatus("Sin conexión con Ika: la cuenta se agrega y tu perfil se creará desde Amigos cuando te conectes.");
+    }
+    if (nameState === "free") {
+      // the check, here; the account waits for the profile
+      const area = document.getElementById("add-user-human");
+      area.classList.remove("hidden");
+      if (el.btnSaveUser) {
+        el.btnSaveUser.disabled = true;
+        el.btnSaveUser.textContent = "Crear perfil";
+      }
+      const check = window.ikaIdentity.mountCheck(document.getElementById("add-user-frame"), (msg, isError) => setAddUserStatus(msg, isError ? "warn" : ""));
+      addUserCheck = { name: username, check };
+      const token = await check.token;
+      if (addUserCheck?.check !== check || token === null) return; // closed, or the name changed
+      setAddUserStatus("Creando tu perfil…");
+      try {
+        await window.ikaIdentity.claim(username, token);
+      } catch (err) {
+        resetAddUserCheck();
+        setAddUserStatus(`${err} Pulsa Crear perfil para intentarlo de nuevo.`, "warn");
+        if (el.btnSaveUser) el.btnSaveUser.textContent = "Crear perfil";
+        return;
+      }
+      resetAddUserCheck();
+    }
+  }
+  addUserTakenOk = "";
+  if (!el.modalAddUser?.classList.contains("hidden")) setAddUserStatus("");
 
   const removed = loadRemovedAccounts();
   if (removed.delete(username.toLowerCase())) saveRemovedAccounts(removed);
@@ -7165,6 +9249,13 @@ function initUserManagement() {
   }
 
   if (el.inputUsername) {
+    // another name: the check shown was for the previous one
+    el.inputUsername.addEventListener("input", () => {
+      if (addUserCheck && addUserCheck.name !== el.inputUsername.value.trim()) {
+        resetAddUserCheck();
+        setAddUserStatus("");
+      }
+    });
     el.inputUsername.addEventListener("keydown", (e) => {
       if (e.key === "Enter") {
         e.preventDefault();
@@ -7277,6 +9368,7 @@ let homeInstancesList = [];
 let homeCurrentInstanceIndex = 0;
 let homeFilterCategory = "all";
 let homeSearchQuery = "";
+let updateInstPillGlider = () => {};
 const favoriteInstances = new Set(JSON.parse(localStorage.getItem("modcomparer_favorites") || "[]"));
 const recentInstances = new Set(JSON.parse(localStorage.getItem("modcomparer_launched_recents") || "[]"));
 let hasUserTriggeredLaunch = false;
@@ -7778,15 +9870,54 @@ async function initHomeInstanceSwitcher() {
   renderHomeInstanceCarousel();
 
   // Category Pills Filter (Todas, Recientes, Favoritas, Modpacks)
+  updateInstPillGlider = function(animate = true) {
+    const container = el.instanceCategoryPills;
+    const glider = el.instPillGlider || document.getElementById("inst-pill-glider");
+    if (!container || !glider) return;
+    const activePill = container.querySelector(".inst-pill.active");
+    if (!activePill) {
+      glider.style.opacity = "0";
+      return;
+    }
+    const x = activePill.offsetLeft;
+    const y = activePill.offsetTop;
+    const w = activePill.offsetWidth;
+    const h = activePill.offsetHeight;
+
+    if (w <= 0 || h <= 0) {
+      glider.style.opacity = "0";
+      return;
+    }
+
+    if (!animate) {
+      glider.style.transition = "none";
+    } else {
+      glider.style.transition = "transform 0.32s cubic-bezier(0.34, 1.56, 0.64, 1), width 0.32s cubic-bezier(0.34, 1.56, 0.64, 1), height 0.32s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.2s ease";
+    }
+    glider.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+    glider.style.width = `${w}px`;
+    glider.style.height = `${h}px`;
+    glider.style.opacity = "1";
+  }
+
+  // Restore filter bar scale from localStorage
+  const savedFilterBarScale = localStorage.getItem("ika_home_filter_bar_scale");
+  if (savedFilterBarScale && el.instanceFilterSearchBar) {
+    el.instanceFilterSearchBar.style.setProperty("--filter-bar-scale", savedFilterBarScale);
+  }
+
   if (el.instanceCategoryPills) {
     el.instanceCategoryPills.querySelectorAll(".inst-pill").forEach((pill) => {
       pill.addEventListener("click", () => {
         el.instanceCategoryPills.querySelectorAll(".inst-pill").forEach((p) => p.classList.remove("active"));
         pill.classList.add("active");
+        updateInstPillGlider(true);
         homeFilterCategory = pill.dataset.filter || "all";
         applyHomeFilter();
       });
     });
+    requestAnimationFrame(() => updateInstPillGlider(false));
+    window.addEventListener("resize", () => updateInstPillGlider(false));
   }
 
   // Crear Instancia Action Pill & Modal
@@ -11212,9 +13343,9 @@ async function initHomeInstanceSwitcher() {
     if (checkboxJavaRecommended) checkboxJavaRecommended.checked = true;
     renderJavaSelector();
     if (inputCreateInstRam) {
-      // Default: 4 GB, or half the system RAM on smaller machines
-      const def = systemMemoryMb > 0 ? Math.min(4096, Math.floor(systemMemoryMb / 2 / 512) * 512) : 4096;
-      inputCreateInstRam.value = String(Math.max(1024, def));
+      // Default: 8 GB (8192 MB)
+      const def = 8192;
+      inputCreateInstRam.value = String(def);
       updateRamLabel();
     }
     if (inputCreateInstJvmArgs) {
@@ -11665,7 +13796,7 @@ async function initHomeInstanceSwitcher() {
         mc: d.mc_version,
         loader: d.loader,
         loaderVersion: d.loader_version || null,
-        ram: d.max_mem_mb || 4096,
+        ram: d.max_mem_mb || 8192,
         jvm: (d.jvm_args || "").trim(),
         javaPath: d.java_path || null,
         javaRuntime: d.java_runtime || null,
@@ -11840,8 +13971,8 @@ async function initHomeInstanceSwitcher() {
           modpackDl = startDownloadNotification({
             id: `modpack-${name.trim().toLowerCase()}`,
             title: name,
-            text: "Preparando descarga e instalación...",
-            progress: 0
+            text: "Descargando paquete del modpack...",
+            progress: null
           });
           // Cerrar modal automáticamente para no bloquear al usuario mientras descarga
           closeCreateInstModal();
@@ -11852,7 +13983,7 @@ async function initHomeInstanceSwitcher() {
               const done = ev?.payload?.done || 0;
               const total = ev?.payload?.total || 0;
               const speed = ev?.payload?.speed || null;
-              const pct = total > 0 ? Math.round((done / total) * 100) : null;
+              const pct = total > 1 ? Math.round((done / total) * 100) : null;
               if (modpackDl) {
                 modpackDl.update(pct, msg || "Descargando mods del modpack...", speed);
               }
@@ -11898,6 +14029,7 @@ async function initHomeInstanceSwitcher() {
 
         // Reload all launcher instances and switch to new one
         await reloadAllHomeInstances(name);
+        if (modpack && createdInst?.path) await offerMissingModpackFiles(createdInst.path, name, false);
       } catch (err) {
         if (modpackDl) {
           modpackDl.error(`Error al instalar modpack: ${err}`);
@@ -12084,6 +14216,40 @@ async function initHomeInstanceSwitcher() {
       if (homeInstancesList.length === 0) return;
       const nextIdx = (homeCurrentInstanceIndex + 1) % homeInstancesList.length;
       switchHomeInstance(nextIdx, "next");
+    });
+  }
+
+  // Ctrl + Wheel to scale Carousel in Home view
+  const carouselContainer = document.querySelector(".instance-carousel-container");
+  if (carouselContainer) {
+    let savedScale = parseFloat(localStorage.getItem("ika_home_carousel_scale") || "1");
+    if (isNaN(savedScale) || savedScale < 0.65 || savedScale > 1.45) savedScale = 1;
+    carouselContainer.style.setProperty("--carousel-scale", String(savedScale));
+
+    carouselContainer.addEventListener("wheel", (e) => {
+      if (e.ctrlKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        let cur = parseFloat(carouselContainer.style.getPropertyValue("--carousel-scale")) || 1;
+        const step = 0.05;
+        if (e.deltaY < 0) {
+          cur = Math.min(1.4, cur + step);
+        } else if (e.deltaY > 0) {
+          cur = Math.max(0.65, cur - step);
+        }
+        cur = Math.round(cur * 100) / 100;
+        carouselContainer.style.setProperty("--carousel-scale", String(cur));
+        localStorage.setItem("ika_home_carousel_scale", String(cur));
+      }
+    }, { passive: false });
+
+    // Ctrl + Double Click to reset scale to 1.0
+    carouselContainer.addEventListener("dblclick", (e) => {
+      if (e.ctrlKey) {
+        e.preventDefault();
+        carouselContainer.style.setProperty("--carousel-scale", "1");
+        localStorage.setItem("ika_home_carousel_scale", "1");
+      }
     });
   }
 
@@ -12407,6 +14573,8 @@ function createCarouselGhostCard() {
         <span class="carousel-ghost-label">Nueva instancia</span>
       </div>
     </div>
+
+
   `;
   cardItem.addEventListener("click", () => el.btnCreateInstancePill?.click());
   return cardItem;
@@ -12467,12 +14635,16 @@ function renderHomeInstanceCarousel() {
     const isNear = Math.abs(offset) === 1;
     const isFar = Math.abs(offset) === 2;
     const isFav = favoriteInstances.has(inst.path);
+    const isGameActive = isInstanceGameActive(inst.path);
+    const activeState = gameStates.get(normInstancePath(inst.path))?.state;
 
     const cardItem = document.createElement("div");
-    cardItem.className = `carousel-card-item ${isActive ? "is-active" : "is-side"} ${isNear ? "is-side-near" : ""} ${isFar ? "is-side-far" : ""}`;
+    cardItem.className = `carousel-card-item ${isActive ? "is-active" : "is-side"} ${isNear ? "is-side-near" : ""} ${isFar ? "is-side-far" : ""} ${isGameActive ? "is-game-active" : ""}`;
     cardItem.dataset.instanceIndex = idx;
     cardItem.dataset.offset = offset;
-    cardItem.title = isActive ? `${displayName} (Activa)` : `Seleccionar: ${displayName}`;
+    cardItem.title = isGameActive
+      ? `${displayName} (${activeState === "preparing" ? "Iniciando..." : "En ejecución"}) - Haz clic para ver opciones o detener`
+      : (isActive ? `${displayName} (Activa)` : `Seleccionar: ${displayName}`);
 
     const cardBody = document.createElement("div");
     cardBody.className = "carousel-card-body";
@@ -12650,6 +14822,13 @@ function renderHomeInstanceCarousel() {
       if (el.homeActiveVersion) el.homeActiveVersion.textContent = mcVer;
       if (el.homeActiveLoader) el.homeActiveLoader.textContent = loader;
       if (el.homeActiveMods) el.homeActiveMods.textContent = `${modCount} mods`;
+
+      cardItem.addEventListener("click", (e) => {
+        if (isInstanceGameActive(inst.path)) {
+          e.stopPropagation();
+          openCarouselInstanceContextMenu(e.clientX, e.clientY, inst, idx);
+        }
+      });
     } else {
       // Clicking flanking card triggers smooth switch animation
       cardItem.addEventListener("click", () => {
@@ -12736,6 +14915,7 @@ function syncHomeInstanceByPath(instancePath) {
       el.instanceCategoryPills.querySelectorAll(".inst-pill").forEach((p) => {
         p.classList.toggle("active", (p.dataset.filter || "all") === "all");
       });
+      updateInstPillGlider(true);
     }
     homeInstancesList = [...homeInstancesAll];
     idx = homeInstancesList.findIndex((x) => x.path === instancePath);
@@ -12786,9 +14966,13 @@ function formatInstanceRamLabel(inst) {
     const gb = (mb / 1024).toFixed(1).replace(/\.0$/, "");
     return `${gb} GB`;
   }
-  let ram = inst?.ram || inst?.allocated_ram || "8.4 GB";
-  if (typeof ram === "number") ram = `${ram} GB`;
-  return ram;
+  let ram = inst?.ram || inst?.allocated_ram;
+  if (typeof ram === "number") {
+    const gb = (ram / 1024).toFixed(1).replace(/\.0$/, "");
+    return `${gb} GB`;
+  }
+  if (typeof ram === "string" && ram) return ram;
+  return "8 GB";
 }
 
 function updateInstanceSpecsBar(inst, skipLiveFetch = false) {
@@ -12914,7 +15098,7 @@ function updateInstanceSpecsBar(inst, skipLiveFetch = false) {
 let homeConsolePollInterval = null;
 
 // Live output of games launched from here (filled by the "mc-game-log" listener).
-const GAME_LOG_BUFFER_LINES = 400;
+const GAME_LOG_BUFFER_LINES = 5000;
 const gameLogBuffers = new Map(); // normalized instance path -> [{ level, text, ts }]
 const gameLogTotals = new Map(); // normalized instance path -> lines received so far
 
@@ -12973,6 +15157,7 @@ function setGameState(instance, state, detail = "") {
   gameStates.set(normInstancePath(instance), { state, detail });
   renderHcpState();
   syncPlayButtonLock();
+  renderHomeInstanceCarousel();
   setGameStateHook?.(instance, state);
   // A game starting or closing pauses/resumes the animated background.
   if (isAnyGameRunning() !== wasRunning) onLauncherActivityChange();
@@ -13099,7 +15284,7 @@ function renderHcpState(fileState) {
 // Console window terminal: up to HCP_MAX_LINES lines, new ones appended (no full
 // re-render), auto-scroll only while the view is at the bottom, so it can be scrolled
 // and its text selected while the game writes.
-const HCP_MAX_LINES = 300;
+const HCP_MAX_LINES = 5000;
 let hcpRenderedKey = "";
 let hcpRenderedTotal = 0;
 let hcpRenderedFileSig = "";
@@ -13357,6 +15542,7 @@ let hcpDinoCanvasEl = null;
 let hcpDinoCleanup = null;
 
 function stopHcpDinoGame() {
+  if (!hcpDinoActive && !hcpDinoWrapEl && !hcpDinoAnimId) return;
   if (hcpDinoAnimId) {
     cancelAnimationFrame(hcpDinoAnimId);
     hcpDinoAnimId = null;
@@ -13371,8 +15557,6 @@ function stopHcpDinoGame() {
   }
   hcpDinoWrapEl = null;
   hcpDinoCanvasEl = null;
-  hcpRenderedFileSig = "";
-  hcpRenderedKey = "";
 }
 
 function startHcpDinoGame(container) {
@@ -13559,6 +15743,30 @@ function startHcpDinoGame(container) {
 
   const JUMP_IMPULSE = -8.2;
 
+  // Idle or game over is a still picture with a blink: it is redrawn on every third tick of the
+  // shared animation clock (10 fps, in the same frames as the other animations), and not at all
+  // while the console panel is hidden. Only a running game asks for every display frame.
+  let idleUntick = null;
+  let idleTicks = 0;
+  function startIdleClock() {
+    if (idleUntick) return;
+    idleUntick = onTick((now) => {
+      if (++idleTicks % 3 || !canvas.checkVisibility()) return;
+      loop(now);
+    });
+  }
+  function stopIdleClock() {
+    idleUntick?.();
+    idleUntick = null;
+  }
+  function wake() {
+    if (!hcpDinoActive) return;
+    if (!idleUntick && hcpDinoAnimId && gameState === "running") return;
+    stopIdleClock();
+    cancelAnimationFrame(hcpDinoAnimId);
+    hcpDinoAnimId = requestAnimationFrame(loop);
+  }
+
   function jump() {
     if (gameState === "idle" || gameState === "gameover") {
       restart();
@@ -13575,6 +15783,7 @@ function startHcpDinoGame(container) {
 
   const onPointerDown = (e) => {
     e.preventDefault();
+    queueMicrotask(wake);
     const rect = canvas.getBoundingClientRect();
     const yRatio = (e.clientY - rect.top) / Math.max(1, rect.height);
     if (e.button === 2 || yRatio > 0.65) {
@@ -13590,6 +15799,7 @@ function startHcpDinoGame(container) {
 
   const onPointerUp = () => {
     isJumpHeld = false;
+    queueMicrotask(wake);
     if (isDucking && !keysPressed.has("ArrowDown") && !keysPressed.has("KeyS")) {
       isDucking = false;
     }
@@ -13613,6 +15823,7 @@ function startHcpDinoGame(container) {
     if (!dock || dock.classList.contains("hidden") || dock.classList.contains("minimized")) {
       return;
     }
+    queueMicrotask(wake);
     if (e.code === "Space" || e.code === "ArrowUp" || e.code === "KeyW") {
       e.preventDefault();
       keysPressed.add(e.code);
@@ -13631,6 +15842,7 @@ function startHcpDinoGame(container) {
   const onKeyUp = (e) => {
     if (!hcpDinoActive) return;
     keysPressed.delete(e.code);
+    queueMicrotask(wake);
     if (e.code === "Space" || e.code === "ArrowUp" || e.code === "KeyW") {
       isJumpHeld = false;
       if (!isGrounded && dinoVY < -2.2) {
@@ -13652,10 +15864,12 @@ function startHcpDinoGame(container) {
   const ro = new ResizeObserver(() => {
     if (!hcpDinoActive) return;
     resize();
+    wake();
   });
   ro.observe(wrap);
 
   hcpDinoCleanup = () => {
+    stopIdleClock();
     wrap.removeEventListener("pointerdown", onPointerDown);
     window.removeEventListener("pointerup", onPointerUp);
     wrap.removeEventListener("contextmenu", onContextMenu);
@@ -13721,13 +15935,14 @@ function startHcpDinoGame(container) {
   let lastTime = 0;
 
   function loop(timestamp) {
+    hcpDinoAnimId = null;
     if (!hcpDinoActive) return;
 
     if (!lastTime) lastTime = timestamp;
     let deltaMs = timestamp - lastTime;
     lastTime = timestamp;
 
-    if (deltaMs > 64) deltaMs = 64;
+    if (deltaMs > (gameState === "running" ? 64 : 250)) deltaMs = gameState === "running" ? 64 : 250;
     const dt = deltaMs / 16.6667;
 
     ctx.imageSmoothingEnabled = false;
@@ -14530,29 +16745,6 @@ function startHcpDinoGame(container) {
     ctx.fillStyle = "rgba(168, 85, 247, 0.4)";
     ctx.fillRect(0, groundY + 7, width, 1);
 
-    // Active Biome Indicator Banner in the sky on start / restart
-    if (zoneBannerTimer > 0) {
-      zoneBannerTimer -= dt;
-      const alpha = Math.min(1, zoneBannerTimer / 30);
-      ctx.save();
-      ctx.globalAlpha = alpha;
-      ctx.font = "bold 10px 'Silkscreen', 'Press Start 2P', monospace";
-      ctx.textAlign = "center";
-      const textMetrics = ctx.measureText(zoneBannerText);
-      const badgeW = Math.max(160, Math.floor(textMetrics.width + 24));
-      const badgeH = 20;
-      const badgeX = Math.floor(width / 2);
-      const badgeY = 20;
-      ctx.fillStyle = "rgba(15, 10, 30, 0.88)";
-      ctx.fillRect(badgeX - Math.floor(badgeW / 2), badgeY - 13, badgeW, badgeH);
-      ctx.strokeStyle = "#a855f7";
-      ctx.lineWidth = 1.2;
-      ctx.strokeRect(badgeX - Math.floor(badgeW / 2), badgeY - 13, badgeW, badgeH);
-      ctx.fillStyle = "#38bdf8";
-      ctx.fillText(zoneBannerText, badgeX, badgeY + 1);
-      ctx.restore();
-    }
-
     // Obstacles
     for (const ob of obstacles) {
       let s;
@@ -14626,70 +16818,244 @@ function startHcpDinoGame(container) {
       ctx.shadowBlur = 0;
     }
 
-    hcpDinoAnimId = requestAnimationFrame(loop);
+    if (gameState === "running") {
+      stopIdleClock();
+      hcpDinoAnimId = requestAnimationFrame(loop);
+    } else startIdleClock();
   }
 
   hcpDinoAnimId = requestAnimationFrame(loop);
 }
 
+let hcpAutoScroll = true;
+let hcpScrollAnimId = null;
+
+function cancelHcpSmoothScroll() {
+  if (hcpScrollAnimId) {
+    cancelAnimationFrame(hcpScrollAnimId);
+    hcpScrollAnimId = null;
+  }
+}
+
+function hcpScrollToBottomSmooth() {
+  const box = el.homeConsolePreviewLogs;
+  if (!box) return;
+
+  cancelHcpSmoothScroll();
+
+  const startTop = box.scrollTop;
+  const maxScroll = Math.max(0, box.scrollHeight - box.clientHeight);
+  const distance = maxScroll - startTop;
+
+  const btn = el.btnHcpScrollBottom || document.getElementById("btn-hcp-scroll-bottom");
+  if (btn) btn.classList.add("hidden");
+
+  if (distance <= 3) {
+    box.scrollTop = maxScroll;
+    hcpAutoScroll = true;
+    updateHcpScrollBottomButton();
+    return;
+  }
+
+  // Organic, luxurious duration (340ms to 540ms) giving eyes time to appreciate the fluid motion
+  const duration = Math.min(540, Math.max(340, Math.round(Math.sqrt(distance) * 16.5)));
+  const startTime = performance.now();
+  hcpAutoScroll = true;
+
+  // Quintic ease-out curve (1 - (1-t)^5): immediate responsive impulse that gently glides and cushions to a stop
+  const easeOutQuint = (t) => 1 - Math.pow(1 - t, 5);
+
+  const step = (now) => {
+    const elapsed = now - startTime;
+    const progress = Math.min(1, elapsed / duration);
+    const eased = easeOutQuint(progress);
+
+    const currentMax = Math.max(0, box.scrollHeight - box.clientHeight);
+    box.scrollTop = startTop + (currentMax - startTop) * eased;
+
+    if (progress < 1) {
+      hcpScrollAnimId = requestAnimationFrame(step);
+    } else {
+      box.scrollTop = box.scrollHeight;
+      hcpScrollAnimId = null;
+      hcpAutoScroll = true;
+      updateHcpScrollBottomButton();
+    }
+  };
+
+  hcpScrollAnimId = requestAnimationFrame(step);
+}
+
+function updateHcpScrollBottomButton() {
+  const box = el.homeConsolePreviewLogs;
+  const btn = el.btnHcpScrollBottom || document.getElementById("btn-hcp-scroll-bottom");
+  if (!box || !btn) return;
+  if (hcpScrollAnimId) {
+    btn.classList.add("hidden");
+    return;
+  }
+  if (box.scrollHeight <= box.clientHeight + 10 || box.querySelector("#hcp-dino-wrap, .hcp-log-empty")) {
+    btn.classList.add("hidden");
+    return;
+  }
+  const dist = box.scrollHeight - box.scrollTop - box.clientHeight;
+  if (!hcpAutoScroll || dist > 15) {
+    btn.classList.remove("hidden");
+  } else {
+    btn.classList.add("hidden");
+  }
+}
+
+function setupHcpLogsInteraction() {
+  const box = el.homeConsolePreviewLogs;
+  if (!box || box._hasScrollGuard) return;
+  box._hasScrollGuard = true;
+
+  const btn = el.btnHcpScrollBottom || document.getElementById("btn-hcp-scroll-bottom");
+  if (btn && !btn._hasClickListener) {
+    btn._hasClickListener = true;
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      hcpScrollToBottomSmooth();
+    });
+  }
+
+  box.addEventListener("wheel", (e) => {
+    cancelHcpSmoothScroll();
+    if (e.deltaY < 0) {
+      hcpAutoScroll = false;
+    } else if (e.deltaY > 0) {
+      const dist = box.scrollHeight - box.scrollTop - box.clientHeight;
+      if (dist <= 6) {
+        hcpAutoScroll = true;
+      }
+    }
+    updateHcpScrollBottomButton();
+  }, { passive: true });
+
+  const onUserTouchOrPointer = () => {
+    cancelHcpSmoothScroll();
+    const dist = box.scrollHeight - box.scrollTop - box.clientHeight;
+    if (dist > 8) {
+      hcpAutoScroll = false;
+      updateHcpScrollBottomButton();
+    }
+  };
+  box.addEventListener("pointerdown", onUserTouchOrPointer, { passive: true });
+  box.addEventListener("touchstart", onUserTouchOrPointer, { passive: true });
+
+  box.addEventListener("scroll", () => {
+    if (hcpScrollAnimId) return;
+    const dist = box.scrollHeight - box.scrollTop - box.clientHeight;
+    if (dist > 15) {
+      hcpAutoScroll = false;
+    } else if (dist <= 6) {
+      const sel = window.getSelection();
+      const hasActiveSel = sel && !sel.isCollapsed && sel.rangeCount && (box.contains(sel.anchorNode) || box.contains(sel.focusNode));
+      if (!hasActiveSel) {
+        hcpAutoScroll = true;
+      }
+    }
+    updateHcpScrollBottomButton();
+  }, { passive: true });
+}
+
 function renderHcpTerminal(inst, fileLines) {
   const box = el.homeConsolePreviewLogs;
   if (!box || !inst) return;
+  setupHcpLogsInteraction();
   const key = normInstancePath(inst.path);
-  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight <= 40;
+
+  // Check if user is actively selecting text inside the console preview
+  const hasActiveSelection = (() => {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || !sel.rangeCount) return false;
+    try {
+      return box.contains(sel.anchorNode) || box.contains(sel.focusNode);
+    } catch (_) {
+      return false;
+    }
+  })();
+
+  const distanceToBottom = box.scrollHeight - box.scrollTop - box.clientHeight;
+  const isDifferentInstance = (key !== hcpRenderedKey);
   const live = gameLogBuffers.get(key);
   const total = gameLogTotals.get(key) || 0;
 
-  const scrollToBottom = () => {
-    box.scrollTop = box.scrollHeight;
-    requestAnimationFrame(() => {
-      box.scrollTop = box.scrollHeight;
-    });
-  };
-
   if (live && live.length) {
-    stopHcpDinoGame();
-    const isFirst = (key !== hcpRenderedKey || Boolean(hcpRenderedFileSig));
+    if (box.querySelector("#hcp-dino-wrap") || hcpDinoActive) {
+      stopHcpDinoGame();
+    }
+    const isFirst = (isDifferentInstance || Boolean(hcpRenderedFileSig));
     if (isFirst) {
+      cancelHcpSmoothScroll();
       box.textContent = "";
       hcpRenderedTotal = total - Math.min(live.length, HCP_MAX_LINES);
       hcpRenderedKey = key;
       hcpRenderedFileSig = "";
+      hcpAutoScroll = true;
     }
+
     const fresh = Math.min(total - hcpRenderedTotal, live.length, HCP_MAX_LINES);
-    if (fresh <= 0) return;
-    const frag = document.createDocumentFragment();
-    for (const l of live.slice(-fresh)) frag.appendChild(hcpLineElement(l.text, l.level, l.ts));
-    box.querySelector(".hcp-log-empty")?.remove();
-    box.appendChild(frag);
-    hcpRenderedTotal = total;
-    const extra = box.childElementCount - HCP_MAX_LINES;
-    for (let i = 0; i < extra; i++) box.firstElementChild?.remove();
-    if (atBottom || isFirst) {
-      scrollToBottom();
+    if (fresh > 0) {
+      const frag = document.createDocumentFragment();
+      for (const l of live.slice(-fresh)) frag.appendChild(hcpLineElement(l.text, l.level, l.ts));
+      box.querySelector(".hcp-log-empty")?.remove();
+      box.appendChild(frag);
+      hcpRenderedTotal = total;
+
+      const shouldScroll = isFirst || (hcpAutoScroll && !hasActiveSelection);
+      if (shouldScroll) {
+        const extra = box.childElementCount - HCP_MAX_LINES;
+        for (let i = 0; i < extra; i++) box.firstElementChild?.remove();
+        if (!hcpScrollAnimId) {
+          box.scrollTop = box.scrollHeight;
+        }
+      }
+      updateHcpScrollBottomButton();
     }
   } else {
     const lines = Array.isArray(fileLines) ? fileLines : [];
     const sig = `${key}\n${lines.join("\n")}`;
+
     if (key === hcpRenderedKey && sig === hcpRenderedFileSig) {
       if (!lines.length && !box.querySelector("#hcp-dino-wrap")) {
         startHcpDinoGame(box);
+        updateHcpScrollBottomButton();
       }
       return;
     }
+
+    // If it's the same instance and user has selected text or is scrolled up reading,
+    // do NOT wipe and do NOT jump to bottom!
+    if (!isDifferentInstance && (hasActiveSelection || !hcpAutoScroll || distanceToBottom > 25)) {
+      updateHcpScrollBottomButton();
+      return;
+    }
+
     hcpRenderedKey = key;
     hcpRenderedFileSig = sig;
     hcpRenderedTotal = 0;
+
     if (!lines.length) {
       startHcpDinoGame(box);
+      updateHcpScrollBottomButton();
       return;
     }
+
     stopHcpDinoGame();
     box.textContent = "";
     const frag = document.createDocumentFragment();
     for (const l of lines.slice(-HCP_MAX_LINES)) frag.appendChild(hcpLineElement(l, "", 0));
     box.appendChild(frag);
-    scrollToBottom();
+
+    const shouldScroll = isDifferentInstance || (hcpAutoScroll && !hasActiveSelection);
+    if (shouldScroll) {
+      if (!hcpScrollAnimId) {
+        box.scrollTop = box.scrollHeight;
+      }
+    }
+    updateHcpScrollBottomButton();
   }
 }
 
@@ -14718,6 +17084,23 @@ async function updateHomeConsolePreview() {
   // Instances that have not been opened/launched in this session will show "Esperando que se lance el juego..."
   const isRunningExternally = status && (status.state === "running" || status.state === "loading" || status.state === "crashed");
   renderHcpTerminal(inst, isRunningExternally && status ? status.last_lines : null);
+
+  // Sync with dedicated glass console window
+  try {
+    let ver = (inst?.mc_version || inst?.mc || inst?.version || "").trim();
+    if (!ver && inst?.name) {
+      const nameMatch = (inst.name.match(/\b1\.\d+(\.\d+)?\b/) || [])[0];
+      if (nameMatch) ver = nameMatch.trim();
+    }
+    const finalLines = live && live.length ? live.slice(-150) : (isRunningExternally && status?.last_lines ? status.last_lines.map(t => ({ text: t })) : []);
+    consoleWindowChannel.postMessage({
+      type: "status",
+      state: status?.state || "idle",
+      detail: status?.state ? (HCP_STATE_TEXT[status.state] || status.state) : "Listo para jugar",
+      runtime: ver ? `Runtime: ${ver}` : "Runtime: Minecraft",
+      logs: finalLines,
+    });
+  } catch {}
 }
 
 // =========================================================
@@ -15206,23 +17589,46 @@ function openHomeInstanceFolder(folder, label) {
   );
 }
 
-// Dock menu: force-closes the running game of the instance selected in Inicio.
-async function stopHomeInstanceGame() {
-  const inst = currentHomeInstance();
-  if (!inst) return;
-  const confirmed = await showConfirmDialog({
-    title: "DETENER JUEGO",
-    message: `Se cerrará Minecraft (${inst.name || inst.folder_name || "esta instancia"}) de inmediato.`,
-    confirmText: "Detener juego",
-    warnText: "Lo que el juego todavía no haya guardado (los últimos avances del mundo) se puede perder.",
-  });
-  if (!confirmed) return;
+const userInitiatedStops = new Set();
+
+// Immediately force-closes the instance game and resets the launcher state as closed
+async function stopInstanceImmediately(targetInst) {
+  const inst = targetInst || resolveDockActiveInstance() || currentHomeInstance();
+  if (!inst || !inst.path) return;
+  const instKey = normInstancePath(inst.path);
+  userInitiatedStops.add(instKey);
+  userInitiatedStops.add(inst.path.toLowerCase());
+
+  // 1. Immediately reset launcher state so for the launcher it is like closing it
+  setGameState(inst.path, "closed");
+  gameSessionStartTimes.delete(instKey);
+  const ms = gameMilestoneState.get(instKey);
+  if (ms) {
+    clearTimeout(ms.timer);
+    ms.ready = true;
+  }
+  const now = Date.now();
+  const lines = [{ level: "INFO", text: "Instancia detenida desde el launcher.", ts: now }];
+  pushGameLog(inst.path, lines);
+  appendGameLinesToConsole(lines);
+  updateHomeConsolePreview();
+  syncPlayButtonLock();
+  renderHomeInstanceCarousel();
+
+  // 2. Kill the process immediately on the backend
   try {
     await invoke("stop_game", { instancePath: inst.path });
-    showToast("Juego detenido");
+    showToast("Instancia detenida");
   } catch (err) {
-    showToast(`No se pudo detener el juego: ${err}`);
+    console.warn("stop_game result:", err);
   }
+}
+
+// Dock menu: force-closes the running or opening game of the instance selected in Inicio.
+async function stopHomeInstanceGame() {
+  const inst = resolveDockActiveInstance() || currentHomeInstance();
+  if (!inst) return;
+  await stopInstanceImmediately(inst);
 }
 
 function startInstanceRename() {
@@ -15594,27 +18000,36 @@ function whenMiniVideoShows(vid, then) {
   else vid.addEventListener("playing", shown, { once: true });
 }
 
+// The wallpaper the card rests on (shown whenever the pointer isn't over it): its stream, its
+// place in the cycle and, when it has one, its preview image.
+let miniRest = null; // {streamUrl, index, img}
+
 function setInitialButtonMiniVideo(streamUrl, previewUrl = null) {
   const vid = el.btnWallpaperMiniVideo;
   if (!vid || !streamUrl) return;
   if (streamUrl.toLowerCase().includes(".pkg")) return;
+  miniRest = { streamUrl, index: downloadedMp4CycleIndex, img: null };
+  if (!miniHovered) miniRestFrame = null;
 
   // Prefer the wallpaper's own preview image for the static frame: the video itself can
   // be a multi-hundred-MB 4K file and is then only opened while hovering.
   if (previewUrl) {
     vid.dataset.currentSrc = streamUrl;
-    unloadMiniVideo(vid);
     vid.classList.add("active");
     if (el.btnWallpaperMiniVideoNext) {
       el.btnWallpaperMiniVideoNext.classList.remove("active");
     }
     currentMiniSlot = "primary";
+    if (el.btnWallpaperMiniPreview) {
+      el.btnWallpaperMiniPreview.style.backgroundImage = `url("${previewUrl}")`;
+      el.btnWallpaperMiniPreview.style.backgroundSize = "cover";
+      el.btnWallpaperMiniPreview.style.backgroundPosition = "center";
+    }
     const img = new Image();
     img.onload = () => {
-      if (vid.dataset.currentSrc === streamUrl) paintMiniPosterFrom(img, img.naturalWidth, img.naturalHeight);
-    };
-    img.onerror = () => {
-      if (vid.dataset.currentSrc === streamUrl) setInitialButtonMiniVideo(streamUrl);
+      if (miniRest?.streamUrl === streamUrl) miniRest.img = img;
+      // not while the card is cycling: it shows this one when the pointer leaves
+      if (!miniHovered) paintMiniPosterFrom(img, img.naturalWidth, img.naturalHeight);
     };
     img.src = previewUrl;
     return;
@@ -15624,7 +18039,7 @@ function setInitialButtonMiniVideo(streamUrl, previewUrl = null) {
   vid.muted = true;
   vid.loop = true;
   vid.playsInline = true;
-  vid.preload = "auto"; // needed once to grab the poster frame
+  vid.preload = "auto";
   vid.src = streamUrl;
   vid.classList.add("active");
   if (el.btnWallpaperMiniVideoNext) {
@@ -15632,28 +18047,18 @@ function setInitialButtonMiniVideo(streamUrl, previewUrl = null) {
   }
   currentMiniSlot = "primary";
 
-  const onMeta = () => {
-    vid.removeEventListener("loadedmetadata", onMeta);
-    vid.pause();
-    try {
-      if (vid.duration > 1.2) {
-        vid.currentTime = 1.0;
-      } else {
-        vid.currentTime = 0;
-      }
-    } catch (_) {}
-  };
-  vid.addEventListener("loadedmetadata", onMeta);
-  vid.addEventListener("seeked", () => {
-    vid.pause();
-    // Keep only the frame: a loaded (even paused) 4K video holds its decoder memory.
-    if (!isMiniPreviewLive() && paintMiniPoster(vid)) {
-      unloadMiniVideo(vid);
+  const onFrameReady = () => {
+    if (!isMiniPreviewLive() && vid.videoWidth > 0) {
+      paintMiniPoster(vid);
     }
-  }, { once: true });
+  };
+  vid.addEventListener("loadeddata", onFrameReady, { once: true });
+  vid.addEventListener("canplay", onFrameReady, { once: true });
 }
 
 let miniIncoming = null; // the preview video that is opening, to be shown when it can be seen
+let miniReleaseTimer = 0; // releases the videos once the still has faded in over them
+let miniRestFrame = null; // the still shown before the pointer came over the card
 function cycleToNextMiniVideo(autoplay = true) {
   if (!downloadedMp4CycleList || downloadedMp4CycleList.length === 0) return;
   if (miniIncoming) return; // the one before is still opening
@@ -15710,10 +18115,12 @@ async function loadDownloadedMp4ForButtonPreview(preferredUrl = null) {
 
   if (validMp4s && validMp4s.length > 0) {
     let chosenIndex = 0;
-    if (preferredUrl) {
+    const savedBtnPath = localStorage.getItem("ika_button_wallpaper_path");
+    const targetUrl = preferredUrl || savedBtnPath;
+    if (targetUrl) {
       const idx = validMp4s.findIndex((w) => {
         const stream = convertFileSrc(w.video_path);
-        return stream === preferredUrl || w.video_path.toLowerCase() === preferredUrl.toLowerCase();
+        return stream === targetUrl || w.video_path.toLowerCase() === targetUrl.toLowerCase();
       });
       if (idx !== -1) chosenIndex = idx;
     } else if (activeWallpaperUrl) {
@@ -15773,6 +18180,13 @@ async function initWallpaperEngine() {
   }
   if (el.btnQuickWallpaper) {
     el.btnQuickWallpaper.addEventListener("click", openWallpapersModal);
+    // a card (not a <button>): Enter / Space open it too
+    el.btnQuickWallpaper.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        openWallpapersModal();
+      }
+    });
 
     el.btnQuickWallpaper.addEventListener("mouseenter", () => {
       // 1. Play current active video
@@ -15808,19 +18222,62 @@ async function initWallpaperEngine() {
     });
 
     el.btnQuickWallpaper.addEventListener("mouseleave", () => {
-      // Clear 1s cycle timer
       if (miniCycleTimer) {
         clearInterval(miniCycleTimer);
         miniCycleTimer = null;
       }
-      // Freeze the current frame into the poster and release both decoders
+
+      // Stay on the last wallpaper seen when leaving instead of reverting to the initial one
       const activeVid = currentMiniSlot === "primary" ? el.btnWallpaperMiniVideo : el.btnWallpaperMiniVideoNext;
+      const inactiveVid = currentMiniSlot === "primary" ? el.btnWallpaperMiniVideoNext : el.btnWallpaperMiniVideo;
       miniHovered = false;
       miniIncoming = null;
-      paintMiniPoster(activeVid);
+
+      const currentItem = (downloadedMp4CycleList && downloadedMp4CycleList.length > 0)
+        ? downloadedMp4CycleList[downloadedMp4CycleIndex]
+        : null;
+
+      let painted = false;
+      if (activeVid && activeVid.videoWidth > 0) {
+        painted = paintMiniPoster(activeVid);
+      }
+
+      if (currentItem && currentItem.video_path) {
+        const streamUrl = convertFileSrc(currentItem.video_path);
+        const previewUrl = currentItem.preview_path ? convertFileSrc(currentItem.preview_path) : currentItem.preview_data_url || null;
+        miniRest = { streamUrl, index: downloadedMp4CycleIndex, img: null };
+
+        if (previewUrl) {
+          if (el.btnWallpaperMiniPreview) {
+            el.btnWallpaperMiniPreview.style.backgroundImage = `url("${previewUrl}")`;
+            el.btnWallpaperMiniPreview.style.backgroundSize = "cover";
+            el.btnWallpaperMiniPreview.style.backgroundPosition = "center";
+          }
+          const img = new Image();
+          img.onload = () => {
+            if (miniRest?.streamUrl === streamUrl) {
+              miniRest.img = img;
+              if (!miniHovered && !painted) paintMiniPosterFrom(img, img.naturalWidth, img.naturalHeight);
+            }
+          };
+          img.src = previewUrl;
+        }
+
+        try {
+          localStorage.setItem("ika_button_wallpaper_path", currentItem.video_path);
+        } catch (_) {}
+      }
+
       if (el.btnWallpaperMiniPreview) el.btnWallpaperMiniPreview.classList.remove("is-live");
-      unloadMiniVideo(el.btnWallpaperMiniVideo);
-      unloadMiniVideo(el.btnWallpaperMiniVideoNext);
+
+      clearTimeout(miniReleaseTimer);
+      miniReleaseTimer = setTimeout(() => {
+        if (miniHovered) return;
+        if (inactiveVid) unloadMiniVideo(inactiveVid);
+        if (activeVid) {
+          try { activeVid.pause(); } catch (_) {}
+        }
+      }, 320);
     });
   }
   if (el.btnCloseWallpapersModal) {
@@ -15870,6 +18327,40 @@ async function initWallpaperEngine() {
 
   if (el.btnImportWallpaperFile) {
     el.btnImportWallpaperFile.addEventListener("click", handleImportWallpaper);
+  }
+  const btnImportUrl = document.getElementById("btn-import-wallpaper-url");
+  if (btnImportUrl) {
+    btnImportUrl.addEventListener("click", openImportYoutubeModal);
+  }
+  const btnCloseImportUrl = document.getElementById("btn-close-import-url");
+  if (btnCloseImportUrl) {
+    btnCloseImportUrl.addEventListener("click", closeImportYoutubeModal);
+  }
+  const btnCancelImportUrl = document.getElementById("btn-cancel-import-url");
+  if (btnCancelImportUrl) {
+    btnCancelImportUrl.addEventListener("click", closeImportYoutubeModal);
+  }
+  const btnConfirmImportUrl = document.getElementById("btn-confirm-import-url");
+  if (btnConfirmImportUrl) {
+    btnConfirmImportUrl.addEventListener("click", handleImportYoutubeWallpaper);
+  }
+  const inputYtUrl = document.getElementById("input-youtube-wallpaper-url");
+  if (inputYtUrl) {
+    inputYtUrl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        handleImportYoutubeWallpaper();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        closeImportYoutubeModal();
+      }
+    });
+  }
+  const modalImportUrl = document.getElementById("modal-import-url");
+  if (modalImportUrl) {
+    modalImportUrl.addEventListener("click", (e) => {
+      if (e.target === modalImportUrl) closeImportYoutubeModal();
+    });
   }
   if (el.btnEmptyImportWallpaper) {
     el.btnEmptyImportWallpaper.addEventListener("click", handleImportWallpaper);
@@ -16111,11 +18602,13 @@ async function initWallpaperEngine() {
   // Steam Mode Toggles (Online Catalog vs Local PC)
   if (el.btnSteamModeOnline) {
     el.btnSteamModeOnline.addEventListener("click", () => {
+      try { localStorage.setItem("modcomparer_steam_mode_user_set", "true"); } catch {}
       setSteamMode("online");
     });
   }
   if (el.btnSteamModeLocal) {
     el.btnSteamModeLocal.addEventListener("click", () => {
+      try { localStorage.setItem("modcomparer_steam_mode_user_set", "true"); } catch {}
       setSteamMode("local");
     });
   }
@@ -16398,7 +18891,50 @@ function initWallpaperInteractiveControls() {
 
       const viewInicio = document.getElementById("view-inicio");
       if (!viewInicio || viewInicio.classList.contains("hidden")) return;
+
+      // If hovering over the instance filter bar (the 4 options + search input), zoom ONLY the filter bar and never the wallpaper
+      const overFilterBar = Boolean(e.target && typeof e.target.closest === "function" && (e.target.closest(".instance-filter-search-bar") || e.target.closest("#instance-filter-search-bar")));
+      if (overFilterBar) {
+        e.preventDefault();
+        e.stopPropagation();
+        const bar = document.getElementById("instance-filter-search-bar") || document.querySelector(".instance-filter-search-bar");
+        if (bar && e.deltaY !== 0) {
+          let cur = parseFloat(bar.style.getPropertyValue("--filter-bar-scale")) || 1;
+          const step = 0.05;
+          if (e.deltaY < 0) {
+            cur = Math.min(1.5, cur + step);
+          } else {
+            cur = Math.max(0.65, cur - step);
+          }
+          cur = Math.round(cur * 100) / 100;
+          bar.style.setProperty("--filter-bar-scale", String(cur));
+          localStorage.setItem("ika_home_filter_bar_scale", String(cur));
+        }
+        return;
+      }
+
       if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) return;
+
+      // If hovering over the home instances carousel, zoom ONLY the carousel and never the wallpaper
+      const overCarousel = Boolean(e.target && typeof e.target.closest === "function" && e.target.closest(".instance-carousel-container"));
+      if (overCarousel) {
+        e.preventDefault();
+        e.stopPropagation();
+        const carousel = document.querySelector(".instance-carousel-container");
+        if (carousel && e.deltaY !== 0) {
+          let cur = parseFloat(carousel.style.getPropertyValue("--carousel-scale")) || 1;
+          const step = 0.05;
+          if (e.deltaY < 0) {
+            cur = Math.min(1.4, cur + step);
+          } else {
+            cur = Math.max(0.65, cur - step);
+          }
+          cur = Math.round(cur * 100) / 100;
+          carousel.style.setProperty("--carousel-scale", String(cur));
+          localStorage.setItem("ika_home_carousel_scale", String(cur));
+        }
+        return;
+      }
 
       // Evitar que WebView2/Chromium haga zoom general a toda la ventana
       e.preventDefault();
@@ -16722,7 +19258,15 @@ function updateTitlebarHairlines() {
   const core = document.getElementById("titlebar-hairline-core");
   const notchFill = document.getElementById("titlebar-notch-fill");
 
-  const path = `M -3500,${tbH} L 0,${tbH} C 40,${tbH} 50,${notchH} 90,${notchH} L 850,${notchH} C 890,${notchH} 900,${tbH} 940,${tbH} L 4440,${tbH}`;
+  // The line only reaches the window's edges (plus the glow's width): it used to run 3500 units
+  // past each side, and its blurred glow is redrawn on every tick of its moving gradient, so the
+  // part nobody sees cost about a sixth of the idle GPU time. Recomputed on resize.
+  const svg = document.getElementById("notch-shape");
+  const r = svg && svg.getBoundingClientRect();
+  const unit = r && r.width > 0 ? r.width / 940 : 1;
+  const left = r && r.width > 0 ? Math.min(0, Math.floor(-r.left / unit) - 40) : -3500;
+  const right = r && r.width > 0 ? Math.max(940, Math.ceil((window.innerWidth - r.left) / unit) + 40) : 4440;
+  const path = `M ${left},${tbH} L 0,${tbH} C 40,${tbH} 50,${notchH} 90,${notchH} L 850,${notchH} C 890,${notchH} 900,${tbH} 940,${tbH} L ${right},${tbH}`;
   const fillPath = `M 0,0 L 940,0 L 940,${tbH} C 900,${tbH} 890,${notchH} 850,${notchH} L 90,${notchH} C 50,${notchH} 40,${tbH} 0,${tbH} Z`;
 
   if (bloom) bloom.setAttribute("d", path);
@@ -16759,9 +19303,9 @@ function checkCyberDockHairlinesVars() {
 // whole transparent window recomposite every frame (~1.5 CPU cores while idle). Same
 // motion, read from the same markup, but driven from JS at a fixed low frame rate.
 // Each update re-rasterizes large SVG gradients (~200 stops, full window width), which
-// costs far more than a video frame: 24 fps while the launcher has focus, frozen while
-// the user is in another window (e.g. playing) — the background video keeps running.
-const SVG_GRADIENT_FPS = 24;
+// costs far more than a video frame: 30 fps on the shared animation clock (frame-clock.js) while
+// the launcher has focus, frozen while the user is in another window (e.g. playing) — the
+// background video keeps running.
 
 function initThrottledSvgGradientAnimations() {
   const parseNums = (v) => String(v).trim().split(/[\s,]+/).map(Number);
@@ -16789,11 +19333,113 @@ function initThrottledSvgGradientAnimations() {
   }
   if (!anims.length) return;
 
+  // Only the gradients that something on screen paints with are moved: there is one copy per
+  // colour theme and per section, and updating all of them (~40) restyled and repainted the
+  // hidden ones too. The motion follows the clock, so a gradient that comes back into view is
+  // already at the right point. Which elements use which gradient is indexed in one query
+  // (~2 ms) every 1.5 s while idle; visibility is checked four times a second.
+  let cssRefs = null;
+  const URL_ID = /url\(\s*["']?#([^"')\s]+)/g;
+  let index = new Map(); // id -> elements that reference it
+  // Built in small steps inside idle time (reading the stylesheet and matching its ~40 theme
+  // rules takes 10-30 ms in one go, enough for a visible hitch).
+  function* buildIndex() {
+    const next = new Map();
+    const add = (id, el) => {
+      let list = next.get(id);
+      if (!list) next.set(id, (list = []));
+      list.push(el);
+    };
+    if (!cssRefs) {
+      const found = [];
+      const stack = [];
+      for (const sheet of document.styleSheets) {
+        try { stack.push([sheet.cssRules, 0]); } catch (_) {}
+        yield;
+      }
+      let n = 0;
+      while (stack.length) {
+        const top = stack[stack.length - 1];
+        const [list, k] = top;
+        if (k >= list.length) { stack.pop(); continue; }
+        top[1]++;
+        const r = list[k];
+        if (r.cssRules && !r.selectorText) stack.push([r.cssRules, 0]);
+        else if (r.selectorText && r.cssText.includes("url(")) {
+          const ids = [...r.cssText.matchAll(URL_ID)].map((m) => m[1]);
+          if (ids.length) found.push([r.selectorText, ids]);
+        }
+        if (++n % 200 === 0) yield;
+      }
+      cssRefs = found;
+    }
+    for (const el of document.querySelectorAll('[fill^="url"],[stroke^="url"],[mask],[filter],[clip-path],[style*="url("],use,linearGradient[href],radialGradient[href]')) {
+      for (const at of ["fill", "stroke", "mask", "filter", "clip-path", "style"]) {
+        const v = el.getAttribute(at);
+        if (v && v.includes("url(")) for (const m of v.matchAll(URL_ID)) add(m[1], el);
+      }
+      const href = el.getAttribute("href") || el.getAttribute("xlink:href");
+      if (href && href[0] === "#") add(href.slice(1), el);
+    }
+    yield;
+    for (const [sel, ids] of cssRefs) {
+      try {
+        for (const el of document.querySelectorAll(sel)) for (const id of ids) add(id, el);
+      } catch (_) {}
+      yield;
+    }
+    index = next;
+  }
+  const VIS = { opacityProperty: true, visibilityProperty: true };
+  const isUsed = (id, depth = 0) => {
+    if (!id || depth > 4) return true;
+    for (const el of index.get(id) || []) {
+      if (!el.isConnected) continue;
+      if (el.id && /^(linear|radial)Gradient$/.test(el.tagName)) {
+        if (isUsed(el.id, depth + 1)) return true;
+        continue;
+      }
+      const holder = el.closest("mask, clipPath, pattern, symbol, marker, defs");
+      if (holder) {
+        if (holder.tagName !== "defs" && holder.id && isUsed(holder.id, depth + 1)) return true;
+        continue;
+      }
+      if (!el.checkVisibility || el.checkVisibility(VIS)) return true;
+    }
+    return false;
+  };
+  let ticks = 0;
+  let indexed = false;
+  const refreshActive = () => {
+    if (!indexed) return;
+    for (const a of anims) a.active = isUsed(a.target.id);
+  };
+  const scheduleIndex = () => {
+    const work = buildIndex();
+    const step = (deadline) => {
+      const end = performance.now() + 3; // short slices: input never waits behind this
+      while (deadline.timeRemaining() > 1 && performance.now() < end) {
+        if (work.next().done) {
+          indexed = true;
+          setTimeout(scheduleIndex, 1500);
+          return;
+        }
+      }
+      requestIdleCallback(step);
+    };
+    requestIdleCallback(step);
+  };
+  if (window.requestIdleCallback) scheduleIndex();
+  else indexed = false; // no idle callbacks: every gradient keeps moving, as before
+  for (const a of anims) a.active = true;
+
   const start = performance.now();
   const tick = () => {
     if (!isBackgroundLive()) return;
+    if (ticks++ % 8 === 0) refreshActive();
     const elapsed = performance.now() - start;
     for (const a of anims) {
+      if (!a.active) continue;
       const p = (elapsed % a.dur) / a.dur;
       let i = 0;
       while (i < a.keyTimes.length - 2 && p > a.keyTimes[i + 1]) i++;
@@ -16808,16 +19454,23 @@ function initThrottledSvgGradientAnimations() {
   };
   tick();
 
-  // Always SVG_GRADIENT_FPS, also while the background video plays. Updating them on every
-  // video frame did not merge with the video's frames: each update landed one display
-  // refresh later and became an extra full frame (about 120 frames/s on a high-refresh
-  // monitor), roughly half of the launcher's GPU/CPU use. Measured: ~64% -> ~45% of a core.
-  setInterval(tick, 1000 / SVG_GRADIENT_FPS);
+  // On the shared clock, also while the background video plays: updating them on every video
+  // frame did not merge with the video's frames (each update landed one display refresh later
+  // and became an extra full frame), and on a timer of their own they did not merge with the
+  // other animations either.
+  onTick(tick);
 }
 
 function initCyberDockHairlines() {
   checkCyberDockHairlinesVars();
   updateTitlebarHairlines();
+  let resizeRaf = 0;
+  window.addEventListener("resize", () => {
+    if (!resizeRaf) resizeRaf = requestAnimationFrame(() => {
+      resizeRaf = 0;
+      updateTitlebarHairlines();
+    });
+  });
 
   // Watch for any changes in real-time (Vite HMR, stylesheet edits, devtools).
   // Only needed while developing: in a build the CSS variables never change on their own.
@@ -16837,7 +19490,7 @@ function initCyberDockHairlines() {
 }
 
 function switchWallpaperTab(tab) {
-  const targetTab = ["catalog", "steam", "downloaded", "playlist"].includes(tab) ? tab : "catalog";
+  const targetTab = ["downloaded", "steam", "catalog", "playlist"].includes(tab) ? tab : "downloaded";
   localStorage.setItem("modcomparer_last_wallpaper_tab", targetTab);
 
   if (targetTab === "catalog") {
@@ -17359,6 +20012,67 @@ async function resetWeProperties() {
   showToast("Opciones del fondo restablecidas a sus valores por defecto.");
 }
 
+// A wallpaper's option label, readable. Wallpaper Engine labels may be HTML (bold, sizes, line
+// breaks, rules, links, images: sponsor QR codes) and often bilingual ("使用24小时格式 Use 24-hour
+// format"): the markup, links, images and decorative emoji go; when a line has both Chinese and
+// Latin text, the Latin part stays. `promo`: nothing left but links / images / sponsor notes.
+const CJK = /[\u3000-\u303f\u3040-\u30ff\u3400-\u9fff\uff00-\uffef]/;
+function cleanWeLabel(raw) {
+  const html = String(raw || "");
+  const doc = new DOMParser().parseFromString(`<div>${html.replace(/<br\s*\/?>|<hr\s*\/?>|<\/p>|<\/h\d>|<\/div>/gi, "\n")}</div>`, "text/html");
+  doc.querySelectorAll("img, script, style").forEach((n) => n.remove());
+  const hadLink = !!doc.querySelector("a");
+  const text = doc.body.textContent || "";
+  const lines = text
+    .split("\n")
+    .map((l) =>
+      l
+        .replace(/https?:\/\/\S+/g, "")
+        .replace(/[\u{1F000}-\u{1FAFF}\u{2190}-\u{21FF}\u{2300}-\u{23FF}\u{25A0}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE0F}\u{200D}]/gu, "")
+        .replace(/\s+/g, " ")
+        .trim()
+    )
+    .filter(Boolean);
+  const parts = lines.map((l) => {
+    if (!CJK.test(l) || !/[A-Za-z]{2}/.test(l)) return l;
+    // bilingual: keep the Latin text
+    return l.replace(/[\u3000-\u303f\u3040-\u30ff\u3400-\u9fff\uff00-\uffef]+[^A-Za-z]*/g, " ").replace(/^[\s/:|-]+|[\s/:|-]+$/g, "").replace(/\s+/g, " ").trim();
+  });
+  // a Chinese line followed by its English one: the English one
+  const out = [];
+  for (const l of parts.filter(Boolean)) {
+    if (out.length && CJK.test(out[out.length - 1]) && !CJK.test(l)) out[out.length - 1] = l;
+    else out.push(l);
+  }
+  const label = out.join(" · ");
+  const promo = /赞助|sponsor|bilibili|pixiv|个人主页|个人空间|三连|点击|微信|支付宝|donat|afdian|爱发电|patreon|quark/i.test(html) && (hadLink || /<img/i.test(html) || !label);
+  return { label, promo };
+}
+
+// Translates the panel's labels and choices into the launcher's language (translate_texts in
+// Rust: once per text, then from its cache). Spanish launcher: everything; English: what isn't.
+async function translateWePanel(list) {
+  const lang = getLang();
+  const nodes = [...list.querySelectorAll(".we-prop-label, .we-prop-group-title, .we-prop-note, .we-prop-select option")].filter((n) => {
+    const t = n.textContent.trim();
+    return t && /\p{L}{2}/u.test(t) && (lang === "es" || CJK.test(t));
+  });
+  if (!nodes.length) return;
+  try {
+    const out = await invoke("translate_texts", { texts: nodes.map((n) => n.textContent.trim()), target: lang });
+    // as a label: capital first letter, no full stop
+    const tidy = (t) => {
+      const v = String(t).trim().replace(/[.。]$/, "");
+      return v.charAt(0).toLocaleUpperCase() + v.slice(1);
+    };
+    nodes.forEach((n, i) => {
+      if (out[i] && n.isConnected) n.textContent = tidy(out[i]);
+    });
+  } catch (err) {
+    console.warn("Could not translate wallpaper options:", err);
+  }
+}
+
 async function openWePropertiesPanel(item) {
   if (!el.wePropertiesPanel || !el.wePropertiesList) return;
   currentWePropertiesItem = item;
@@ -17393,9 +20107,15 @@ async function openWePropertiesPanel(item) {
       if (!prop || typeof prop !== "object") continue;
       const text = (prop.text || "").trim();
       if (text.startsWith("ui_browse_") || !text) continue;
+      const { label, promo } = cleanWeLabel(text);
+      const kind = (prop.type || "").toLowerCase();
+      // notes made only of links, images and sponsor codes are left out
+      if (kind === "text" && (promo || !label)) continue;
+      if (!label && kind !== "group") continue;
       validProps.push({
         key,
         ...prop,
+        label,
         order: typeof prop.order === "number" ? prop.order : (typeof prop.index === "number" ? prop.index : 999),
       });
     }
@@ -17413,9 +20133,22 @@ async function openWePropertiesPanel(item) {
       row.className = "we-prop-row";
       row.dataset.propKey = prop.key;
 
+      const propKind = (prop.type || "").toLowerCase();
+      // a group: a section title; a text: a short note (no control)
+      if (propKind === "group" || propKind === "text") {
+        row.classList.add(propKind === "group" ? "we-prop-group" : "we-prop-note-row");
+        const t = document.createElement("span");
+        t.className = propKind === "group" ? "we-prop-group-title" : "we-prop-note";
+        t.textContent = prop.label || prop.key;
+        row.appendChild(t);
+        el.wePropertiesList.appendChild(row);
+        return;
+      }
+
       const label = document.createElement("span");
       label.className = "we-prop-label";
-      label.textContent = prop.text || prop.key;
+      label.textContent = prop.label || prop.key;
+      label.title = label.textContent;
       row.appendChild(label);
 
       const controlWrap = document.createElement("div");
@@ -17438,7 +20171,7 @@ async function openWePropertiesPanel(item) {
         options.forEach((opt) => {
           const optEl = document.createElement("option");
           optEl.value = String(opt.value);
-          optEl.textContent = opt.label || opt.value;
+          optEl.textContent = cleanWeLabel(opt.label || String(opt.value)).label || String(opt.value);
           if (String(opt.value) === String(curVal)) {
             optEl.selected = true;
           }
@@ -17563,6 +20296,7 @@ async function openWePropertiesPanel(item) {
   if (el.modalWallpapersBox) {
     el.modalWallpapersBox.classList.add("has-we-props-open");
   }
+  translateWePanel(el.wePropertiesList);
 }
 
 let currentSceneBlobUrl = null;
@@ -17575,14 +20309,28 @@ let currentSceneBlobUrl = null;
 // of .home-bg-canvas) can no longer move the frozen frame while it fades out.
 function prepareSnapshotCanvas(canvas) {
   const dpr = window.devicePixelRatio || 1;
+  // The frame is drawn in window coordinates, but the canvas does not start at the window's
+  // corner: an ancestor with a transform places it below the title bar (52 px), so the frozen
+  // frame showed that much lower during every wallpaper change. Measured, and drawn shifted.
+  const shown = canvas.style.display !== "none" && getComputedStyle(canvas).display !== "none";
+  if (!shown) {
+    canvas.style.visibility = "hidden";
+    canvas.style.display = "block";
+  }
+  const at = canvas.getBoundingClientRect();
+  if (!shown) {
+    canvas.style.display = "none";
+    canvas.style.visibility = "";
+  }
   canvas.width = Math.max(1, Math.round(window.innerWidth * dpr));
   canvas.height = Math.max(1, Math.round(window.innerHeight * dpr));
   const ctx = canvas.getContext("2d");
   if (ctx) {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.setTransform(dpr, 0, 0, dpr, -at.left * dpr, -at.top * dpr);
   }
+  canvas._shift = { x: Math.round(at.left * dpr), y: Math.round(at.top * dpr) }; // for putImageData
   return ctx;
 }
 
@@ -17635,7 +20383,7 @@ async function captureCurrentWallpaperSnapshot() {
           const ctx = prepareSnapshotCanvas(canvas);
           if (ctx) {
             if (canvas.width === w && canvas.height === h) {
-              ctx.putImageData(img, 0, 0);
+              ctx.putImageData(img, -(canvas._shift?.x || 0), -(canvas._shift?.y || 0));
             } else {
               const bmp = await createImageBitmap(img);
               ctx.drawImage(bmp, 0, 0, window.innerWidth, window.innerHeight);
@@ -17710,9 +20458,600 @@ function fadeOutSnapshot(delayMs = 100) {
   }, delayMs);
 }
 
+let weCanvasStreamRunning = false;
+let weMiniOffCanvas = null;
+let weMiniOffCtx = null;
+let weLiveBlurInFlight = false;
+
+let weCanvasStreamUntick = null;
+let weCanvasStreamGen = 0;
+
+function stopWeCanvasStream() {
+  weCanvasStreamRunning = false;
+  weCanvasStreamUntick?.();
+  weCanvasStreamUntick = null;
+  weLiveBlurInFlight = false;
+  const canvas = document.getElementById("home-we-canvas");
+  if (canvas) {
+    canvas.style.display = "none";
+  }
+  document.querySelectorAll(".has-live-glass").forEach((el) => el.classList.remove("has-live-glass"));
+  document.querySelectorAll(".we-live-glass-canvas").forEach((c) => {
+    c.style.display = "none";
+  });
+}
+
+function startWeCanvasStream() {
+  if (weCanvasStreamRunning) return;
+  weCanvasStreamRunning = true;
+  const gen = ++weCanvasStreamGen;
+
+  if (!weMiniOffCanvas) {
+    weMiniOffCanvas = document.createElement("canvas");
+    weMiniOffCanvas.width = 256;
+    weMiniOffCanvas.height = 144;
+    weMiniOffCtx = weMiniOffCanvas.getContext("2d", { willReadFrequently: false });
+  }
+
+  // On the shared animation clock (frame-clock.js, 30 fps): each tick paints the capture that
+  // arrived since the previous one and asks for the next, so the glass changes in the same
+  // display frames as the launcher's other animations. (It used to ask for a frame on every
+  // display refresh, 240 a second, just to check the time, plus another one to paint.)
+  let pending = null;
+  // checkVisibility, not offsetParent: a section that is not open is hidden with
+  // content-visibility, which keeps its elements laid out.
+  const shown = (el) => !!el && el.checkVisibility();
+  const anyGlassVisible = () =>
+    shown(document.getElementById("inst-pill-we-blur-bg")) ||
+    shown(document.getElementById("inst-search-we-blur-bg")) ||
+    [...document.querySelectorAll(".hcp-we-blur-bg")].some(shown);
+  const paint = (bytes) => {
+    const rawData = new Uint8ClampedArray(bytes.buffer, bytes.byteOffset + 8, 256 * 144 * 4);
+    const imgData = new ImageData(rawData, 256, 144);
+    weMiniOffCtx.putImageData(imgData, 0, 0);
+
+    const winW = window.innerWidth || 1;
+    const winH = window.innerHeight || 1;
+
+    // Render live wallpaper blur slice to each glass panel
+    // the bar's pieces blurred like the console window (28px), not by their slim height
+    renderLiveSliceToGlass("inst-pill-we-blur-bg", weMiniOffCanvas, winW, winH, { blur: 28 });
+    renderLiveSliceToGlass("inst-search-we-blur-bg", weMiniOffCanvas, winW, winH, { blur: 28 });
+    document.querySelectorAll(".hcp-we-blur-bg").forEach((el) => {
+      renderLiveSliceToGlass(el, weMiniOffCanvas, winW, winH);
+    });
+  };
+  const capture = async () => {
+    weLiveBlurInFlight = true;
+    try {
+      const buf = await invoke("capture_we_mini_thumb");
+      const bytes = buf instanceof ArrayBuffer ? new Uint8Array(buf) : new Uint8Array(buf || []);
+      if (gen === weCanvasStreamGen && bytes.length >= 8 + 256 * 144 * 4) pending = bytes;
+    } catch (_) {
+      // Ignored if window is minimized or switching
+    } finally {
+      if (gen === weCanvasStreamGen) weLiveBlurInFlight = false;
+    }
+  };
+  weCanvasStreamUntick = onTick(() => {
+    if (gen !== weCanvasStreamGen) return;
+    if (!weCanvasStreamRunning || !document.body.classList.contains("has-we-active")) {
+      stopWeCanvasStream();
+      return;
+    }
+    if (pending) {
+      paint(pending);
+      pending = null;
+    }
+    // No glass panel on screen (another section, panels hidden): no capture. The capture
+    // itself stops after a second without requests (wallpaper_capture.rs).
+    if (document.hidden || weLiveBlurInFlight || !anyGlassVisible()) return;
+    capture();
+  });
+}
+
+// `opts.blur`: how far the glass spreads what is behind it, in screen px (by default 15% of the
+// panel's height); `opts.colour`: the filters after the blur (saturation, brightness);
+// `opts.exact`: the frame is drawn exactly over the screen instead of slightly enlarged at the
+// borders (which keeps the screen's edges filled, at the cost of a small shift).
+// How light the wallpaper is behind a glass piece (0 black .. 1 white): its part of the frame,
+// averaged on a tiny canvas. Measured about once a second per piece.
+let glassLumaCanvas = null;
+function glassBackLuma(container, sourceCanvas, winW, winH) {
+  const now = performance.now();
+  if (container._lumaAt && now - container._lumaAt < 900) return container._luma;
+  const r = container.getBoundingClientRect();
+  const sw = sourceCanvas.width;
+  const sh = sourceCanvas.height;
+  const sx = Math.max(0, Math.floor((r.left / winW) * sw));
+  const sy = Math.max(0, Math.floor((r.top / winH) * sh));
+  const ew = Math.max(1, Math.min(sw - sx, Math.ceil((r.width / winW) * sw)));
+  const eh = Math.max(1, Math.min(sh - sy, Math.ceil((r.height / winH) * sh)));
+  if (!glassLumaCanvas) {
+    glassLumaCanvas = document.createElement("canvas");
+    glassLumaCanvas.width = 16;
+    glassLumaCanvas.height = 6;
+  }
+  const g = glassLumaCanvas.getContext("2d", { willReadFrequently: true });
+  let luma = container._luma ?? 0.2;
+  try {
+    g.clearRect(0, 0, 16, 6);
+    g.drawImage(sourceCanvas, sx, sy, ew, eh, 0, 0, 16, 6);
+    const px = g.getImageData(0, 0, 16, 6).data;
+    let sum = 0;
+    for (let i = 0; i < px.length; i += 4) sum += (0.2126 * px[i] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2]) / 255;
+    luma = sum / (px.length / 4);
+  } catch {}
+  // smoothed: an animated wallpaper must not make the glass (and what depends on it) flicker
+  container._luma = container._luma === undefined ? luma : container._luma * 0.6 + luma * 0.4;
+  container._lumaAt = now;
+  return container._luma;
+}
+
+// How light the whole wallpaper is (0..1), measured about once a second from the frame the glass
+// is made from. The glass's colour depends on this and not on what is right behind each piece, so
+// moving a window over the wallpaper doesn't change how bright its glass is.
+function glassFrameLuma(sourceCanvas) {
+  const now = performance.now();
+  if (sourceCanvas._lumaAt && now - sourceCanvas._lumaAt < 900) return sourceCanvas._luma;
+  if (!glassLumaCanvas) {
+    glassLumaCanvas = document.createElement("canvas");
+    glassLumaCanvas.width = 16;
+    glassLumaCanvas.height = 6;
+  }
+  const g = glassLumaCanvas.getContext("2d", { willReadFrequently: true });
+  let luma = sourceCanvas._luma ?? 0.2;
+  try {
+    g.clearRect(0, 0, 16, 6);
+    g.drawImage(sourceCanvas, 0, 0, 16, 6);
+    const px = g.getImageData(0, 0, 16, 6).data;
+    let sum = 0;
+    for (let i = 0; i < px.length; i += 4) sum += (0.2126 * px[i] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2]) / 255;
+    luma = sum / (px.length / 4);
+  } catch {}
+  sourceCanvas._luma = sourceCanvas._luma === undefined ? luma : sourceCanvas._luma * 0.7 + luma * 0.3;
+  sourceCanvas._lumaAt = now;
+  return sourceCanvas._luma;
+}
+
+// The glass keeps the wallpaper's own colours, blurred and deepened, over any wallpaper, like the
+// console window's. Its colour boost (saturate 1.85) is made for dark wallpapers: over a light
+// one a pale sky blue's blue channel overflowed and the glass turned mint / teal. Over a light
+// wallpaper the glass is first brought down to a mid lightness and then boosted, so the pale blue
+// becomes a deep, vivid blue instead.
+function glassColourFor(luma) {
+  // only as far as keeps the blue from overflowing: the glass stays light. 1 (nothing) up to a
+  // mid lightness, so there is no jump anywhere.
+  const down = Math.min(1, Math.max(0.72, 0.66 / Math.max(0.01, luma)));
+  return `brightness(${down.toFixed(2)}) saturate(1.85) brightness(1.08)`;
+}
+
+function renderLiveSliceToGlass(containerOrId, sourceCanvas, winW, winH, opts = {}) {
+  const container = typeof containerOrId === "string" ? document.getElementById(containerOrId) : containerOrId;
+  if (!container || !container.checkVisibility()) return;
+
+  container.classList.add("has-live-glass");
+  // the glass has the size of the frame it is made from (256x144 from Wallpaper Engine's
+  // capture, more from a video)
+  const sw = sourceCanvas.width;
+  const sh = sourceCanvas.height;
+
+  let canvas = container.querySelector(".we-live-glass-canvas");
+  if (!canvas) {
+    canvas = document.createElement("canvas");
+    canvas.className = "we-live-glass-canvas";
+    canvas.width = sw;
+    canvas.height = sh;
+    container.appendChild(canvas);
+  } else {
+    canvas.style.display = "";
+  }
+
+  if (canvas.width !== sw || canvas.height !== sh) {
+    canvas.width = sw;
+    canvas.height = sh;
+  }
+
+  // Draw the full wallpaper frame onto the canvas (no slicing, 100% viewport mapped).
+  // The blur runs here, at the frame's small size, instead of as a CSS filter on the
+  // viewport-sized layer: a full-screen 28px blur had to be re-rasterised on every tick.
+  const ctx = canvas._ctx || (canvas._ctx = canvas.getContext("2d", { willReadFrequently: false }));
+  if (ctx) {
+    ctx.clearRect(0, 0, sw, sh);
+    const scaleX = Math.max(1, (winW || 1) / sw);
+    const scaleY = Math.max(1, (winH || 1) / sh);
+    // Frosted glass spreads what is behind by 15% of the panel's height (6 to 28 screen px): a
+    // big window gets the full 28px, while in a slim bar 28px would wash out everything behind
+    // it into one flat colour (a dark line behind would leave no trace instead of a soft band).
+    const panelH = container.getBoundingClientRect().height || 0;
+    const screenBlur = opts.blur || Math.min(28, Math.max(6, panelH * 0.15));
+    const canvasBlur = Math.max(0.5, screenBlur / ((scaleX + scaleY) / 2));
+    // the glass's colour: from the whole wallpaper (the same wherever the piece is moved)
+    const colour = opts.colour && !/saturate\(1\.8/.test(opts.colour) ? opts.colour : glassColourFor(glassFrameLuma(sourceCanvas));
+    // what is right behind this piece: only for the bar's text and Crear instancia's shadow
+    const luma = container.id === "inst-pill-we-blur-bg" ? glassBackLuma(container, sourceCanvas, winW || 1, winH || 1) : 0;
+    // over something very light, Crear instancia gets an inner shadow (style.css, .is-over-light)
+    // (with some slack either way, so it doesn't switch back and forth on the threshold)
+    if (container.id === "inst-pill-we-blur-bg") {
+      const bar = document.getElementById("instance-filter-search-bar");
+      if (bar) {
+        const on = bar.classList.contains("is-over-light");
+        if (!on && luma > 0.6) bar.classList.add("is-over-light");
+        else if (on && luma < 0.48) bar.classList.remove("is-over-light");
+      }
+    }
+    ctx.filter = `blur(${canvasBlur.toFixed(2)}px) ${colour}`;
+    // Bleed outward slightly to prevent Gaussian blur from sampling transparent pixels at borders
+    const bleed = opts.exact ? 0 : Math.ceil(canvasBlur * 1.5);
+    // the wallpaper as it is on screen: zoomed and moved (Ctrl + wheel, arrows), scaled about the
+    // middle of the window and then shifted, as the wallpaper itself is. The frame the glass is
+    // made from is the wallpaper as it comes, without that.
+    const t = wallpaperTransform;
+    const zoom = Math.max(0.5, Math.min(5, t?.scale || 1));
+    const moved = zoom !== 1 || t?.panX || t?.panY;
+    if (moved) {
+      ctx.save();
+      ctx.translate(sw / 2 + (t.panX || 0) * (sw / (winW || 1)), sh / 2 + (t.panY || 0) * (sh / (winH || 1)));
+      ctx.scale(zoom, zoom);
+      ctx.translate(-sw / 2, -sh / 2);
+    }
+    ctx.drawImage(sourceCanvas, -bleed, -bleed, sw + bleed * 2, sh + bleed * 2);
+    if (moved) ctx.restore();
+    ctx.filter = "none";
+  }
+
+  // Only update screen alignment variable if not actively being dragged or resized
+  const parentWin = container.closest(".home-cyber-window, .home-console-preview-dock");
+  const isManipulated = parentWin && (parentWin.classList.contains("is-dragging") || parentWin.classList.contains("is-resizing"));
+  if (!isManipulated) {
+    const rect = container.getBoundingClientRect();
+    if (rect.width > 20 && rect.height > 20 && (rect.left !== 0 || rect.top !== 0)) {
+      // The glass is the whole wallpaper laid over the screen, of which the container shows its
+      // part. Inside a scaled ancestor (the bar above the carousel is) it would be scaled too and
+      // show some other part: its size and offset are given in the container's own units.
+      const sx = container.offsetWidth ? rect.width / container.offsetWidth : 1;
+      const sy = container.offsetHeight ? rect.height / container.offsetHeight : 1;
+      container.style.setProperty("--dock-x", `${rect.left / sx}px`);
+      container.style.setProperty("--dock-y", `${rect.top / sy}px`);
+      canvas.style.width = Math.abs(sx - 1) > 0.001 ? `${winW / sx}px` : "";
+      canvas.style.height = Math.abs(sy - 1) > 0.001 ? `${winH / sy}px` : "";
+    }
+  }
+}
+
+// Glass of the bar above the carousel with a video wallpaper. That bar used the browser's own
+// blur (backdrop-filter), which over a video changing every frame now and then showed a band of
+// sharp video for one frame (a quick flicker along the top of the bar). It gets what Wallpaper
+// Engine gets instead: the frame on screen, drawn small into a canvas and blurred into its glass
+// (renderLiveSliceToGlass), the glass that never flickered. The console window keeps the
+// browser's blur, which looks right there.
+const VIDEO_GLASS_TARGETS = ["inst-pill-we-blur-bg", "inst-search-we-blur-bg"];
+// The frame is drawn from the video itself (no capture to pass around), so it can be sharper
+// than Wallpaper Engine's 256x144: a quarter of a 2560px screen.
+const VIDEO_GLASS_W = 640;
+const VIDEO_GLASS_H = 360;
+// what the bar had with the browser's blur: 28px, under each piece's own dark tint
+const VIDEO_GLASS_BLUR = 28;
+let videoGlassOn = false;
+let videoGlassCanvas = null;
+let videoGlassCtx = null;
+let videoGlassUntick = null;
+
+// The wallpaper as it is on screen right now, in 256x144: the visible video(s) where and how
+// big they are drawn (zoom, position, cover/contain, a cross-fade's opacity) and the dimming.
+function drawVideoWallpaperFrame(ctx, winW, winH) {
+  const fw = ctx.canvas.width;
+  const fh = ctx.canvas.height;
+  const kx = fw / winW;
+  const ky = fh / winH;
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = "#07040d";
+  ctx.fillRect(0, 0, fw, fh);
+  const shown = [...document.querySelectorAll(".home-bg-video")]
+    .filter((v) => v.readyState >= 2 && v.videoWidth)
+    .map((v) => ({ v, cs: getComputedStyle(v) }))
+    .filter(({ cs }) => cs.display !== "none" && parseFloat(cs.opacity) > 0)
+    .sort((a, b) => (parseInt(a.cs.zIndex, 10) || 0) - (parseInt(b.cs.zIndex, 10) || 0));
+  for (const { v, cs } of shown) {
+    const r = v.getBoundingClientRect();
+    const fit = cs.objectFit === "contain" ? Math.min : Math.max;
+    const scale = fit(r.width / v.videoWidth, r.height / v.videoHeight);
+    const dw = v.videoWidth * scale;
+    const dh = v.videoHeight * scale;
+    ctx.globalAlpha = parseFloat(cs.opacity);
+    ctx.drawImage(v, (r.left + (r.width - dw) / 2) * kx, (r.top + (r.height - dh) / 2) * ky, dw * kx, dh * ky);
+  }
+  const dim = document.getElementById("home-bg-dim-overlay");
+  const dimAlpha = dim ? parseFloat(getComputedStyle(dim).opacity) || 0 : 0;
+  if (dimAlpha > 0) {
+    ctx.globalAlpha = dimAlpha;
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, fw, fh);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// On the launcher's shared animation clock (frame-clock.js, 30 fps, the pace of the videos): it
+// used to wake the page on every display refresh to check the time, and kept drawing while the bar
+// was hidden in another section (a parked section keeps its layout, so offsetParent says visible).
+function videoGlassTick() {
+  if (!videoGlassOn || document.hidden) return;
+  const bar = document.getElementById("instance-filter-search-bar");
+  if (!bar || !bar.checkVisibility()) return;
+  const winW = window.innerWidth || 1;
+  const winH = window.innerHeight || 1;
+  drawVideoWallpaperFrame(videoGlassCtx, winW, winH);
+  for (const id of VIDEO_GLASS_TARGETS) {
+    const look = videoGlassLooks.get(id) || { blur: VIDEO_GLASS_BLUR, colour: "saturate(1.8)" };
+    renderLiveSliceToGlass(id, videoGlassCanvas, winW, winH, { ...look, exact: true, ...(/^inst-/.test(id) ? { blur: 28 } : {}) });
+  }
+}
+
+// The blur each piece had with the browser's own (from its theme: the bar 28px or 36px with
+// "Difuminado", the search box 16px), read before it is switched off, so the glass looks the same.
+const videoGlassLooks = new Map();
+function readBrowserBlur(el) {
+  const f = getComputedStyle(el).backdropFilter || "";
+  const blur = f.match(/blur\(([\d.]+)px\)/);
+  if (!blur) return null;
+  return { blur: parseFloat(blur[1]), colour: f.replace(blur[0], "").trim() };
+}
+
+// Each piece keeps its own dark tint (from the theme: the bar's gradient, the search box's
+// near-black), now painted over the glass by its top layer: the piece itself goes transparent,
+// since a dark fill under the glass showed as a fine ring along the rounded edges.
+function applyVideoGlassTints(on) {
+  for (const id of VIDEO_GLASS_TARGETS) {
+    const layer = document.getElementById(id);
+    const piece = layer?.parentElement;
+    if (!piece) continue;
+    if (!on) {
+      piece.style.removeProperty("background");
+      layer.style.removeProperty("--video-glass-tint");
+      continue;
+    }
+    piece.style.removeProperty("background");
+    const cs = getComputedStyle(piece);
+    const tint = cs.backgroundImage && cs.backgroundImage !== "none" ? cs.backgroundImage : cs.backgroundColor;
+    videoGlassLooks.set(id, readBrowserBlur(layer) || readBrowserBlur(piece) || { blur: VIDEO_GLASS_BLUR, colour: "saturate(1.8)" });
+    layer.style.setProperty("--video-glass-tint", tint);
+    piece.style.setProperty("background", "transparent", "important");
+  }
+}
+
+function setVideoGlass(on) {
+  if (on === videoGlassOn) return;
+  videoGlassOn = on;
+  applyVideoGlassTints(on);
+  document.body.classList.toggle("has-video-glass", on);
+  if (on) {
+    if (!videoGlassCanvas) {
+      videoGlassCanvas = document.createElement("canvas");
+      videoGlassCanvas.width = VIDEO_GLASS_W;
+      videoGlassCanvas.height = VIDEO_GLASS_H;
+      videoGlassCtx = videoGlassCanvas.getContext("2d");
+    }
+    // A Wallpaper Engine scene before this one leaves them hidden (updateWePillsBlurBackdrop).
+    for (const id of VIDEO_GLASS_TARGETS) {
+      const el = document.getElementById(id);
+      if (el) el.style.opacity = "";
+    }
+    if (!videoGlassUntick) videoGlassUntick = onTick(videoGlassTick);
+    return;
+  }
+  videoGlassUntick?.();
+  videoGlassUntick = null;
+  for (const id of VIDEO_GLASS_TARGETS) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    el.classList.remove("has-live-glass");
+    const c = el.querySelector(".we-live-glass-canvas");
+    if (c) c.style.display = "none";
+  }
+}
+
+// On while a video is the wallpaper (not a Wallpaper Engine scene, which has its own glass).
+setInterval(() => {
+  const video = !document.body.classList.contains("has-we-active") && [...document.querySelectorAll(".home-bg-video.is-active")].some((v) => v.currentSrc);
+  setVideoGlass(video);
+}, 1000);
+
 let sceneSwitchCounter = 0;
 
 let lastSceneArgs = null;
+
+async function freezeWallpaperImageFrame(url) {
+  if (!url) return null;
+  // Route A: fetch + createImageBitmap (bypasses CORS canvas tainting for local assets & extracts frame 0 of animated GIFs)
+  try {
+    const resp = await fetch(url);
+    if (resp.ok) {
+      const blob = await resp.blob();
+      const bmp = await createImageBitmap(blob);
+      const c = document.createElement("canvas");
+      c.width = bmp.width;
+      c.height = bmp.height;
+      const ctx = c.getContext("2d");
+      ctx.drawImage(bmp, 0, 0);
+      bmp.close();
+      const dataUrl = c.toDataURL("image/jpeg", 0.92);
+      if (dataUrl && dataUrl.startsWith("data:image/")) return dataUrl;
+    }
+  } catch (_) {}
+
+  // Route B: standard Image element fallback
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => {
+      try {
+        const w = img.naturalWidth || img.width;
+        const h = img.naturalHeight || img.height;
+        if (w > 0 && h > 0) {
+          const c = document.createElement("canvas");
+          c.width = w;
+          c.height = h;
+          const ctx = c.getContext("2d");
+          ctx.drawImage(img, 0, 0);
+          resolve(c.toDataURL("image/jpeg", 0.92));
+          return;
+        }
+      } catch (err) {
+        console.warn("Could not freeze animated wallpaper frame:", err);
+      }
+      resolve(url);
+    };
+    img.onerror = () => resolve(url);
+    img.src = url;
+  });
+}
+
+async function captureWeSnapshotAsDataUrl() {
+  try {
+    const buf = await invoke("capture_we_snapshot");
+    const bytes = buf instanceof ArrayBuffer ? new Uint8Array(buf) : new Uint8Array(buf || []);
+    if (bytes.length > 8) {
+      const view = new DataView(bytes.buffer, bytes.byteOffset, 8);
+      const w = view.getUint32(0, true);
+      const h = view.getUint32(4, true);
+      if (w > 0 && h > 0 && bytes.length >= 8 + w * h * 4) {
+        const offCanvas = document.createElement("canvas");
+        const scaleW = 320;
+        const scaleH = Math.max(1, Math.round((h / w) * scaleW));
+        offCanvas.width = scaleW;
+        offCanvas.height = scaleH;
+        const ctx = offCanvas.getContext("2d");
+        if (ctx) {
+          const rawImg = new ImageData(w, h);
+          const dst = rawImg.data;
+          for (let s = 8, d = 0, n = w * h * 4; d < n; s += 4, d += 4) {
+            dst[d] = bytes[s + 2];     // R
+            dst[d + 1] = bytes[s + 1]; // G
+            dst[d + 2] = bytes[s];     // B
+            dst[d + 3] = 255;          // A
+          }
+          const bmp = await createImageBitmap(rawImg);
+          ctx.drawImage(bmp, 0, 0, scaleW, scaleH);
+          bmp.close();
+          return offCanvas.toDataURL("image/jpeg", 0.85);
+        }
+      }
+    }
+  } catch (err) {
+    console.warn("Could not capture WE snapshot for blur backdrop:", err);
+  }
+  return null;
+}
+
+async function updateWePillsBlurBackdrop(explicitPath = null) {
+  const isWe = document.body.classList.contains("has-we-active") || Boolean(explicitPath);
+  const blurBg = document.getElementById("inst-pill-we-blur-bg");
+  const searchBlurBg = document.getElementById("inst-search-we-blur-bg");
+  const consoleBlurBg = document.getElementById("hcp-we-blur-bg");
+  const consoleBlurEnabled = localStorage.getItem("ika_ui_console_blur") !== "false";
+
+  if (!isWe) {
+    // With a video wallpaper these two hold the video glass (setVideoGlass): hidden, the bar
+    // above the carousel lost its blur and its tint and became fully transparent.
+    if (!videoGlassOn) {
+      if (blurBg) blurBg.style.opacity = "0";
+      if (searchBlurBg) searchBlurBg.style.opacity = "0";
+    }
+    if (consoleBlurBg) {
+      consoleBlurBg.style.opacity = "0";
+      consoleBlurBg.style.display = "none";
+    }
+    document.documentElement.style.removeProperty("--we-blur-preview-url");
+    return;
+  }
+
+  const rawPath = explicitPath 
+    || localStorage.getItem("modcomparer_wallpaper_project_path") 
+    || localStorage.getItem("modcomparer_wallpaper_steam_path")
+    || localStorage.getItem("modcomparer_wallpaper_local_path")
+    || "";
+
+  if (!rawPath) {
+    if (blurBg) blurBg.style.opacity = "0";
+    if (searchBlurBg) searchBlurBg.style.opacity = "0";
+    if (consoleBlurBg) {
+      consoleBlurBg.style.opacity = "0";
+      consoleBlurBg.style.display = "none";
+    }
+    return;
+  }
+
+  let previewDiskPath = null;
+  try {
+    previewDiskPath = await invoke("get_we_preview_path", { projectPath: rawPath });
+  } catch (e) {
+    console.warn("Error invoking get_we_preview_path:", e);
+  }
+
+  // Fallback 1 to manual resolution if invoke returned null or failed
+  if (!previewDiskPath) {
+    let clean = String(rawPath).replace(/\\/g, "/").trim();
+    if (/\/[^/]+\.[a-zA-Z0-9]+$/.test(clean)) {
+      clean = clean.replace(/\/[^/]+$/, "");
+    }
+    const dir = clean.replace(/\/+$/, "");
+    if (dir) {
+      const candidates = ["preview.gif", "preview.jpg", "preview.png", "preview.jpeg", "preview.webp", "thumbnail.jpg", "thumbnail.png", "thumb.jpg", "thumb.png"].map((n) => convertFileSrc(`${dir}/${n}`));
+      for (const url of candidates) {
+        const ok = await new Promise((res) => {
+          const img = new Image();
+          img.onload = () => res(true);
+          img.onerror = () => res(false);
+          img.src = url;
+        });
+        if (ok) {
+          previewDiskPath = url;
+          break;
+        }
+      }
+    }
+  }
+
+  // Fallback 2: capture live frame if preview image is missing for this scene (.pkg)
+  if (!previewDiskPath && isWe) {
+    try {
+      previewDiskPath = await captureWeSnapshotAsDataUrl();
+    } catch (_) {}
+  }
+
+  if (previewDiskPath) {
+    const assetUrl = previewDiskPath.startsWith("http") || previewDiskPath.startsWith("asset") || previewDiskPath.startsWith("data:")
+      ? previewDiskPath
+      : convertFileSrc(previewDiskPath);
+
+    // Freeze frame 0 on canvas so multi-frame animated GIFs never flip between states
+    const finalUrl = previewDiskPath.startsWith("data:")
+      ? previewDiskPath
+      : ((await freezeWallpaperImageFrame(assetUrl)) || assetUrl);
+
+    document.documentElement.style.setProperty("--we-blur-preview-url", `url("${finalUrl}")`);
+    if (blurBg) {
+      blurBg.style.setProperty("--we-blur-preview-url", `url("${finalUrl}")`);
+      blurBg.style.opacity = "1";
+    }
+    if (searchBlurBg) {
+      searchBlurBg.style.setProperty("--we-blur-preview-url", `url("${finalUrl}")`);
+      searchBlurBg.style.opacity = "1";
+    }
+    document.querySelectorAll(".hcp-we-blur-bg").forEach((bg) => {
+      bg.style.setProperty("--we-blur-preview-url", `url("${finalUrl}")`);
+      bg.style.display = consoleBlurEnabled ? "" : "none";
+      bg.style.opacity = consoleBlurEnabled ? "1" : "0";
+    });
+  } else {
+    if (blurBg) blurBg.style.opacity = "0";
+    if (searchBlurBg) searchBlurBg.style.opacity = "0";
+    document.querySelectorAll(".hcp-we-blur-bg").forEach((bg) => {
+      bg.style.opacity = "0";
+      bg.style.display = "none";
+    });
+  }
+}
 
 async function playSceneWallpaper(pkgPath, title, projectPath = null, item = null) {
   cancelSeamlessLoop();
@@ -17747,14 +21086,22 @@ async function playSceneWallpaper(pkgPath, title, projectPath = null, item = nul
     });
 
     if (weOk) {
+      saveActiveWallpaperState({
+        type: "steam_scene",
+        title: title || (item && item.title) || "Wallpaper Engine",
+        projectPath: projectPath || (item && item.project_path) || null,
+        steamPath: pkgPath || (item && item.video_path) || null,
+        activeId: (item && item.id) || null,
+      });
       document.documentElement.classList.add("has-we-active");
       document.body.classList.add("has-we-active");
+      updateWePillsBlurBackdrop(target);
+      lastSentBlurRect = null;
+      syncConsoleBlurRect(true, true);
     } else {
       console.warn("Wallpaper Engine no devolvió confirmación de ventana.");
     }
 
-    // Keep the frozen frame up until the new scene is really drawing (its window
-    // exists well before the first frame), then fade it out. A newer switch takes over.
     (async () => {
       if (weOk) {
         const deadline = Date.now() + 5000;
@@ -17767,6 +21114,10 @@ async function playSceneWallpaper(pkgPath, title, projectPath = null, item = nul
           }
           if (ready) break;
           await new Promise((r) => setTimeout(r, 120));
+        }
+        if (switchId === sceneSwitchCounter) {
+          startWeCanvasStream();
+          updateWePillsBlurBackdrop(projectPath || pkgPath || target);
         }
       }
       if (switchId === sceneSwitchCounter) fadeOutSnapshot(80);
@@ -17802,6 +21153,7 @@ async function playSceneWallpaper(pkgPath, title, projectPath = null, item = nul
       projectPath: projectPath,
       activeId: activeWid,
     });
+    updateWePillsBlurBackdrop(projectPath || pkgPath || target);
     if (el.mbgActiveTitle) el.mbgActiveTitle.textContent = title;
     if (el.playlistCurrentTitle) el.playlistCurrentTitle.textContent = title;
     loadActiveWallpaperTransform(false);
@@ -17877,8 +21229,12 @@ async function transitionBackground(targetUrl, targetTitle, transitionType = nul
     currentVid.play().catch(() => {});
     fadeOutSnapshot(100);
     if (wasWeActive) {
+      stopWeCanvasStream();
       document.documentElement.classList.remove("has-we-active");
       document.body.classList.remove("has-we-active");
+      updateWePillsBlurBackdrop(null);
+      lastSentBlurRect = null;
+      syncConsoleBlurRect(true, true);
       invoke("stop_we_wallpaper").catch(() => {});
     }
     updateActiveCatalogCards();
@@ -17941,8 +21297,12 @@ async function transitionBackground(targetUrl, targetTitle, transitionType = nul
 
   // If previous background was Wallpaper Engine, safely stop it now that the video is already active
   if (wasWeActive) {
+    stopWeCanvasStream();
     document.documentElement.classList.remove("has-we-active");
     document.body.classList.remove("has-we-active");
+    updateWePillsBlurBackdrop(null);
+    lastSentBlurRect = null;
+    syncConsoleBlurRect(true, true);
     invoke("stop_we_wallpaper").catch(() => {});
   }
 
@@ -18523,8 +21883,18 @@ function playBackgroundVideoSafely(vid) {
     }
   };
 
+  const updatePosterFromBg = () => {
+    if (!miniHovered && vid.videoWidth > 0 && vid.videoHeight > 0) {
+      paintMiniPoster(vid);
+    }
+  };
+  vid.addEventListener("playing", updatePosterFromBg);
+  vid.addEventListener("loadeddata", updatePosterFromBg);
+  vid.addEventListener("timeupdate", updatePosterFromBg, { once: true });
+
   if (vid.readyState >= 2) {
     tryPlay();
+    updatePosterFromBg();
   } else {
     vid.addEventListener("loadeddata", tryPlay, { once: true });
     vid.addEventListener("canplay", tryPlay, { once: true });
@@ -18571,17 +21941,18 @@ async function loadAndApplySavedWallpaper() {
   }
 
   // 2. Wallpaper Engine Scene (.pkg, project directory, web scene, etc.)
-  const isScene = type === "steam_scene" ||
-    steamPath.toLowerCase().endsWith(".pkg") ||
-    steamPath.toLowerCase().endsWith(".json") ||
-    steamPath.toLowerCase().endsWith(".html") ||
+  const isScene =
+    type === "steam_scene" ||
+    (steamPath && steamPath.toLowerCase().endsWith(".pkg")) ||
+    (steamPath && steamPath.toLowerCase().endsWith(".json")) ||
+    (steamPath && steamPath.toLowerCase().endsWith(".html")) ||
     Boolean(projPath);
 
   if (isScene && (steamPath || projPath)) {
     const sceneTarget = steamPath || projPath;
     const fname = savedTitle || "Steam Scene Wallpaper";
     try {
-      await windowShown;
+      await Promise.race([windowShown, new Promise((r) => setTimeout(r, 1200))]);
       await playSceneWallpaper(sceneTarget, fname, projPath, { id: activeId, title: fname, project_path: projPath, video_path: steamPath });
       return;
     } catch (err) {
@@ -18591,7 +21962,10 @@ async function loadAndApplySavedWallpaper() {
 
   // Ensure any previous scene or WE instance is deactivated when playing video
   if (document.body.classList.contains("has-we-active")) {
+    stopWeCanvasStream();
+    document.documentElement.classList.remove("has-we-active");
     document.body.classList.remove("has-we-active");
+    updateWePillsBlurBackdrop(null);
     invoke("stop_we_wallpaper").catch(() => {});
     if (el.homeBgScene) {
       el.homeBgScene.style.display = "none";
@@ -18708,23 +22082,56 @@ async function resetToDefaultWallpaper() {
   await transitionBackground(FALLBACK_MINECRAFT_WALLPAPERS[0].video_url, FALLBACK_MINECRAFT_WALLPAPERS[0].title);
 }
 
+let wallpapersCloseTimer = 0;
+
+// Back to the launcher with the Wallpapers window open (say, after unsubscribing in Wallpaper
+// Engine or Steam): the downloaded list is read again, so what is gone disappears.
+window.addEventListener("focus", () => {
+  const m = el.modalWallpapers;
+  if (!m || m.classList.contains("hidden") || m.classList.contains("is-closing")) return;
+  if (el.panelMbgDownloaded && !el.panelMbgDownloaded.classList.contains("hidden")) {
+    fetchAndRenderDownloadedWallpapers().catch(() => {});
+  }
+});
+// Opening and closing are a CRT tube switching on and off (crt-fx.js); the window is hidden once
+// the power-off is over.
+const WALLPAPERS_CLOSE_MS = 420;
+
 function openWallpapersModal() {
-  if (el.modalWallpapers) el.modalWallpapers.classList.remove("hidden");
+  clearTimeout(wallpapersCloseTimer);
+  if (el.modalWallpapers) {
+    const wasShown = !el.modalWallpapers.classList.contains("hidden") && !el.modalWallpapers.classList.contains("is-closing");
+    el.modalWallpapers.classList.remove("hidden", "is-closing");
+    if (!wasShown) crtOpen(el.modalWallpapers.querySelector(".modal-wallpapers-box"));
+  }
   if (el.mbgActiveTitle) el.mbgActiveTitle.textContent = activeWallpaperTitle;
 
-  const savedTab = localStorage.getItem("modcomparer_last_wallpaper_tab") || "catalog";
+  const savedTab = localStorage.getItem("modcomparer_last_wallpaper_tab") || "downloaded";
   switchWallpaperTab(savedTab);
 }
 
 function closeWallpapersModal() {
-  closeWePropertiesPanel();
+  // the options panel (it widens the window) is closed once the window is gone: closing it first
+  // made the window shrink while its close animation ran, and the two fought
+  const open = el.modalWallpapers && !el.modalWallpapers.classList.contains("hidden");
+  if (!open) closeWePropertiesPanel();
   if (el.wallpapersSettingsPopover) {
     el.wallpapersSettingsPopover.classList.add("hidden");
   }
   if (el.btnWallpapersSettings) {
     el.btnWallpapersSettings.classList.remove("is-active");
   }
-  if (el.modalWallpapers) el.modalWallpapers.classList.add("hidden");
+  if (el.modalWallpapers && !el.modalWallpapers.classList.contains("hidden")) {
+    const modal = el.modalWallpapers;
+    modal.classList.add("is-closing");
+    crtClose(modal.querySelector(".modal-wallpapers-box"), WALLPAPERS_CLOSE_MS);
+    clearTimeout(wallpapersCloseTimer);
+    wallpapersCloseTimer = setTimeout(() => {
+      modal.classList.add("hidden");
+      modal.classList.remove("is-closing");
+      closeWePropertiesPanel();
+    }, WALLPAPERS_CLOSE_MS);
+  }
   if (el.mbgCatalogGrid) {
     el.mbgCatalogGrid.querySelectorAll("video").forEach((v) => {
       v.pause();
@@ -18907,12 +22314,17 @@ async function fetchAndRenderSteamWorkshop(query = "", tag = "all", forceReload 
   if (!steamWorkshopLoaded || steamLocalWallpapers.length === 0) {
     try {
       const localResults = await invoke("get_steam_workshop_wallpapers");
-      steamLocalWallpapers = Array.isArray(localResults) ? localResults : [];
+      steamLocalWallpapers = withoutHiddenWallpapers(Array.isArray(localResults) ? localResults : []);
       steamWorkshopLoaded = true;
       if (el.steamLocalCount) el.steamLocalCount.textContent = String(steamLocalWallpapers.length);
     } catch {
       steamLocalWallpapers = [];
     }
+  }
+
+  if (steamMode === "local" && steamLocalWallpapers.length === 0 && !localStorage.getItem("modcomparer_steam_mode_user_set")) {
+    setSteamMode("online");
+    return;
   }
 
   if (steamMode === "local") {
@@ -19170,8 +22582,14 @@ function renderSteamOnlineCards(wallpapers) {
   if (!el.steamCatalogGrid) return;
   el.steamCatalogGrid.innerHTML = "";
 
-  (wallpapers || []).forEach((item) => {
-    if (!item) return;
+  (wallpapers || []).forEach((listed) => {
+    if (!listed) return;
+    // Deleted in the launcher but its files are still on disk: offered as not installed, and
+    // "Suscribirse" just brings it back (restoreHidden).
+    let item = listed;
+    if (listed.is_installed && isWallpaperHidden({ id: listed.id, video_path: listed.local_video_path })) {
+      item = { ...listed, is_installed: false, restoreHidden: { video_path: listed.local_video_path, project_path: listed.project_path } };
+    }
     try {
       const card = document.createElement("div");
     const isAct = item.local_video_path && activeWallpaperUrl === item.local_video_path;
@@ -19316,6 +22734,13 @@ function renderSteamOnlineCards(wallpapers) {
       if (btnSubscribe) {
         btnSubscribe.addEventListener("click", (e) => {
           e.stopPropagation();
+          if (item.restoreHidden) {
+            setWallpaperHidden({ id: item.id, video_path: item.restoreHidden.video_path }, false);
+            onItemDownloadedSuccess(item.restoreHidden);
+            item.restoreHidden = null;
+            fetchAndRenderDownloadedWallpapers().catch(() => {});
+            return;
+          }
           invoke("open_browser", { url: `steam://url/CommunityFilePage/${item.id}` });
           progressWrap.classList.remove("hidden", "is-downloaded");
           progressLabel.textContent = "Abierto en Steam: pulsa 'Suscribirse'";
@@ -19610,7 +23035,7 @@ async function fetchAndRenderDownloadedWallpapers(force = false) {
 
   try {
     const items = await requestDownloadedWallpapers(force);
-    downloadedWallpapers = Array.isArray(items) ? items : [];
+    downloadedWallpapers = withoutHiddenWallpapers(Array.isArray(items) ? items : []);
     downloadedLoadedOnce = true;
     updateDownloadedBadgeAndCounts();
     filterAndRenderDownloadedCards();
@@ -19754,6 +23179,8 @@ function clearWallpaperStorageKeys() {
 }
 
 function saveActiveWallpaperState({ type, title, steamPath = null, projectPath = null, activeId = null, localPath = null, url = null }) {
+  // a new wallpaper: the theme made from it (if chosen) is remade
+  window.dispatchEvent(new Event("ika-wallpaper"));
   clearWallpaperStorageKeys();
   if (type) localStorage.setItem("modcomparer_wallpaper_type", type);
   if (title) localStorage.setItem("modcomparer_wallpaper_title", title);
@@ -19768,6 +23195,114 @@ function saveActiveWallpaperState({ type, title, steamPath = null, projectPath =
 
   activeWallpaperTitle = title || "";
   activeWallpaperUrl = steamPath || projectPath || localPath || url || "";
+  pushWallpaperHistory({ type, title, steamPath, projectPath, activeId, localPath, url });
+}
+
+// The last wallpapers applied, newest first: deleting the active one goes back to the one before
+// (it used to fall back to a remote default and, if that failed, leave the background empty).
+const WALLPAPER_HISTORY_KEY = "ika_wallpaper_history";
+const wallpaperKey = (w) => String(w.projectPath || w.steamPath || w.localPath || w.url || "").toLowerCase();
+
+function readWallpaperHistory() {
+  try {
+    const list = JSON.parse(localStorage.getItem(WALLPAPER_HISTORY_KEY) || "[]");
+    return Array.isArray(list) ? list : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function pushWallpaperHistory(w) {
+  const key = wallpaperKey(w);
+  if (!key) return;
+  const list = [w, ...readWallpaperHistory().filter((h) => wallpaperKey(h) !== key)].slice(0, 12);
+  try {
+    localStorage.setItem(WALLPAPER_HISTORY_KEY, JSON.stringify(list));
+  } catch (_) {}
+}
+
+// Wallpapers deleted from the launcher whose files could not be removed (a Workshop item in
+// Steam's folder, which an antivirus may protect): hidden instead, so they cannot be picked. One
+// comes back by subscribing again from the launcher (its files are still there, no Steam needed);
+// once its files are really gone (unsubscribed in Steam), the mark is dropped by itself.
+const HIDDEN_WALLPAPERS_KEY = "ika_hidden_wallpapers";
+const hiddenWallpaperKey = (w) => (w && w.id ? `id:${String(w.id).trim()}` : `path:${String(w?.video_path || "").toLowerCase()}`);
+
+function readHiddenWallpapers() {
+  try {
+    const list = JSON.parse(localStorage.getItem(HIDDEN_WALLPAPERS_KEY) || "[]");
+    return new Set(Array.isArray(list) ? list : []);
+  } catch (_) {
+    return new Set();
+  }
+}
+
+function writeHiddenWallpapers(set) {
+  try {
+    localStorage.setItem(HIDDEN_WALLPAPERS_KEY, JSON.stringify([...set]));
+  } catch (_) {}
+}
+
+function isWallpaperHidden(w) {
+  return readHiddenWallpapers().has(hiddenWallpaperKey(w));
+}
+
+function setWallpaperHidden(w, hidden) {
+  const set = readHiddenWallpapers();
+  const key = hiddenWallpaperKey(w);
+  if (hidden) set.add(key);
+  else set.delete(key);
+  writeHiddenWallpapers(set);
+}
+
+// The scanned list without hidden wallpapers; marks of wallpapers no longer on disk are dropped.
+function withoutHiddenWallpapers(items) {
+  const set = readHiddenWallpapers();
+  if (!set.size) return items;
+  const present = new Set(items.map(hiddenWallpaperKey));
+  const kept = new Set([...set].filter((k) => present.has(k)));
+  if (kept.size !== set.size) writeHiddenWallpapers(kept);
+  return items.filter((w) => !kept.has(hiddenWallpaperKey(w)));
+}
+
+// Applies the most recent earlier wallpaper that still exists (not `deleted`). False if none.
+async function restorePreviousWallpaper(deleted) {
+  const gone = new Set([deleted.video_path, deleted.project_path].filter(Boolean).map((p) => p.toLowerCase()));
+  const history = readWallpaperHistory().filter((h) => {
+    const paths = [h.steamPath, h.projectPath, h.localPath].filter(Boolean).map((p) => p.toLowerCase());
+    return !paths.some((p) => gone.has(p));
+  });
+  for (const h of history) {
+    const path = h.projectPath || h.steamPath || h.localPath;
+    try {
+      // still on disk: among the downloaded wallpapers (the deleted one is already out of it)
+      if (path && !h.url) {
+        const p = path.toLowerCase();
+        const onDisk = downloadedWallpapers.some((w) => [w.video_path, w.project_path].some((x) => x && x.toLowerCase() === p));
+        if (!onDisk) continue;
+      }
+      const isScene = h.type === "steam_scene" || /\.(pkg|json|html)$/i.test(h.steamPath || "") || (!!h.projectPath && h.type === "steam_scene");
+      if (isScene) {
+        await playSceneWallpaper(h.steamPath || h.projectPath, h.title, h.projectPath, { id: h.activeId, title: h.title, project_path: h.projectPath, video_path: h.steamPath });
+        return true;
+      }
+      if (document.body.classList.contains("has-we-active")) {
+        try {
+          await invoke("stop_we_wallpaper");
+        } catch (_) {}
+        document.documentElement.classList.remove("has-we-active");
+        document.body.classList.remove("has-we-active");
+        updateWePillsBlurBackdrop(null);
+      }
+      const src = h.url || convertFileSrc(h.localPath || h.steamPath) + "?t=" + Date.now();
+      await transitionBackground(src, h.title, "crossfade", h.type);
+      saveActiveWallpaperState(h);
+      return true;
+    } catch (err) {
+      console.warn("Could not restore the previous wallpaper:", err, h);
+    }
+  }
+  return false;
 }
 
 function sanitizeWallpaperStorage() {
@@ -19844,8 +23379,17 @@ function isWallpaperItemActive(item) {
   return false;
 }
 
+// What the grid shows; the same list is not rebuilt (120 cards are ~40 ms of layout and paint
+// every time the window opened).
+let downloadedCardsSig = "";
+
 function renderDownloadedCards(items) {
   if (!el.downloadedCatalogGrid) return;
+  const sig = (items || [])
+    .map((i) => (i ? `${i.video_path}|${i.title}|${i.preview_path}|${isWallpaperItemActive(i) ? 1 : 0}|${bgPlaylist.some((p) => p.url === i.video_path) ? 1 : 0}|${hasWeCustomProperties(i) ? 1 : 0}` : ""))
+    .join(";;");
+  if (sig === downloadedCardsSig && el.downloadedCatalogGrid.childElementCount) return;
+  downloadedCardsSig = sig;
   el.downloadedCatalogGrid.innerHTML = "";
 
   (items || []).forEach((item) => {
@@ -20079,13 +23623,24 @@ function renderDownloadedCards(items) {
         try {
           const wasActive = isWallpaperItemActive(item);
 
-          await invoke("delete_downloaded_wallpaper", { videoPath: item.video_path });
+          try {
+            await invoke("delete_downloaded_wallpaper", { videoPath: item.video_path });
+          } catch (delErr) {
+            // Windows did not let its files be deleted: it is hidden instead (see
+            // HIDDEN_WALLPAPERS_KEY), and gone from the launcher all the same.
+            if (!/denegado|denied|os error 5|os error 32/i.test(String(delErr))) throw delErr;
+            setWallpaperHidden(item, true);
+          }
 
-          // If the deleted wallpaper was currently active, reset to default
-          if (wasActive) {
+          // If the deleted wallpaper was the active one, the previous one comes back; only
+          // without any previous wallpaper left, the default one.
+          if (wasActive && !(await restorePreviousWallpaper(item))) {
             try {
               await invoke("stop_we_wallpaper");
             } catch (_) {}
+            document.documentElement.classList.remove("has-we-active");
+            document.body.classList.remove("has-we-active");
+            updateWePillsBlurBackdrop(null);
             clearWallpaperStorageKeys();
             applyMotionBgsWallpaper(FALLBACK_MINECRAFT_WALLPAPERS[0], false);
           }
@@ -20185,6 +23740,95 @@ async function handleImportWallpaper() {
     updateActiveDownloadedCards();
   } catch (err) {
     showToast(`Error al importar video: ${err}`);
+  }
+}
+
+function openImportYoutubeModal() {
+  const modal = document.getElementById("modal-import-url");
+  const input = document.getElementById("input-youtube-wallpaper-url");
+  const status = document.getElementById("import-url-status");
+  const spinner = document.getElementById("import-url-spinner");
+  const btnConfirm = document.getElementById("btn-confirm-import-url");
+  const btnConfirmText = document.getElementById("btn-confirm-import-url-text");
+
+  if (!modal) return;
+  if (input) input.value = "";
+  if (status) {
+    status.className = "hidden";
+    status.textContent = "";
+  }
+  if (spinner) spinner.classList.add("hidden");
+  if (btnConfirm) btnConfirm.disabled = false;
+  if (btnConfirmText) btnConfirmText.textContent = "Descargar";
+
+  modal.classList.remove("hidden");
+  if (input) {
+    setTimeout(() => input.focus(), 50);
+  }
+}
+
+function closeImportYoutubeModal() {
+  const modal = document.getElementById("modal-import-url");
+  if (modal) modal.classList.add("hidden");
+}
+
+async function handleImportYoutubeWallpaper() {
+  const input = document.getElementById("input-youtube-wallpaper-url");
+  const status = document.getElementById("import-url-status");
+  const spinner = document.getElementById("import-url-spinner");
+  const btnConfirm = document.getElementById("btn-confirm-import-url");
+  const btnConfirmText = document.getElementById("btn-confirm-import-url-text");
+
+  const url = input ? input.value.trim() : "";
+  if (!url) {
+    if (status) {
+      status.className = "";
+      status.style.color = "#ff4365";
+      status.textContent = "Por favor ingresa un enlace de YouTube válido.";
+    }
+    return;
+  }
+
+  try {
+    if (btnConfirm) btnConfirm.disabled = true;
+    if (spinner) spinner.classList.remove("hidden");
+    if (btnConfirmText) btnConfirmText.textContent = "Descargando...";
+    if (status) {
+      status.className = "";
+      status.style.color = "#a78bfa";
+      status.textContent = "Descargando video de YouTube...";
+    }
+
+    showToast("Descargando video de YouTube...");
+
+    const importedItem = await invoke("import_wallpaper_from_youtube", { url });
+    if (!importedItem) {
+      throw new Error("No se pudo obtener el video.");
+    }
+
+    closeImportYoutubeModal();
+    showToast(`Video importado correctamente: ${importedItem.title}`);
+
+    await fetchAndRenderDownloadedWallpapers(true);
+
+    const streamUrl = convertFileSrc(importedItem.video_path);
+    await transitionBackground(streamUrl, importedItem.title, "crossfade", "imported");
+    saveActiveWallpaperState({
+      type: "imported",
+      title: importedItem.title,
+      steamPath: importedItem.video_path,
+    });
+    updateActiveDownloadedCards();
+  } catch (err) {
+    if (btnConfirm) btnConfirm.disabled = false;
+    if (spinner) spinner.classList.add("hidden");
+    if (btnConfirmText) btnConfirmText.textContent = "Descargar";
+    if (status) {
+      status.className = "";
+      status.style.color = "#ff4365";
+      status.textContent = `Error: ${err && err.message ? err.message : err}`;
+    }
+    showToast(`Error al descargar video: ${err}`);
   }
 }
 
@@ -20288,6 +23932,7 @@ function onLauncherActivityChange() {
     // Resume a frozen scene right away (also cancels a freeze still in progress).
     if (weSceneFrozen || document.body.classList.contains("has-we-active")) {
       invoke("thaw_we_scene").catch(() => {});
+      startWeCanvasStream();
     }
     weSceneFrozen = false;
     queueBgLifecycle(async () => {
@@ -20346,6 +23991,73 @@ function syncBgVideoPlayback() {
 // user clicked. Shortly after startup each section is opened once while still parked and
 // practically invisible (.is-prewarming in style.css), so the click finds it built and painted.
 const PREWARM_START_DELAY_MS = 600;
+
+// The same warm-up when the pointer reaches a section's tab: a parked section loses its styles
+// (content-visibility: hidden) and, after a while unused, the browser frees what it had painted,
+// so every opening (not only the first) restyled and repainted it at once: ~40 ms of frames
+// right on the click. Started on hover, that work is done in the moment before the click; if the
+// pointer leaves without clicking, the section is parked again.
+const HOVER_PREWARM_RELEASE_MS = 1500;
+
+// Profile dock icons (Preferencias, Amigos, Grupos): released after a press, the icon springs
+// back from its sunk size (style.css) past its full size and settles, like a rubber button.
+function initHexIconBounce() {
+  document.addEventListener("pointerup", (e) => {
+    const btn = e.target.closest?.(".cyber-hex-btn");
+    const icon = btn?.querySelector(".cyber-hex-icon");
+    if (!icon || e.button !== 0) return;
+    icon.getAnimations().forEach((a) => a.id === "hex-bounce" && a.cancel());
+    const a = icon.animate(
+      [
+        { transform: "scale(0.78)" },
+        { transform: "scale(1.22)", offset: 0.28 },
+        { transform: "scale(0.9)", offset: 0.5 },
+        { transform: "scale(1.07)", offset: 0.7 },
+        { transform: "scale(0.98)", offset: 0.86 },
+        { transform: "scale(1)" },
+      ],
+      { duration: 560, easing: "cubic-bezier(0.25, 0.8, 0.35, 1)" }
+    );
+    a.id = "hex-bounce";
+  });
+}
+
+function initHoverPrewarm() {
+  if (!el.viewSwitcher) return;
+  const sections = {
+    manager: () => [el.viewManager, window.ikaManager],
+    comparador: () => [el.viewComparador, window.ikaComparer],
+    consola: () => [el.viewConsola, null],
+    servidores: () => [el.viewServidores, null],
+  };
+  let warm = null;
+  let releaseTimer = 0;
+  const release = () => {
+    if (!warm) return;
+    const [name, view, section] = warm;
+    warm = null;
+    view.classList.remove("is-prewarming");
+    if (section && state.currentView !== name) section.onHide();
+  };
+  el.viewSwitcher.addEventListener("pointerover", (e) => {
+    const btn = e.target.closest(".view-btn");
+    if (!btn) return;
+    clearTimeout(releaseTimer);
+    const name = btn.dataset.view;
+    if (warm && warm[0] === name) return;
+    release();
+    if (name === state.currentView || !sections[name]) return;
+    const [view, section] = sections[name]();
+    if (!view) return;
+    warm = [name, view, section];
+    view.classList.add("is-prewarming");
+    section?.prewarm().catch(() => {});
+  });
+  el.viewSwitcher.addEventListener("pointerleave", () => {
+    clearTimeout(releaseTimer);
+    releaseTimer = setTimeout(release, HOVER_PREWARM_RELEASE_MS);
+  });
+}
 const PREWARM_PAINT_MS = 500;
 
 async function prewarmSections() {
@@ -20398,6 +24110,7 @@ function switchView(viewName) {
   // the layout rules that depend on the open section read it from here (see style.css)
   document.getElementById("app").dataset.view = viewName;
   syncBgVideoPlayback();
+  syncConsoleBlurRect(true, true);
   if (el.viewInicio) el.viewInicio.classList.toggle("active", viewName === "inicio");
   if (el.viewConsola) el.viewConsola.classList.toggle("active", viewName === "consola");
   if (el.viewComparador) el.viewComparador.classList.toggle("active", viewName === "comparador");
@@ -20416,6 +24129,10 @@ function switchView(viewName) {
   if (viewName === "inicio") {
     const activeInst = homeInstancesList && homeInstancesList[homeCurrentInstanceIndex];
     if (activeInst) updateInstanceSpecsBar(activeInst);
+    requestAnimationFrame(() => updateInstPillGlider(false));
+    if (document.body.classList.contains("has-we-active")) {
+      updateWePillsBlurBackdrop();
+    }
   }
   if (viewName === "consola") window.ikaConsoleCenter?.onShow();
   else window.ikaConsoleCenter?.onHide();
@@ -20491,6 +24208,11 @@ function getFormattedTime() {
 
 function logToConsole(tag, msg, type = "info") {
   if (!el.consoleOutput) return;
+  const box = el.consoleOutput;
+  const dist = box.scrollHeight - box.scrollTop - box.clientHeight;
+  const isAtBottom = dist <= 16;
+  const prevScrollTop = box.scrollTop;
+
   const line = document.createElement("div");
   line.className = "console-line";
 
@@ -20510,10 +24232,12 @@ function logToConsole(tag, msg, type = "info") {
   line.appendChild(tagSpan);
   line.appendChild(msgSpan);
 
-  el.consoleOutput.appendChild(line);
+  box.appendChild(line);
 
-  if (el.consoleAutoscrollChk && el.consoleAutoscrollChk.checked) {
-    el.consoleOutput.scrollTop = el.consoleOutput.scrollHeight;
+  if (el.consoleAutoscrollChk && el.consoleAutoscrollChk.checked && isAtBottom) {
+    box.scrollTop = box.scrollHeight;
+  } else {
+    box.scrollTop = prevScrollTop;
   }
 }
 
@@ -21784,7 +25508,9 @@ const CURSEFORGE_CAT_MAP = {
   "Libraries": "Librerías",
 };
 
-const CF_API_KEY = "REMOVED_CF_API_KEY";
+// CurseForge API key: comes from .env.local at build time (IKA_CF_API_KEY), never from the
+// repository.
+const CF_API_KEY = import.meta.env.IKA_CF_API_KEY || "";
 const onlineInfoCache = new Map();
 
 // Helper to deduplicate dependencies cleanly (e.g. "tctcore" vs "TCT Core")
@@ -22246,6 +25972,42 @@ async function handleReset() {
   showToast("Restablecido a las instancias por defecto");
 }
 
+// Files of a modpack that couldn't be downloaded when it was installed (rare: a mod taken down,
+// a CDN failing at that moment). Says which and offers to try again; `beforePlay`: the game
+// starts afterwards whatever is chosen.
+async function offerMissingModpackFiles(instancePath, name, beforePlay) {
+  let missing = await invoke("instance_missing_files", { instancePath }).catch(() => []);
+  let announced = false;
+  while (missing.length) {
+    const list = missing.slice(0, 6).map((m) => m.name).join(", ") + (missing.length > 6 ? ` y ${missing.length - 6} más` : "");
+    if (!announced && !beforePlay) {
+      notify({ type: "info", title: `Faltan ${missing.length} archivo(s) en «${name}»`, text: list });
+      announced = true;
+    }
+    const retry = await showConfirmDialog({
+      title: "FALTAN ARCHIVOS",
+      message: `No se pudieron descargar ${missing.length} archivo(s) del modpack «${name}». Sin ellos puede que no arranque o que le falte contenido.`,
+      itemTitle: name,
+      itemDesc: list,
+      confirmText: beforePlay ? "Reintentar y jugar" : "Reintentar",
+      cancelText: beforePlay ? "Jugar igual" : "Ahora no",
+      warnText: "El launcher recuerda cuáles faltan: te lo volverá a ofrecer al jugar.",
+      tone: "info",
+    });
+    if (!retry) return;
+    const before = missing.length;
+    missing = await invoke("retry_missing_files", { instancePath }).catch(() => missing);
+    if (!missing.length) {
+      showToast(`«${name}» ya tiene todos sus archivos.`);
+      return;
+    }
+    if (beforePlay || missing.length === before) {
+      showToast(`Siguen faltando ${missing.length} archivo(s) en «${name}».`);
+      if (beforePlay) return;
+    }
+  }
+}
+
 function showConfirmDialog({
   title = "ELIMINAR FONDO",
   message = "¿Estás seguro de que deseas eliminar este fondo permanentemente de tu disco y de Wallpaper Engine?",
@@ -22370,14 +26132,18 @@ let notifications = [];
 try {
   notifications = JSON.parse(localStorage.getItem(NOTIFY_KEY) || "[]");
   notifications = Array.isArray(notifications)
-    ? notifications.filter((n) => n.shareId || n.type === "download")
+    ? notifications.filter((n) => n && n.id && !n.id.startsWith("mc-dl-") && (n.shareId || (n.type === "download" && n.title)))
     : [];
   // If app restarted while downloading, mark as completed so it does not stay spinning indefinitely
   notifications.forEach((n) => {
-    if (n.type === "download" && n.status === "downloading") {
-      n.status = "completed";
-      n.progress = 100;
-      if (!n.text || n.text.includes("...")) n.text = "Descarga completada";
+    if (n.type === "download") {
+      if (n.status === "downloading") {
+        n.status = "completed";
+        n.progress = 100;
+        if (!n.text || n.text.includes("...")) n.text = "Descarga completada";
+      }
+      // Completed/ended downloads from previous sessions are already seen, never trigger phantom unread badges
+      n.read = true;
     }
   });
   // Clean duplicate titles so only the newest state of each download is kept
@@ -22390,6 +26156,7 @@ try {
     }
     return true;
   });
+  saveNotifications();
 } catch {
   notifications = [];
 }
@@ -22472,19 +26239,42 @@ function startDownloadNotification({ id, title, text = "Iniciando descarga...", 
   };
 }
 
+let updateNotifyRaf = null;
+let saveNotifyTimeout = null;
+
 function updateDownloadNotification(id, progress, text, speed) {
   const item = notifications.find((n) => n.id === id);
   if (!item) return;
-  if (typeof progress === "number") {
+  if (typeof progress === "number" && !isNaN(progress)) {
     item.progress = Math.min(100, Math.max(0, Math.round(progress)));
+  } else if (progress === null) {
+    item.progress = null;
   }
   if (text) item.text = text;
   if (speed !== undefined) item.speed = speed;
-  saveNotifications();
-  renderNotifications();
+  if (!saveNotifyTimeout) {
+    saveNotifyTimeout = setTimeout(() => {
+      saveNotifyTimeout = null;
+      saveNotifications();
+    }, 800);
+  }
+  if (!updateNotifyRaf) {
+    updateNotifyRaf = requestAnimationFrame(() => {
+      updateNotifyRaf = null;
+      renderNotifications();
+    });
+  }
 }
 
 function finishDownloadNotification(id, text = "Descarga completada") {
+  if (updateNotifyRaf) {
+    cancelAnimationFrame(updateNotifyRaf);
+    updateNotifyRaf = null;
+  }
+  if (saveNotifyTimeout) {
+    clearTimeout(saveNotifyTimeout);
+    saveNotifyTimeout = null;
+  }
   const item = notifications.find((n) => n.id === id);
   if (!item) return;
   item.status = "completed";
@@ -22498,6 +26288,14 @@ function finishDownloadNotification(id, text = "Descarga completada") {
 }
 
 function failDownloadNotification(id, errorText = "Error en la descarga") {
+  if (updateNotifyRaf) {
+    cancelAnimationFrame(updateNotifyRaf);
+    updateNotifyRaf = null;
+  }
+  if (saveNotifyTimeout) {
+    clearTimeout(saveNotifyTimeout);
+    saveNotifyTimeout = null;
+  }
   const item = notifications.find((n) => n.id === id);
   if (!item) return;
   item.status = "error";
@@ -22537,8 +26335,14 @@ function renderNotifications() {
   const unread = notifications.filter((n) => !n.read).length;
   const badge = document.getElementById("titlebar-notify-badge");
   if (badge) {
-    badge.hidden = unread === 0;
-    badge.textContent = unread > 9 ? "9+" : String(unread);
+    if (unread === 0) {
+      badge.hidden = true;
+      badge.classList.add("hidden");
+    } else {
+      badge.hidden = false;
+      badge.classList.remove("hidden");
+      badge.textContent = unread > 9 ? "9+" : String(unread);
+    }
   }
   const list = document.getElementById("notify-list");
   if (!list) return;
@@ -22605,11 +26409,11 @@ function setNotifyPanelOpen(open) {
   btn.setAttribute("aria-expanded", open ? "true" : "false");
   if (open) {
     window.ikaShare?.checkNow?.();
-    renderNotifications();
-  } else if (notifications.some((n) => !n.read)) {
-    // what was on screen counts as seen once the panel closes
-    notifications.forEach((n) => (n.read = true));
-    saveNotifications();
+    // Mark as read immediately when user opens the panel so badge vanishes
+    if (notifications.some((n) => !n.read)) {
+      notifications.forEach((n) => (n.read = true));
+      saveNotifications();
+    }
     renderNotifications();
   }
 }
@@ -23558,6 +27362,16 @@ async function handlePlayGame(instOverride) {
     return;
   }
 
+  // Clear any existing mc-dl- notifications so launching never displays an unread badge
+  if (notifications.some((n) => n.id.startsWith("mc-dl-"))) {
+    notifications = notifications.filter((n) => !n.id.startsWith("mc-dl-"));
+    saveNotifications();
+    renderNotifications();
+  }
+
+  // a modpack installed with files that didn't download: said before playing it
+  if (realPath) await offerMissingModpackFiles(realPath, instanceName, true);
+
   showToast(`Iniciando ${instanceName}...`);
   updateHomeConsolePreview();
   showLaunchProgress(instanceName, "Preparando...", 0, 0);
@@ -23582,10 +27396,15 @@ async function handlePlayGame(instOverride) {
     }
   } catch (err) {
     gameSessionStartTimes.delete(instKey);
-    showToast(`Error al iniciar juego: ${String(err).split("\n")[0]}`);
-    showLaunchProgress(instanceName, String(err), 0, 0, true);
-    String(err).split("\n").filter(Boolean).forEach((l) => logToConsole("ERROR", l, "error"));
-    setGameState(realPath || targetPath, String(err).includes("código") ? "crashed" : "failed");
+    const errStr = String(err);
+    if (errStr.includes("detenida") || errStr.includes("Cancelado")) {
+      setGameState(realPath || targetPath, "closed");
+    } else {
+      showToast(`Error al iniciar juego: ${errStr.split("\n")[0]}`);
+      showLaunchProgress(instanceName, errStr, 0, 0, true);
+      errStr.split("\n").filter(Boolean).forEach((l) => logToConsole("ERROR", l, "error"));
+      setGameState(realPath || targetPath, errStr.includes("código") ? "crashed" : "failed");
+    }
   }
 }
 
@@ -23601,7 +27420,11 @@ let mcLaunchDlTracker = new Map();
 listen("mc-launch-progress", (event) => {
   const p = event.payload || {};
   // Skip modpack stage events here because modpack-install-progress already handles modpacks!
-  if (p.stage === "modpack" || p.stage === "download_modpack" || (p.message && /modpack/i.test(p.message))) {
+  if (
+    (p.stage && p.stage.startsWith("modpack")) ||
+    p.stage === "download_modpack" ||
+    (p.message && /modpack/i.test(p.message))
+  ) {
     return;
   }
 
@@ -23617,8 +27440,12 @@ listen("mc-launch-progress", (event) => {
   }
   if (p.stage === "done") {
     setGameState(p.instance, "running");
-    finishDownloadNotification(instDlId, "Recursos descargados correctamente");
-    mcLaunchDlTracker.delete(instDlId);
+    if (mcLaunchDlTracker.has(instDlId) || notifications.some((n) => n.id === instDlId)) {
+      notifications = notifications.filter((n) => n.id !== instDlId);
+      saveNotifications();
+      renderNotifications();
+      mcLaunchDlTracker.delete(instDlId);
+    }
   } else if (p.message) {
     setGameState(p.instance, "preparing");
   }
@@ -23652,7 +27479,7 @@ listen("mc-launch-progress", (event) => {
 });
 
 // --- Live game console (output of the running Minecraft, sent by mc.rs) ---
-const CONSOLE_MAX_LINES = 3000;
+const CONSOLE_MAX_LINES = 5000;
 
 function normInstancePath(p) {
   return String(p || "").replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
@@ -23673,6 +27500,11 @@ const GAME_LEVEL_TAG = { ERROR: "error", FATAL: "error", WARN: "warn", DEBUG: "i
 
 function appendGameLinesToConsole(lines) {
   if (!el.consoleOutput || !lines.length) return;
+  const box = el.consoleOutput;
+  const dist = box.scrollHeight - box.scrollTop - box.clientHeight;
+  const isAtBottom = dist <= 16;
+  const prevScrollTop = box.scrollTop;
+
   const frag = document.createDocumentFragment();
   for (const l of lines) {
     const level = String(l.level || "INFO").toUpperCase();
@@ -23711,14 +27543,55 @@ function appendGameLinesToConsole(lines) {
     }
     frag.appendChild(line);
   }
-  el.consoleOutput.appendChild(frag);
+  box.appendChild(frag);
+
   // Keep the console from growing without limit during long sessions.
-  const extra = el.consoleOutput.childElementCount - CONSOLE_MAX_LINES;
-  for (let i = 0; i < extra; i++) el.consoleOutput.firstElementChild?.remove();
-  if (el.consoleAutoscrollChk && el.consoleAutoscrollChk.checked) {
-    el.consoleOutput.scrollTop = el.consoleOutput.scrollHeight;
+  if (isAtBottom) {
+    const extra = box.childElementCount - CONSOLE_MAX_LINES;
+    for (let i = 0; i < extra; i++) box.firstElementChild?.remove();
+  }
+
+  // Only auto-scroll to bottom if auto-scroll is enabled AND user was at the bottom!
+  if (el.consoleAutoscrollChk && el.consoleAutoscrollChk.checked && isAtBottom) {
+    box.scrollTop = box.scrollHeight;
   }
 }
+
+// =========================================================
+// GLASS CONSOLE DOCK DEDICATED WINDOW CHANNEL
+// =========================================================
+const consoleWindowChannel = new BroadcastChannel("ika_console_channel");
+
+consoleWindowChannel.onmessage = (ev) => {
+  const msg = ev.data;
+  if (!msg) return;
+  if (msg.type === "ready") {
+    // Send current state and recent logs to the newly opened glass console window
+    const inst = resolveDockActiveInstance() || currentHomeInstance();
+    const key = inst?.path ? normInstancePath(inst.path) : "";
+    const st = key ? gameStates.get(key) : null;
+    const live = key ? (gameLogBuffers.get(key) || []) : [];
+    let ver = (inst?.mc_version || inst?.mc || inst?.version || "").trim();
+    if (!ver && inst?.name) {
+      const nameMatch = (inst.name.match(/\b1\.\d+(\.\d+)?\b/) || [])[0];
+      if (nameMatch) ver = nameMatch.trim();
+    }
+    consoleWindowChannel.postMessage({
+      type: "init",
+      state: st?.state || "idle",
+      detail: st?.detail || "Listo para jugar",
+      runtime: ver ? `Runtime: ${ver}` : "Runtime: Minecraft",
+      logs: live.slice(-150),
+    });
+  }
+};
+
+listen("navigate-view", (event) => {
+  const targetView = event.payload;
+  if (targetView && typeof switchView === "function") {
+    switchView(targetView);
+  }
+});
 
 listen("mc-game-log", (event) => {
   const p = event.payload || {};
@@ -23732,6 +27605,14 @@ listen("mc-game-log", (event) => {
   pushGameLog(p.instance, lines);
   appendGameLinesToConsole(lines);
   detectGameMilestones(p.instance, lines);
+
+  // Forward each line in real time to the dedicated glass window
+  for (const l of lines) {
+    consoleWindowChannel.postMessage({
+      type: "log",
+      line: l,
+    });
+  }
 });
 
 listen("mc-game-exit", (event) => {
@@ -23739,8 +27620,19 @@ listen("mc-game-exit", (event) => {
   const name = getInstanceNameFromPath(p.instance || "") || "Minecraft";
   const now = Date.now();
   const key = normInstancePath(p.instance || "");
+  const rawKey = (p.instance || "").toLowerCase();
   const startTime = gameSessionStartTimes.get(key);
   gameSessionStartTimes.delete(key);
+
+  const isUserStop = userInitiatedStops.has(key) || userInitiatedStops.has(rawKey) || p.stopped;
+  if (isUserStop) {
+    userInitiatedStops.delete(key);
+    userInitiatedStops.delete(rawKey);
+    p.crashed = false;
+    p.stopped = true;
+    p.summary = "";
+    p.crashReport = null;
+  }
 
   const lines = [];
   if (p.crashed) {
@@ -23822,9 +27714,9 @@ function setupSmoothScrolling() {
   window.addEventListener(
     "wheel",
     (e) => {
-      // Don't intercept browser shortcuts or scrolling inside the context menu
+      // Don't intercept browser shortcuts or scrolling inside the context menu, or terminal logs
       if (e.ctrlKey || e.shiftKey) return;
-      if (e.target && e.target.closest && e.target.closest("#mod-context-menu")) return;
+      if (e.target && e.target.closest && e.target.closest("#mod-context-menu, #home-console-preview-logs, .hcp-log-terminal, .console-body, .cx-code")) return;
 
       let container = findScrollableParent(e.target);
       if (!container && e.target && e.target.closest) {
@@ -24587,7 +28479,7 @@ const cx = (() => {
     } catch {}
     const d = detailsCache.get(instPath);
     if (s && s.running) {
-      const maxMb = (d && d.max_mem_mb) || 4096;
+      const maxMb = (d && d.max_mem_mb) || 8192;
       $("cx-ram-text").textContent = `${(s.memory_mb / 1024).toFixed(1)} / ${(maxMb / 1024).toFixed(maxMb % 1024 ? 1 : 0)} GB`;
       $("cx-ram-bar").style.width = `${Math.min(100, (s.memory_mb / maxMb) * 100)}%`;
       $("cx-cpu-text").textContent = `${s.cpu_percent.toFixed(1)}% del PC`;
@@ -24888,6 +28780,96 @@ const cx = (() => {
     setTimeout(() => $("cx-crash-list")?.querySelector(".cx-file")?.click(), 150);
   });
 
+  // ---- Draggable Vertical Splitter for Right Column (Crash vs Log) ----
+  function initSidePanelsResizer() {
+    const side = $("cx-side") || stage.querySelector(".cx-side");
+    const resizer = $("cx-side-resizer");
+    if (!side || !resizer) return;
+
+    const SPLIT_KEY = "ika_cx_side_split_ratio";
+    const RESIZER_HEIGHT = 14;
+    const MIN_PANEL_HEIGHT = 72;
+
+    const savedRatio = parseFloat(localStorage.getItem(SPLIT_KEY));
+    if (!isNaN(savedRatio) && savedRatio >= 0.1 && savedRatio <= 0.9) {
+      side.style.setProperty("--cx-split-top", `${(savedRatio * 100).toFixed(2)}%`);
+    } else {
+      side.style.setProperty("--cx-split-top", "50%");
+    }
+
+    let isDragging = false;
+    let containerHeight = 0;
+    let containerTop = 0;
+
+    const onPointerDown = (e) => {
+      if (e.button !== 0) return;
+      isDragging = true;
+      resizer.classList.add("is-active");
+      side.classList.add("is-resizing");
+      document.body.style.cursor = "ns-resize";
+
+      try {
+        resizer.setPointerCapture(e.pointerId);
+      } catch (_) {}
+
+      const sideRect = side.getBoundingClientRect();
+      containerHeight = sideRect.height;
+      containerTop = sideRect.top;
+
+      window.addEventListener("pointermove", onPointerMove);
+      window.addEventListener("pointerup", onPointerUp);
+      window.addEventListener("pointercancel", onPointerUp);
+      e.preventDefault();
+    };
+
+    const onPointerMove = (e) => {
+      if (!isDragging || containerHeight <= 0) return;
+      const currentY = e.clientY;
+      const targetHeight = currentY - containerTop;
+      const clampedHeight = Math.max(MIN_PANEL_HEIGHT, Math.min(containerHeight - MIN_PANEL_HEIGHT - RESIZER_HEIGHT, targetHeight));
+      const ratio = clampedHeight / containerHeight;
+      side.style.setProperty("--cx-split-top", `${(ratio * 100).toFixed(2)}%`);
+    };
+
+    const onPointerUp = (e) => {
+      if (!isDragging) return;
+      isDragging = false;
+      resizer.classList.remove("is-active");
+      side.classList.remove("is-resizing");
+      document.body.style.cursor = "";
+
+      try {
+        resizer.releasePointerCapture(e.pointerId);
+      } catch (_) {}
+
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+
+      const sideRect = side.getBoundingClientRect();
+      if (sideRect.height > 0) {
+        const topCard = $("cx-side-crash");
+        const topHeight = topCard ? topCard.getBoundingClientRect().height : (sideRect.height / 2);
+        const finalRatio = Math.max(0.1, Math.min(0.9, topHeight / sideRect.height));
+        try {
+          localStorage.setItem(SPLIT_KEY, String(finalRatio.toFixed(4)));
+        } catch (_) {}
+      }
+    };
+
+    resizer.addEventListener("pointerdown", onPointerDown);
+
+    // Double-click resets back to 50/50 balance
+    resizer.addEventListener("dblclick", () => {
+      side.style.setProperty("--cx-split-top", "50%");
+      try {
+        localStorage.setItem(SPLIT_KEY, "0.5");
+      } catch (_) {}
+      showToast("Ventanas de consola centradas");
+    });
+  }
+  initSidePanelsResizer();
+
   return {
     onShow() {
       stage.classList.remove("cx-enter");
@@ -24970,6 +28952,7 @@ const cmp = (() => {
 
   // ---- Pair persistence ----
   function savePair() {
+    if (sides.a?.remote || sides.b?.remote) return;
     try {
       localStorage.setItem(PAIR_KEY, JSON.stringify({ a: sides.a?.path || "", b: sides.b?.path || "" }));
     } catch {}
@@ -24979,8 +28962,9 @@ const cmp = (() => {
     try {
       saved = JSON.parse(localStorage.getItem(PAIR_KEY) || "{}") || {};
     } catch {}
-    sides.a = findInst(sides.a?.path || saved.a);
-    sides.b = findInst(sides.b?.path || saved.b);
+    // a friend's instance (openRemote) stays until another one is chosen
+    sides.a = sides.a?.remote ? sides.a : findInst(sides.a?.path || saved.a);
+    sides.b = sides.b?.remote ? sides.b : findInst(sides.b?.path || saved.b);
     if (!sides.a && !sides.b) sides.a = (homeInstancesList && homeInstancesList[homeCurrentInstanceIndex]) || null;
   }
 
@@ -25020,7 +29004,7 @@ const cmp = (() => {
     if (thumb.getAttribute("href") !== cover) thumb.setAttribute("href", cover);
     thumb.style.opacity = inst ? "1" : "0.35";
     $(`kx-chips${k}`).innerHTML = inst
-      ? `<span class="kx-chip kx-chip-main">${(inst.mod_count ?? 0) > 0 ? "MODPACK" : "VANILLA"}</span><span class="kx-chip">${escapeHtml(inst.loader || "Vanilla")}</span><span class="kx-chip kx-chip-ver">${escapeHtml(inst.mc_version || "?")}</span>`
+      ? `<span class="kx-chip kx-chip-main">${inst.remote ? `DE ${escapeHtml(inst.remote.friend.toUpperCase())}` : (inst.mod_count ?? 0) > 0 ? "MODPACK" : "VANILLA"}</span><span class="kx-chip">${escapeHtml(inst.loader || "Vanilla")}</span><span class="kx-chip kx-chip-ver">${escapeHtml(inst.mc_version || "?")}</span>`
       : `<span class="kx-chip kx-chip-main">Toca para elegir</span>`;
     const n = modCountOf(side);
     $(`kx-count${k}`).textContent = loading ? "…" : n ?? "–";
@@ -25048,6 +29032,7 @@ const cmp = (() => {
   // ---- Scan + compare ----
   function scan(inst, force) {
     const key = inst.mods_path;
+    if (inst.remote) return Promise.resolve(scans.get(key)?.mods || []);
     if (!force && scans.has(key)) return Promise.resolve(scans.get(key).mods);
     if (pendingScan.has(key)) return pendingScan.get(key);
     const p = invoke("scan_directory", { path: key })
@@ -25175,7 +29160,62 @@ const cmp = (() => {
       <span class="cmp-panel-icon">${PANEL_ICON}</span>
       <span class="cmp-panel-title">${escapeHtml(title)}</span>
       <span class="cmp-pill">${count}</span>
+      ${downloadButton(kind)}
     </div>`;
+  }
+
+  // ---- A friend's instance (Amigos > Comparar) ----
+  // What the friend has and the local instance doesn't: the panel of the friend's side.
+  const friendSide = () => (sides.a?.remote && sides.b && !sides.b.remote ? "a" : sides.b?.remote && sides.a && !sides.a.remote ? "b" : null);
+  function missingFromFriend() {
+    const d = current();
+    const side = friendSide();
+    if (!d || !side) return [];
+    return (side === "a" ? d.only1 : d.only2).filter((m) => !m.is_disabled);
+  }
+  function downloadButton(kind) {
+    const side = friendSide();
+    if (!side || kind !== (side === "a" ? "only1" : "only2") || !missingFromFriend().length) return "";
+    return `<button type="button" class="cmp-tool-btn cmp-dl-btn" id="cmp-download" title="Descargar en tu instancia los mods que tiene ${escapeHtml(sides[side].remote.friend)} y tú no">${downloading ? escapeHtml(downloading) : "Descargar los que te faltan"}</button>`;
+  }
+  let downloading = "";
+  async function downloadMissing() {
+    if (downloading) return;
+    const side = friendSide();
+    const target = side === "a" ? sides.b : sides.a;
+    const list = missingFromFriend();
+    const files = list.filter((m) => (m.links || []).length).map((m) => ({ filename: m.filename, sha1: m.sha1, links: m.links }));
+    const unpublished = list.length - files.length;
+    if (!files.length) {
+      showToast("Ninguno está publicado en Modrinth ni en CurseForge: pídeselos a tu amigo con «Enviar instancia».");
+      return;
+    }
+    const id = `dl${Date.now().toString(36)}`;
+    const setLabel = (text) => {
+      downloading = text;
+      const btn = $("cmp-download");
+      if (btn) btn.textContent = text;
+    };
+    setLabel(`Descargando 0/${files.length}…`);
+    const stop = await listen("compare-download", (e) => {
+      if (e.payload?.id === id) setLabel(`Descargando ${Math.min(e.payload.done + 1, e.payload.total)}/${e.payload.total}…`);
+    });
+    try {
+      const failed = await invoke("compare_download", { id, modsDir: target.mods_path, files });
+      const done = files.length - failed.length;
+      const missing = failed.length + unpublished;
+      showToast(
+        missing
+          ? `${done} mods descargados. ${missing} no se pudieron descargar (no están publicados o el archivo cambió): pídeselos con «Enviar instancia».`
+          : `Listo: ${done} mods descargados en «${nameOf(target)}».`
+      );
+    } catch (err) {
+      showToast(String(err));
+    } finally {
+      stop();
+      downloading = "";
+      run({ force: true });
+    }
   }
 
   function centerSummaryHtml(d) {
@@ -25656,6 +29696,7 @@ const cmp = (() => {
   };
   stage.querySelectorAll(".cmp-nav-item").forEach((b) => b.addEventListener("click", () => goto(b.dataset.filter)));
   stage.addEventListener("click", (e) => {
+    if (e.target.closest("#cmp-download")) return downloadMissing();
     const go = e.target.closest("[data-goto]");
     if (go) return goto(go.dataset.goto);
     const s = e.target.closest("[data-search]");
@@ -25687,13 +29728,39 @@ const cmp = (() => {
         setTimeout(() => state.currentView === "comparador" && this.onShow(), 700);
         return;
       }
-      const stale = [sides.a, sides.b].some((s) => s && (!scans.has(s.mods_path) || Date.now() - scans.get(s.mods_path).at > 20000));
+      const stale = [sides.a, sides.b].some((s) => s && !s.remote && (!scans.has(s.mods_path) || Date.now() - scans.get(s.mods_path).at > 20000));
       if (result && result.pair === pairKey() && !stale) renderAll();
       else return run({ force: stale, quiet: true });
     },
     onHide() {
       closePicker();
       keo.setRunning(false);
+    },
+    // A friend's instance (Amigos > Comparar) as instance 1, against `mine` (one of this PC's)
+    // as instance 2; its mods come from the friend, nothing is read from disk for it.
+    openRemote({ friend, inst, mods }, mine) {
+      const key = `amigo:${friend}:${Date.now().toString(36)}`;
+      const remote = {
+        path: key,
+        mods_path: key,
+        name: inst?.name || "Instancia",
+        mc_version: inst?.mc || "",
+        loader: inst?.loader || "",
+        mod_count: (mods || []).length,
+        remote: { friend },
+      };
+      scans.set(key, { mods: (mods || []).map((m) => ({ description: "", ...m, filepath: `${key}/${m.filename}` })), at: Date.now() });
+      restorePair();
+      sides.a = remote;
+      const local = mine ? findInst(mine.path) : null;
+      if (local) sides.b = local;
+      else if (sides.b?.remote) sides.b = null;
+      result = null;
+      if (state.currentView === "comparador") {
+        dropPan("a");
+        run();
+      } else switchView("comparador");
+      if (!sides.b) openPicker("b");
     },
     // Opens the section with that instance on the first side (dock menu of Inicio); if there is
     // nothing to compare it with yet, the picker of the other side opens.
@@ -25900,7 +29967,10 @@ const mgr = (() => {
   // ---- Data loading ----
   async function ensureMeta() {
     const missing = all().filter((i) => !metaCache.has(i.path));
-    await Promise.all(missing.map((i) => invoke("instance_meta", { instancePath: i.path }).then((m) => metaCache.set(i.path, m)).catch(() => metaCache.set(i.path, { managed: false, notes: "" }))));
+    if (!missing.length) return;
+    // One call for all of them (one per instance queued ~70 calls behind each other).
+    const metas = await invoke("instance_metas", { instancePaths: missing.map((i) => i.path) }).catch(() => []);
+    missing.forEach((i, k) => metaCache.set(i.path, metas[k] || { managed: false, notes: "" }));
   }
   const modsSig = (p) => (modsCache.get(p)?.mods || []).map((m) => m.filepath + (m.is_disabled ? "0" : "1") + m.sha1).join("|");
   const packsSig = (p) => JSON.stringify(packsCache.get(p) || null);
@@ -26497,8 +30567,8 @@ const mgr = (() => {
             <span class="mgr-inst-name">${escapeHtml(instName(inst))}</span>
             <span class="mgr-inst-meta">
               <span>${escapeHtml(inst.mc_version || "?")}</span>
-              <span>${getLoaderIconSvg(loader)}${escapeHtml(loader)}</span>
-              <span title="${modCount} mods activos">${getModsIconSvg()}${modCount}</span>
+              <span>${escapeHtml(loader)}</span>
+              <span title="${modCount} mods activos">${modCount} ${modCount === 1 ? "mod" : "mods"}</span>
               <span title="${escapeHtml(`${java.version} (${java.vendorTitle})`)}">${javaVendorIconHtml(java.key, 12)}${escapeHtml(java.version)}</span>
             </span>
           </div>
@@ -26691,6 +30761,19 @@ const mgr = (() => {
       base: i ? `${i.mc_version || "?"} • ${i.loader || "Vanilla"}${d?.loader_version ? " " + d.loader_version : ""}` : "",
     };
   }
+  // The plate labels' icons, drawn in parts so each part can move on hover (style.css, "Gestor
+  // layer hover"): the same drawings as ICON.layers / sun / puzzle / file / cube.
+  const LAYER_ICONS = {
+    packs: `<g class="li-top"><path d="M12 3l9 4.5l-9 4.5l-9-4.5z"/></g><g class="li-mid"><path d="M3 12l9 4.5l9-4.5"/></g><g class="li-bot"><path d="M3 16.5l9 4.5l9-4.5"/></g>`,
+    shaders: `<g class="li-rays"><path d="M12 4V2M12 22v-2M4 12H2M22 12h-2M5.6 5.6 4.2 4.2M19.8 19.8l-1.4-1.4M5.6 18.4l-1.4 1.4M19.8 4.2l-1.4 1.4"/></g><g class="li-core"><path d="M12 7a5 5 0 1 0 0 10a5 5 0 1 0 0-10z"/></g>`,
+    mods: `<g class="li-piece"><path d="M10 4a2 2 0 1 1 4 0v1h3a1 1 0 0 1 1 1v3h1a2 2 0 1 1 0 4h-1v3a1 1 0 0 1-1 1h-3v-1a2 2 0 1 0-4 0v1H7a1 1 0 0 1-1-1v-3H5a2 2 0 1 1 0-4h1V6a1 1 0 0 1 1-1h3z"/></g><g class="li-sparks"><path d="M21.5 2.5l-1.6 1.6M22.5 7h-2M17 1.5v2"/></g>`,
+    config: `<g class="li-page"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path class="li-line l1" pathLength="1" d="M9 13h6"/><path class="li-line l2" pathLength="1" d="M9 17h4"/></g>`,
+    base: `<g class="li-cube"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path class="li-edges" pathLength="1" d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/></g>`,
+  };
+  const layerIcon = (k, fallback) =>
+    LAYER_ICONS[k]
+      ? `<svg class="mgr-ico mgr-layer-ico-anim li-${k}" viewBox="0 0 24 24" width="44" height="44" aria-hidden="true">${LAYER_ICONS[k]}</svg>`
+      : svg(fallback, 44);
   function renderPlates(i) {
     const labels = $("mgr-plate-labels");
     if (!labels) return;
@@ -26730,8 +30813,13 @@ const mgr = (() => {
           <path class="mgr-c-body" d="M 32, 1 L 240, 1 Q 258 1, 252 17 L 242 47 Q 236 63, 218 63 L 32, 63 A 31 31 0 0 1 32, 1 Z" />
           <!-- Full perimeter border with asymmetric neon glow: medium on left, gap in middle, bright neon slant on right -->
           <path class="mgr-c-border" d="M 32, 1 L 240, 1 Q 258 1, 252 17 L 242 47 Q 236 63, 218 63 L 32, 63 A 31 31 0 0 1 32, 1 Z" stroke="url(#cBorderGrad_${k})" filter="url(#cNeonGlow_${k})" />
+          <!-- Hover: light sweeping across the card and two sparks running around its edge (style.css, "Gestor layer hover") -->
+          <clipPath id="cBodyClip_${k}"><path d="M 32, 1 L 240, 1 Q 258 1, 252 17 L 242 47 Q 236 63, 218 63 L 32, 63 A 31 31 0 0 1 32, 1 Z" /></clipPath>
+          <g clip-path="url(#cBodyClip_${k})"><rect class="mgr-c-sweep" x="-70" y="-10" width="56" height="84" /></g>
+          <path class="mgr-c-run" pathLength="100" d="M 32, 1 L 240, 1 Q 258 1, 252 17 L 242 47 Q 236 63, 218 63 L 32, 63 A 31 31 0 0 1 32, 1 Z" filter="url(#cNeonGlow_${k})" />
+          <path class="mgr-c-run mgr-c-run-2" pathLength="100" d="M 32, 1 L 240, 1 Q 258 1, 252 17 L 242 47 Q 236 63, 218 63 L 32, 63 A 31 31 0 0 1 32, 1 Z" filter="url(#cNeonGlow_${k})" />
         </svg>
-        <span class="mgr-layer-icon">${svg(icon, 44)}</span>
+        <span class="mgr-layer-icon">${layerIcon(k, icon)}</span>
         <span class="mgr-layer-text">
           <span class="mgr-layer-name">${escapeHtml(name)}</span>
           <span class="mgr-layer-sub">${escapeHtml(sub || "Leyendo...")}</span>
@@ -27141,10 +31229,9 @@ const mgr = (() => {
     return missing || dup ? `<div class="mgr-issues">${missing}${dup}</div>` : "";
   }
 
-  // Above the list there is nothing unless the instance has problems: then, a filter for them
-  function modsBarHtml(i) {
-    const n = issuesOf(i).count;
-    return n ? `<button type="button" class="mgr-chip is-issues ${S.focus ? "is-on" : ""}" data-act="focus" data-v="issues" aria-pressed="${!!S.focus}">${svg("info", 13)}${plural(n, "problema", "problemas")}</button>` : "";
+  // Above the list: previously showed problem chip, removed per user request
+  function modsBarHtml(_i) {
+    return "";
   }
   // The problems filter and the count of each category, without touching the rows
   function refreshModsChrome(i) {
@@ -27406,12 +31493,11 @@ const mgr = (() => {
     const s = SECTIONS[kind];
     const all = kind === "shaders" ? p.shaders : p.resourcepacks;
     const folderBtn = `<button type="button" class="mgr-ghost-btn" data-act="openfolder" data-v="${s.folder}">${svg("folder", 16)}Carpeta</button>`;
-    if (kind === "shaders" && !p.shader_loader) {
-      body.innerHTML = emptyHtml("Esta instancia no admite shaders", `${i.loader || "Vanilla"} ${i.mc_version || ""} no tiene un cargador de shaders. Instala Iris, Oculus u OptiFine (capa Mods → Descargar) para usar shaderpacks.`, folderBtn);
-      return;
-    }
     if (!all.length) {
-      body.innerHTML = emptyHtml(kind === "shaders" ? "No hay shaderpacks" : "No hay resource packs", `Descárgalos desde la pestaña Descargar o copia archivos .zip a la carpeta ${s.folder}.`, `<div class="mgr-empty-actions"><button type="button" class="mgr-primary-btn" data-act="mode" data-v="download">${svg("download", 16)}Descargar ${s.noun}</button>${folderBtn}</div>`);
+      const msg = kind === "shaders" && !p.shader_loader
+        ? `No hay shaderpacks en la carpeta ${s.folder}. Puedes descargar shaders o copiar archivos .zip directamente a la carpeta.`
+        : `Descárgalos desde la pestaña Descargar o copia archivos .zip a la carpeta ${s.folder}.`;
+      body.innerHTML = emptyHtml(kind === "shaders" ? "No hay shaderpacks" : "No hay resource packs", msg, `<div class="mgr-empty-actions"><button type="button" class="mgr-primary-btn" data-act="mode" data-v="download">${svg("download", 16)}Descargar ${s.noun}</button>${folderBtn}</div>`);
       return;
     }
     let list;
@@ -27427,7 +31513,10 @@ const mgr = (() => {
     if (mq) list = list.filter(({ f }) => f.name.toLowerCase().includes(mq) || (f.description || "").toLowerCase().includes(mq));
     const prevArea = body.querySelector(".mgr-scroll");
     const keepScroll = prevArea && body.dataset.listKey === listKey(i) ? prevArea.scrollTop : 0;
-    body.innerHTML = `<div class="mgr-scroll mgr-noscrollbar">${
+    const noLoaderNote = (kind === "shaders" && !p.shader_loader)
+      ? `<div class="mgr-dl-warn" style="margin: 0 0 10px 0; border-radius: 8px;">${svg("info", 15)}<span>Cargador no detectado en mods (Iris/Oculus/OptiFine). Puedes ver y gestionar tus shaders normalmente.</span></div>`
+      : "";
+    body.innerHTML = `<div class="mgr-scroll mgr-noscrollbar">${noLoaderNote}${
       list.length
         ? `<div class="mgr-list-view">${list.map((o) => packCard(i, kind, o)).join("")}</div>`
         : emptyHtml(`Ningún ${packWord(kind)} coincide`, "Prueba con otra búsqueda.", `<button type="button" class="mgr-ghost-btn" data-act="clearfilters">Quitar filtros</button>`)
@@ -28696,13 +32785,18 @@ const mgr = (() => {
     let { x, y } = place;
     setPanelOffset(panel, x, y);
     const r = panel.getBoundingClientRect();
-    const area = view.getBoundingClientRect();
+    const area = view?.getBoundingClientRect() || { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight };
     if (r.width < 1 || area.width < 1) return;
-    if (r.left > area.right - 80) x -= r.left - (area.right - 80);
-    else if (r.right < area.left + 80) x += area.left + 80 - r.right;
-    if (r.top > area.bottom - 40) y -= r.top - (area.bottom - 40);
-    else if (r.top < area.top) y += area.top - r.top;
-    if (x !== place.x || y !== place.y) setPanelOffset(panel, Math.round(x), Math.round(y));
+    if (r.left > area.right - 100) x -= r.left - (area.right - 100);
+    else if (r.right < area.left + 100) x += area.left + 100 - r.right;
+    if (r.top > area.bottom - 60) y -= r.top - (area.bottom - 60);
+    else if (r.top < area.top + 8) y += (area.top + 8) - r.top;
+    if (x !== place.x || y !== place.y) {
+      place.x = Math.round(x);
+      place.y = Math.round(y);
+      setPanelOffset(panel, place.x, place.y);
+      savePanelPlace(panel, true);
+    }
   }
   for (const id of Object.keys(PANEL_PLACE_KEYS)) {
     const panel = $(id);
@@ -28737,6 +32831,7 @@ const mgr = (() => {
       let initX = 0;
       let initY = 0;
       let moved = false;
+      let initialRect = null;
 
       const onPointerDown = (e) => {
         if (e.button !== 0) return;
@@ -28754,6 +32849,7 @@ const mgr = (() => {
         startY = e.clientY;
         initX = parseFloat(panel.dataset.dragX) || 0;
         initY = parseFloat(panel.dataset.dragY) || 0;
+        initialRect = panel.getBoundingClientRect();
 
         try { grip.setPointerCapture(e.pointerId); } catch (_) {}
 
@@ -28761,13 +32857,31 @@ const mgr = (() => {
 
         const onPointerMove = (ev) => {
           if (!isDragging) return;
-          const dx = ev.clientX - startX;
-          const dy = ev.clientY - startY;
+          let dx = ev.clientX - startX;
+          let dy = ev.clientY - startY;
           if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
             moved = true;
           }
-          const curX = initX + dx;
-          const curY = initY + dy;
+
+          const curArea = view?.getBoundingClientRect() || { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight };
+          const candLeft = initialRect.left + dx;
+          const candRight = initialRect.right + dx;
+          const candTop = initialRect.top + dy;
+
+          if (candLeft > curArea.right - 100) {
+            dx = curArea.right - 100 - initialRect.left;
+          } else if (candRight < curArea.left + 100) {
+            dx = curArea.left + 100 - initialRect.right;
+          }
+
+          if (candTop < curArea.top + 8) {
+            dy = (curArea.top + 8) - initialRect.top;
+          } else if (candTop > curArea.bottom - 60) {
+            dy = (curArea.bottom - 60) - initialRect.top;
+          }
+
+          const curX = Math.round(initX + dx);
+          const curY = Math.round(initY + dy);
           panel.style.setProperty("--drag-x", `${curX}px`);
           panel.style.setProperty("--drag-y", `${curY}px`);
           panel.style.transform = `translate(${curX}px, ${curY}px)`;
@@ -28782,10 +32896,33 @@ const mgr = (() => {
           window.removeEventListener("pointerup", onPointerUp);
           window.removeEventListener("pointercancel", onPointerUp);
 
-          const dx = ev.clientX - startX;
-          const dy = ev.clientY - startY;
-          panel.dataset.dragX = `${initX + dx}`;
-          panel.dataset.dragY = `${initY + dy}`;
+          let dx = ev.clientX - startX;
+          let dy = ev.clientY - startY;
+
+          const curArea = view?.getBoundingClientRect() || { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight };
+          const candLeft = initialRect.left + dx;
+          const candRight = initialRect.right + dx;
+          const candTop = initialRect.top + dy;
+
+          if (candLeft > curArea.right - 100) {
+            dx = curArea.right - 100 - initialRect.left;
+          } else if (candRight < curArea.left + 100) {
+            dx = curArea.left + 100 - initialRect.right;
+          }
+
+          if (candTop < curArea.top + 8) {
+            dy = (curArea.top + 8) - initialRect.top;
+          } else if (candTop > curArea.bottom - 60) {
+            dy = (curArea.bottom - 60) - initialRect.top;
+          }
+
+          const finalX = Math.round(initX + dx);
+          const finalY = Math.round(initY + dy);
+          panel.dataset.dragX = `${finalX}`;
+          panel.dataset.dragY = `${finalY}`;
+          panel.style.setProperty("--drag-x", `${finalX}px`);
+          panel.style.setProperty("--drag-y", `${finalY}px`);
+          panel.style.transform = finalX || finalY ? `translate(${finalX}px, ${finalY}px)` : "";
 
           if (moved) {
             savePanelPlace(panel, true);
@@ -28800,6 +32937,14 @@ const mgr = (() => {
       };
 
       panel.addEventListener("pointerdown", onPointerDown);
+
+      // Double-click on window header resets its position to (0,0) in case user wants to center it
+      panel.addEventListener("dblclick", (e) => {
+        if (!e.target.closest(grips)) return;
+        if (e.target.closest("button, input, select, textarea, a, .mgr-chip-btn, .mgr-icon-btn, .carousel-card-item")) return;
+        setPanelOffset(panel, 0, 0);
+        savePanelPlace(panel, true);
+      });
 
       // Restore on click when minimized
       panel.addEventListener("click", (e) => {
@@ -28986,7 +33131,8 @@ const mgr = (() => {
     if (atmoIsWe()) {
       const proj = localStorage.getItem("modcomparer_wallpaper_project_path") || "";
       const steam = localStorage.getItem("modcomparer_wallpaper_steam_path") || "";
-      const dir = (proj || steam.replace(/[^\\/]+$/, "")).replace(/[\\/]+$/, "");
+      // the saved project path may be the scene's project.json itself: its folder holds the preview
+      const dir = (proj.replace(/[\\/][^\\/]*\.json$/i, "") || steam.replace(/[^\\/]+$/, "")).replace(/[\\/]+$/, "");
       return { key: `we:${dir}`, images: dir ? ["preview.jpg", "preview.gif", "preview.png"].map((n) => convertFileSrc(`${dir}/${n}`)) : [] };
     }
     const scene = $("home-bg-scene");
@@ -29259,7 +33405,23 @@ const ikaShare = (() => {
   const RELAY_CONCURRENCY = 4; // 4 parallel upload/download workers in Relay mode
   const BUFFER_HIGH = 16 * 1024 * 1024; // 16 MB buffer per channel for gigabit saturation
   const ROOM_POLL_MS = 900;
+  // With the live connection open the service tells us when a room changes; asking is only a
+  // safety net in case a notice is lost.
+  const ROOM_SAFETY_POLL_MS = 15000;
   const WEBRTC_FALLBACK_MS = 12000;
+  const roomPollMs = () => (window.ikaSocial?.isLive() ? ROOM_SAFETY_POLL_MS : ROOM_POLL_MS);
+  // Waits up to `ms`, or less if the service reports a change in room `code` meanwhile.
+  const roomWakers = new Map();
+  const sleepRoom = (code, ms) =>
+    new Promise((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        if (roomWakers.get(code) === done) roomWakers.delete(code);
+        resolve();
+      };
+      const timer = setTimeout(done, ms);
+      roomWakers.set(code, done);
+    });
 
   const $ = (id) => document.getElementById(id);
   const modal = $("modal-share");
@@ -29501,23 +33663,25 @@ const ikaShare = (() => {
       }
       rec.code = room.code;
       setState(rec, "waiting");
-      scheduleSenderPoll(rec, ROOM_POLL_MS);
+      scheduleSenderPoll(rec, roomPollMs());
     } catch (err) {
       invoke("share_discard", { id: rec.id }).catch(() => {});
       setState(rec, "failed", String(err));
     }
   }
 
-  function scheduleSenderPoll(rec, ms = ROOM_POLL_MS) {
+  function scheduleSenderPoll(rec, ms = roomPollMs()) {
     clearTimeout(rec.pollTimer);
     if (rec.aborted || !shares.has(rec.key) || ["done", "failed", "cancelled"].includes(rec.state)) return;
     rec.pollTimer = setTimeout(() => pollSenderRoom(rec), ms);
   }
 
-  async function pollSenderRoom(rec) {
+  // `pushed`: the room as the service just reported it, which saves asking for it.
+  async function pollSenderRoom(rec, pushed = null) {
     if (rec.aborted || !rec.code || ["done", "failed", "cancelled"].includes(rec.state)) return;
+    clearTimeout(rec.pollTimer);
     try {
-      const room = await invoke("share_room_get", { code: rec.code });
+      const room = pushed || (await invoke("share_room_get", { code: rec.code }));
       if (rec.aborted) return;
 
       if (room.state === "done") {
@@ -29553,7 +33717,7 @@ const ikaShare = (() => {
       }
     }
     if (rec.state === "waiting" || rec.state === "connecting") {
-      scheduleSenderPoll(rec, ROOM_POLL_MS);
+      scheduleSenderPoll(rec, roomPollMs());
     }
   }
 
@@ -29712,8 +33876,9 @@ const ikaShare = (() => {
       render();
 
       // Wait for receiver to finish unpacking/CDN/runtime and mark room as "done"
-      for (let wait = 0; wait < 180 && !rec.aborted; wait++) {
-        await new Promise((r) => setTimeout(r, 1000));
+      const finishDeadline = Date.now() + 180000;
+      while (Date.now() < finishDeadline && !rec.aborted) {
+        await sleepRoom(rec.code, window.ikaSocial?.isLive() ? ROOM_SAFETY_POLL_MS : 1000);
         if (rec.aborted) return;
         const room = await invoke("share_room_get", { code: rec.code }).catch(() => null);
         if (!room || room.state === "done") {
@@ -29764,7 +33929,8 @@ const ikaShare = (() => {
   // Receiving (Notification arrives for username -> Accept uses 6-digit code in background)
   // ---------------------------------------------------------------------------------------
   const seenInvites = new Set();
-  const INCOMING_POLL_MS = 4000;
+  // Without the live connection (service not reachable, or an older one without it).
+  const INCOMING_POLL_MS = 60000;
 
   function buildIncomingRecFromRoom(room) {
     const code = String(room.code || "");
@@ -29828,46 +33994,73 @@ const ikaShare = (() => {
     return rec;
   }
 
+  // Invitations not answered yet that are no longer waiting (cancelled, expired, taken).
+  function dropStaleInvites(keepId = null) {
+    for (const r of [...shares.values()]) {
+      if (r.role === "in" && r.state === "invited" && r.id !== keepId) {
+        dismissShareNotification(r.id);
+        shares.delete(r.key);
+      }
+    }
+  }
+
+  // The invitation waiting for this player, as the service reported it (or null: none waits).
+  // A friend's (whose name the service vouched for) installs without asking when so chosen.
+  function handleInviteRoom(room) {
+    const me = myName();
+    const recipient = String(room?.recipient || "").trim().toLowerCase();
+    if (!room || room.state !== "waiting" || recipient !== me.toLowerCase()) {
+      dropStaleInvites();
+      return;
+    }
+    dropStaleInvites(room.id);
+    const rec = buildIncomingRecFromRoom(room);
+    if (seenInvites.has(rec.id)) return;
+    seenInvites.add(rec.id);
+    if (room.verified && window.ikaSocial?.autoAccepts(room.sender)) {
+      showToast(`Recibiendo «${rec.meta.name}» de tu amigo ${rec.peer}…`);
+      beginReceive(rec);
+      return;
+    }
+    notify({
+      type: "download",
+      title: `${rec.peer} te envió «${rec.meta.name}»`,
+      text: metaLine(rec.meta),
+      shareId: rec.id,
+    });
+    showToast(`«${rec.peer}» quiere enviarte «${rec.meta.name}». Ábrela en Notificaciones para aceptarla.`);
+  }
+
+  // Asks the service; only needed while the live connection is down (it pushes invitations).
   async function checkIncomingInvites() {
     const me = myName();
     if (!me || me === "Tu amigo" || me.length < 2) return;
     try {
-      const room = await invoke("share_room_get", { code: me });
-      const recipient = String(room?.recipient || "").trim().toLowerCase();
-      if (room && room.state === "waiting" && recipient === me.toLowerCase()) {
-        const rec = buildIncomingRecFromRoom(room);
-        if (!seenInvites.has(rec.id)) {
-          seenInvites.add(rec.id);
-          notify({
-            type: "download",
-            title: `${rec.peer} te envió «${rec.meta.name}»`,
-            text: metaLine(rec.meta),
-            shareId: rec.id,
-          });
-          showToast(`«${rec.peer}» quiere enviarte «${rec.meta.name}». Ábrela en Notificaciones para aceptarla.`);
-        }
-      } else {
-        for (const r of [...shares.values()]) {
-          if (r.role === "in" && r.state === "invited") {
-            dismissShareNotification(r.id);
-            shares.delete(r.key);
-          }
-        }
-      }
+      handleInviteRoom(await invoke("share_room_get", { code: me }));
     } catch {
-      for (const r of [...shares.values()]) {
-        if (r.role === "in" && r.state === "invited") {
-          dismissShareNotification(r.id);
-          shares.delete(r.key);
-        }
+      dropStaleInvites();
+    }
+  }
+
+  // A room changed (pushed by the service): the sender waiting on it reacts now, and an
+  // invitation that was withdrawn disappears.
+  function handleRoomPush(room) {
+    const code = String(room?.code || "");
+    if (!code) return;
+    roomWakers.get(code)?.();
+    for (const r of [...shares.values()]) {
+      if (r.code !== code) continue;
+      if (r.role === "out" && ["waiting", "connecting"].includes(r.state)) pollSenderRoom(r, room);
+      if (r.role === "in" && r.state === "invited" && room.state !== "waiting") {
+        dismissShareNotification(r.id);
+        shares.delete(r.key);
       }
     }
   }
 
   setInterval(() => {
-    if (!document.hidden) checkIncomingInvites();
+    if (!document.hidden && !window.ikaSocial?.isLive()) checkIncomingInvites();
   }, INCOMING_POLL_MS);
-  setTimeout(checkIncomingInvites, 1500);
 
   async function beginReceive(rec) {
     if (!rec || rec.state !== "invited") return;
@@ -30544,15 +34737,12 @@ const ikaShare = (() => {
     if (isClosing) return;
     viewKey = key;
     currentPane = null;
+    const wasHidden = modal.classList.contains("hidden");
     modal.classList.remove("hidden");
     modal.classList.remove("is-closing", "is-closing-close", "is-closing-cancel");
 
-    // Retrigger cinematic materialize on modal box
-    if (shareBox) {
-      shareBox.style.animation = "none";
-      void shareBox.offsetWidth;
-      shareBox.style.animation = "";
-    }
+    // The window switches on like a CRT tube (crt-fx.js)
+    if (shareBox && wasHidden) crtOpen(shareBox);
 
     // Retrigger cover shine sweep
     const coverShine = modal.querySelector(".share-cover-shine");
@@ -30572,7 +34762,8 @@ const ikaShare = (() => {
     const isCancel = reason === "cancel";
     modal.classList.remove("is-closing-close", "is-closing-cancel", "is-closing");
     modal.classList.add(isCancel ? "is-closing-cancel" : "is-closing-close");
-    const dur = isCancel ? 380 : 320;
+    const dur = 420; // the CRT power-off (crt-fx.js)
+    if (shareBox) crtClose(shareBox, dur);
     setTimeout(() => {
       modal.classList.add("hidden");
       modal.classList.remove("is-closing-close", "is-closing-cancel", "is-closing");
@@ -30713,13 +34904,14 @@ const ikaShare = (() => {
   }
 
   return {
-    openSend(inst) {
+    // `target`: a friend's name to fill in.
+    openSend(inst, target = "") {
       const running = [...shares.values()].find((r) => r.role === "out" && !["done", "cancelled", "failed"].includes(r.state));
       if (running) return show(running.key);
       if (inst) formInstance = inst;
       formMode = "send";
       $("share-form-error").textContent = "";
-      if (targetUserInput) targetUserInput.value = "";
+      if (targetUserInput) targetUserInput.value = target;
       updateCharDisplay();
       show(null);
       $("input-share-target-user")?.focus();
@@ -30737,6 +34929,8 @@ const ikaShare = (() => {
     checkNow() {
       return checkIncomingInvites();
     },
+    onInvite: handleInviteRoom,
+    onRoom: handleRoomPush,
     activeInstancePath() {
       const rec = (viewKey && shares.get(viewKey)) || [...shares.values()].find((r) => !["done", "cancelled", "failed", "invited"].includes(r.state)) || null;
       if (rec) return rec.installedPath || rec.instPath || null;
@@ -30747,6 +34941,2040 @@ const ikaShare = (() => {
   };
 })();
 window.ikaShare = ikaShare;
+
+// =========================================================
+// FRIENDS AND THE LIVE CONNECTION (dock button "Amigos")
+// One WebSocket to the Ika service (its Hub, skins-service/src/index.js) stays open while the
+// launcher is: friend requests, invitations and changes in a transfer arrive through it, so the
+// launcher never polls for them. It hibernates on the service between notices, so an idle
+// launcher costs nothing there. While it can't be opened, ikaShare asks for invitations slowly.
+// =========================================================
+// =========================================================
+// PROFILE ON THE SERVICE: a player name exists on the service only once this PC created it,
+// after Cloudflare's "I'm a person" check (the service's own page, in a frame) and a little work
+// done in Rust. The check is shown inside the window that needs it (Agregar usuario, Amigos,
+// Grupos), never as a window of its own. Existing profiles never see it.
+// =========================================================
+const ikaIdentity = (() => {
+  const OK_KEY = "ika_profile_ready"; // names already checked as this PC's
+  const lower = (n) => String(n || "").trim().toLowerCase();
+  const NAME_OK = /^[A-Za-z0-9_]{2,16}$/;
+  const readyNames = () => {
+    try {
+      return new Set(JSON.parse(localStorage.getItem(OK_KEY) || "[]"));
+    } catch {
+      return new Set();
+    }
+  };
+  const remember = (name) => {
+    const set = readyNames();
+    set.add(lower(name));
+    try {
+      localStorage.setItem(OK_KEY, JSON.stringify([...set]));
+    } catch {}
+  };
+
+  // "mine" | "taken" | "free", "legacy" (a service from before profiles: names are created on
+  // first use) or "offline"
+  async function status(name) {
+    if (readyNames().has(lower(name))) return "mine";
+    try {
+      const state = await invoke("name_status", { username: name });
+      if (state === "mine") remember(name);
+      return state;
+    } catch (err) {
+      return String(err).includes("404") ? "legacy" : "offline";
+    }
+  }
+
+  // true once `name` is this PC's on the service (no window: just asks)
+  async function ensure(name) {
+    if (!NAME_OK.test(name || "")) return false;
+    const state = await status(name);
+    return state === "mine" || state === "legacy";
+  }
+
+  // Cloudflare's check rendered into `host`: {token: Promise<string|null>, cancel()}.
+  // `onNote` gets what to tell the player (errors, expiry).
+  function mountCheck(host, onNote) {
+    let cancel = () => {};
+    const token = new Promise(async (resolve) => {
+      const service = await invoke("skins_service_status").catch(() => "");
+      if (!service) return resolve(null);
+      const frame = document.createElement("iframe");
+      frame.src = `${service}/human?ts=${Date.now()}`;
+      frame.title = "Verificación de Cloudflare";
+      frame.setAttribute("sandbox", "allow-scripts allow-same-origin allow-popups");
+      host.replaceChildren(frame);
+      const origin = new URL(service).origin;
+      const onMessage = (e) => {
+        if (e.source !== frame.contentWindow || e.origin !== origin || e.data?.ika !== "human") return;
+        if (e.data.error) onNote?.("Cloudflare no pudo verificarte. Revisa tu conexión y vuelve a intentarlo.", true);
+        else if (e.data.expired) onNote?.("La verificación caducó: márcala de nuevo.");
+        else if (typeof e.data.token === "string") done(e.data.token);
+      };
+      const done = (value) => {
+        removeEventListener("message", onMessage);
+        resolve(value);
+      };
+      cancel = () => {
+        host.replaceChildren();
+        done(null);
+      };
+      addEventListener("message", onMessage);
+    });
+    return { token, cancel: () => cancel() };
+  }
+
+  // Creates the profile with the check's token (and the work, in Rust). Throws the reason.
+  async function claim(name, token) {
+    await invoke("name_claim", { username: name, turnstile: token });
+    remember(name);
+  }
+
+  // Inside a window (`box`, its .modal-box): a panel over its content that creates the profile
+  // of `name`. Resolves true once it exists, false if the window closes first.
+  function gate(box, name) {
+    return new Promise(async (resolve) => {
+      const state = await status(name);
+      if (state === "mine" || state === "legacy") return resolve(true);
+      const overlay = box.closest(".modal-overlay");
+      const panel = document.createElement("div");
+      panel.className = "profile-gate";
+      panel.innerHTML = `<img class="human-head px-head" alt="" /><div class="human-name"></div><p class="human-text"></p><div class="human-frame"></div><p class="human-status"></p>`;
+      const [head, title, text, frameHost, note] = panel.children;
+      title.textContent = name;
+      head.src = BLANK_AVATAR;
+      window.ikaSocial?.head(name).then((url) => (head.src = url));
+      const say = (msg, isError = false) => {
+        note.textContent = msg || "";
+        note.classList.toggle("is-error", !!isError);
+      };
+      box.querySelector(".profile-gate")?.remove();
+      // right under the window's header, over everything else
+      panel.style.top = `${box.querySelector(".instance-creator-header")?.offsetHeight || 70}px`;
+      box.appendChild(panel);
+      let check = null;
+      let closed = false;
+      const watch = new MutationObserver(() => {
+        if (overlay && !overlay.classList.contains("hidden")) return;
+        closed = true;
+        finish(false);
+      });
+      const finish = (ok) => {
+        watch.disconnect();
+        check?.cancel();
+        panel.remove();
+        resolve(ok);
+      };
+      if (overlay) watch.observe(overlay, { attributes: true, attributeFilter: ["class"] });
+
+      if (state === "taken") {
+        text.textContent = "Ese nombre ya pertenece a otra persona en Ika. Para usar Amigos y Grupos, agrega una cuenta con otro nombre.";
+        frameHost.remove();
+        return;
+      }
+      if (state === "offline") {
+        text.textContent = "No se pudo conectar con Ika. Revisa tu conexión y vuelve a abrir esta ventana.";
+        frameHost.remove();
+        return;
+      }
+      text.textContent = "Tu perfil aún no está creado en Ika. Confirma que eres una persona para crearlo: solo se pide una vez en este PC.";
+      while (!closed) {
+        check = mountCheck(frameHost, say);
+        const token = await check.token;
+        if (closed || token === null) return;
+        say("Creando tu perfil…");
+        try {
+          await claim(name, token);
+          say("¡Listo!");
+          showToast(`Tu perfil «${name}» ya está creado en Ika.`);
+          panel.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 260, easing: "ease-out", fill: "forwards" }).finished.then(() => finish(true));
+          return;
+        } catch (err) {
+          say(String(err), true); // a new check to try again
+        }
+      }
+    });
+  }
+
+  return { status, ensure, mountCheck, claim, gate };
+})();
+window.ikaIdentity = ikaIdentity;
+
+const ikaSocial = (() => {
+  const PING_MS = 5 * 60 * 1000; // only to notice a connection that died without closing
+  const RETRY_MIN_MS = 3000;
+  const RETRY_MAX_MS = 5 * 60 * 1000;
+  const AUTO_KEY = "ika_friends_autoaccept";
+  const SEEN_KEY = "ika_friend_requests_seen";
+  const NAME_RE = /^[A-Za-z0-9_]{2,16}$/;
+
+  const S = {
+    name: "",
+    friends: [],
+    sent: [],
+    requests: [], // [{from, ts}]
+    compares: [], // friends asking to compare an instance: [{id, from, inst, count, ts}]
+    live: false,
+    ws: null,
+    retryMs: RETRY_MIN_MS,
+    retryTimer: 0,
+    pingTimer: 0,
+    busy: new Set(), // names with an action in flight
+  };
+  const $ = (id) => document.getElementById(id);
+  const modal = $("modal-friends");
+  const accountName = () => (state.activeUser?.username || "").trim();
+  const lower = (n) => String(n || "").trim().replace(/^@/, "").toLowerCase();
+
+  const readAuto = () => {
+    try {
+      return localStorage.getItem(AUTO_KEY) !== "0";
+    } catch {
+      return true;
+    }
+  };
+  // Requests already announced, so a reconnect doesn't ring for them again.
+  const seenRequests = (() => {
+    try {
+      return new Set(JSON.parse(localStorage.getItem(SEEN_KEY) || "[]"));
+    } catch {
+      return new Set();
+    }
+  })();
+  const rememberSeen = () => {
+    try {
+      localStorage.setItem(SEEN_KEY, JSON.stringify([...seenRequests].slice(-200)));
+    } catch {}
+  };
+  function announceRequest(req) {
+    const id = `${req.from}:${req.ts}`;
+    if (seenRequests.has(id)) return;
+    seenRequests.add(id);
+    rememberSeen();
+    notify({ type: "info", title: `${req.from} quiere ser tu amigo`, text: "Acéptalo en Amigos para enviaros instancias." });
+    showToast(`${req.from} te envió una solicitud de amistad.`);
+  }
+
+  // ---------------------------------------------------------------------------------------
+  // Live connection
+  // ---------------------------------------------------------------------------------------
+  function setLive(on) {
+    S.live = on;
+    render();
+    window.ikaGroups?.render();
+  }
+
+  function disconnect() {
+    clearTimeout(S.retryTimer);
+    clearInterval(S.pingTimer);
+    const ws = S.ws;
+    S.ws = null;
+    if (ws) {
+      ws.onclose = null;
+      try {
+        ws.close(1000);
+      } catch {}
+    }
+    if (S.live) setLive(false);
+  }
+
+  function retryLater() {
+    clearTimeout(S.retryTimer);
+    S.retryTimer = setTimeout(connect, S.retryMs + Math.random() * 1000);
+    S.retryMs = Math.min(RETRY_MAX_MS, S.retryMs * 2);
+  }
+
+  async function connect() {
+    disconnect();
+    const name = accountName();
+    if (S.name !== lower(name)) {
+      S.name = lower(name);
+      S.friends = [];
+      S.sent = [];
+      S.requests = [];
+      render();
+    }
+    if (!NAME_RE.test(name) || !navigator.onLine) return; // "online" brings it back
+    // only with a profile on the service (created in Agregar usuario, or from Amigos / Grupos)
+    if (!(await ikaIdentity.ensure(name))) return;
+    if (lower(accountName()) !== S.name || S.ws) return;
+    let url;
+    try {
+      url = await invoke("social_hub_url", { username: name });
+    } catch {
+      return; // service not configured
+    }
+    if (lower(accountName()) !== S.name || S.ws) return; // the account changed meanwhile
+    let ws;
+    try {
+      ws = new WebSocket(url);
+    } catch {
+      return retryLater();
+    }
+    S.ws = ws;
+    let opened = false;
+    ws.onopen = () => {
+      opened = true;
+      S.retryMs = RETRY_MIN_MS;
+      setLive(true);
+      clearInterval(S.pingTimer);
+      S.pingTimer = setInterval(() => {
+        try {
+          ws.send("ping");
+        } catch {}
+      }, PING_MS);
+    };
+    ws.onmessage = (m) => {
+      if (m.data === "pong") return;
+      let event;
+      try {
+        event = JSON.parse(m.data);
+      } catch {
+        return;
+      }
+      handle(event);
+    };
+    ws.onclose = (e) => {
+      if (S.ws !== ws) return;
+      S.ws = null;
+      clearInterval(S.pingTimer);
+      setLive(false);
+      if (e.code === 4000) return; // a newer connection from this PC took over
+      // never connected (no network, or a service without the Hub): look for invitations once
+      if (!opened) window.ikaShare?.checkNow?.();
+      retryLater();
+    };
+  }
+
+  function applyLists(data) {
+    if (Array.isArray(data?.friends)) S.friends = data.friends.map(lower);
+    if (Array.isArray(data?.sent)) S.sent = data.sent.map(lower);
+    S.requests = S.requests.filter((r) => !S.friends.includes(r.from));
+  }
+
+  function handle(e) {
+    switch (e.t) {
+      case "sync":
+        applyLists(e);
+        S.requests = (Array.isArray(e.requests) ? e.requests.map((r) => ({ from: lower(r.from), ts: r.ts })) : []).filter((r) => !S.friends.includes(r.from));
+        S.requests.forEach(announceRequest);
+        S.compares = (Array.isArray(e.messages) ? e.messages : []).filter((m) => m.type === "compare").map(compareOf);
+        S.compares.forEach(announceCompare);
+        window.ikaShare?.onInvite?.(e.invite || null);
+        if (Array.isArray(e.groups)) window.ikaGroups?.setGroups(e.groups);
+        break;
+      case "group":
+        window.ikaGroups?.onGroup(e.group);
+        return;
+      case "group_gone":
+        window.ikaGroups?.onGone(e.id);
+        return;
+      case "invite":
+        window.ikaShare?.onInvite?.(e.room);
+        break;
+      case "room":
+        window.ikaShare?.onRoom?.(e.room);
+        break;
+      case "friend_req": {
+        const req = { from: lower(e.from), ts: e.ts };
+        if (S.friends.includes(req.from)) break;
+        S.requests = [...S.requests.filter((r) => r.from !== req.from), req];
+        announceRequest(req);
+        break;
+      }
+      case "friend_req_gone":
+        S.requests = S.requests.filter((r) => r.from !== lower(e.from));
+        break;
+      case "box":
+        if (e.message?.type !== "compare") return;
+        S.compares = [...S.compares.filter((c) => c.id !== e.message.id), compareOf(e.message)];
+        announceCompare(compareOf(e.message));
+        break;
+      case "compare_ready":
+        compareReady(e);
+        return;
+      case "compare_declined":
+        forgetMine(e.id);
+        showToast(`${lower(e.from)} no quiso comparar instancias esta vez.`);
+        return;
+      case "friend_added": {
+        const who = lower(e.who);
+        if (!S.friends.includes(who)) S.friends = [...S.friends, who];
+        S.sent = S.sent.filter((n) => n !== who);
+        S.requests = S.requests.filter((r) => r.from !== who);
+        showToast(`${who} y tú ya sois amigos.`);
+        break;
+      }
+      case "friend_gone": {
+        const who = lower(e.who);
+        S.friends = S.friends.filter((n) => n !== who);
+        S.sent = S.sent.filter((n) => n !== who);
+        break;
+      }
+      default:
+        return;
+    }
+    render();
+  }
+
+  // An account switch needs a connection under the new name (a local check, no request).
+  setInterval(() => {
+    if (lower(accountName()) !== S.name) connect();
+  }, 3000);
+  window.addEventListener("online", () => {
+    if (!S.ws) {
+      S.retryMs = RETRY_MIN_MS;
+      connect();
+    }
+  });
+  window.addEventListener("offline", () => disconnect());
+  setTimeout(connect, 1500);
+
+  // ---------------------------------------------------------------------------------------
+  // Friend actions
+  // ---------------------------------------------------------------------------------------
+  function showError(text) {
+    const el = $("friends-error");
+    if (el) el.textContent = text || "";
+  }
+
+  async function act(action, who) {
+    who = lower(who);
+    if (!who || S.busy.has(who)) return false;
+    const slow = ikaThrottle.check(
+      action === "request"
+        ? [
+            [`friend-request:${who}`, 1, 30 * 1000],
+            ["friend-request", 10, 60 * 1000],
+          ]
+        : [["friend-act", 20, 60 * 1000]]
+    );
+    if (slow) {
+      showError(slow);
+      return false;
+    }
+    S.busy.add(who);
+    showError("");
+    render();
+    try {
+      const res = await invoke("social_friend", { username: accountName(), action, who });
+      applyLists(res);
+      if (action === "accept" || action === "decline") S.requests = S.requests.filter((r) => r.from !== who);
+      if (action === "request" && S.friends.includes(who)) showToast(`${who} y tú ya sois amigos.`);
+      return true;
+    } catch (err) {
+      // a request that no longer exists has nothing left to answer
+      if (String(err).includes("ya no existe")) S.requests = S.requests.filter((r) => r.from !== who);
+      showError(String(err));
+      return false;
+    } finally {
+      S.busy.delete(who);
+      render();
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------
+  // Panel
+  // ---------------------------------------------------------------------------------------
+  const heads = new Map(); // name -> Promise<data url>
+  let serviceUrl = null;
+  function friendHead(name) {
+    if (!heads.has(name)) {
+      heads.set(
+        name,
+        (async () => {
+          if (serviceUrl === null) serviceUrl = (await invoke("skins_service_status").catch(() => "")) || "";
+          let head = serviceUrl ? await skinToHeadDataUrl(await fetchAsDataUrl(`${serviceUrl}/skins/${encodeURIComponent(name)}.png`)) : null;
+          if (!head) head = await skinToHeadDataUrl(await fetchAsDataUrl(`https://minotar.net/skin/${encodeURIComponent(name)}`));
+          return head || (await skinToHeadDataUrl("/steve-skin.png")) || NO_ACCOUNT_AVATAR;
+        })()
+      );
+    }
+    return heads.get(name);
+  }
+
+  function row(name, buttons, sub = "") {
+    const li = document.createElement("li");
+    li.className = "friends-row";
+    const img = document.createElement("img");
+    img.className = "friends-head px-head";
+    img.alt = "";
+    img.src = BLANK_AVATAR;
+    friendHead(name).then((url) => (img.src = url));
+    const label = document.createElement("span");
+    label.className = "friends-name";
+    label.textContent = name;
+    if (ikaVerified.has(name)) label.appendChild(ikaVerified.badge());
+    if (sub) label.appendChild(Object.assign(document.createElement("small"), { className: "friends-row-sub", textContent: sub }));
+    const actions = document.createElement("div");
+    actions.className = "friends-actions";
+    for (const [text, cls, onClick] of buttons) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = `btn btn-sm ${cls}`;
+      b.textContent = text;
+      b.disabled = S.busy.has(name);
+      b.addEventListener("click", onClick);
+      actions.appendChild(b);
+    }
+    li.append(img, label, actions);
+    return li;
+  }
+
+  function sendTo(name) {
+    const inst = typeof currentHomeInstance === "function" ? currentHomeInstance() : null;
+    if (!inst) {
+      showError("Elige primero en Inicio la instancia que quieres enviar.");
+      return;
+    }
+    close();
+    window.ikaShare?.openSend(inst, name);
+  }
+
+  // ---------------------------------------------------------------------------------------
+  // Comparing instances with a friend: one asks with one of their instances, the other accepts
+  // with one of theirs, and both see the two side by side in Comparador (the friend's as
+  // instance 1). The mod lists travel with where each mod can be downloaded, so what one is
+  // missing can be downloaded from Comparador.
+  // ---------------------------------------------------------------------------------------
+  const MINE_KEY = "ika_compare_mine"; // id -> path of my instance in a request I sent
+  const readMine = () => {
+    try {
+      return JSON.parse(localStorage.getItem(MINE_KEY) || "{}") || {};
+    } catch {
+      return {};
+    }
+  };
+  const writeMine = (map) => {
+    try {
+      localStorage.setItem(MINE_KEY, JSON.stringify(map));
+    } catch {}
+  };
+  function forgetMine(id) {
+    const map = readMine();
+    delete map[id];
+    writeMine(map);
+  }
+  const compareOf = (m) => ({ id: m.id, from: lower(m.from), inst: m.data?.inst || {}, count: m.data?.count || 0, ts: m.ts });
+  const instLabel = (inst) => getCustomInstanceNamesMap()[inst.path] || inst.name || inst.folder_name || "Instancia";
+  const seenCompares = new Set();
+  function announceCompare(c) {
+    if (seenCompares.has(c.id)) return;
+    seenCompares.add(c.id);
+    notify({ type: "info", title: `${c.from} quiere comparar instancias`, text: `Con su «${c.inst.name || "instancia"}». Acéptalo en Amigos.` });
+    showToast(`${c.from} quiere comparar su «${c.inst.name || "instancia"}» con una tuya.`);
+  }
+
+  // The mod list of an instance as it is sent: without what only matters on this PC, with the
+  // links each mod can be downloaded from.
+  async function comparePayload(inst) {
+    const res = await invoke("scan_directory", { path: inst.mods_path });
+    const mods = (res && res.mods) || [];
+    const links = await invoke("compare_links", { files: mods.map((m) => m.filepath) }).catch(() => ({}));
+    return {
+      inst: { name: instLabel(inst), mc: inst.mc_version || "", loader: inst.loader || "" },
+      mods: mods.map(({ description, filepath, ...m }) => ({ ...m, links: links[String(m.sha1 || "").toLowerCase()] || [] })),
+    };
+  }
+  const newCompareId = () => `cmp${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+
+  async function requestCompare(name) {
+    const inst = await ikaInstancePicker.open({ title: `COMPARAR CON ${name.toUpperCase()}`, okText: "Enviar solicitud", initial: currentHomeInstance()?.path });
+    if (!inst) return;
+    S.busy.add(name);
+    render();
+    try {
+      const id = newCompareId();
+      const payload = await comparePayload(inst);
+      await invoke("social_compare", { username: accountName(), body: { action: "request", to: name, id, ...payload } });
+      writeMine({ ...readMine(), [id]: inst.path });
+      showToast(`Solicitud enviada. Cuando ${name} la acepte se abrirá el comparador.`);
+    } catch (err) {
+      showError(String(err));
+    } finally {
+      S.busy.delete(name);
+      render();
+    }
+  }
+
+  async function acceptCompare(c) {
+    const inst = await ikaInstancePicker.open({ title: `COMPARAR CON ${c.from.toUpperCase()}`, okText: "Comparar", initial: currentHomeInstance()?.path });
+    if (!inst) return;
+    S.busy.add(c.from);
+    render();
+    try {
+      const payload = await comparePayload(inst);
+      const theirs = await invoke("social_compare", { username: accountName(), body: { action: "accept", id: c.id, ...payload } });
+      S.compares = S.compares.filter((x) => x.id !== c.id);
+      close();
+      window.ikaComparer?.openRemote({ friend: c.from, inst: theirs.inst, mods: theirs.mods }, inst);
+    } catch (err) {
+      showError(String(err));
+      if (String(err).includes("ya no existe")) S.compares = S.compares.filter((x) => x.id !== c.id);
+    } finally {
+      S.busy.delete(c.from);
+      render();
+    }
+  }
+
+  async function declineCompare(c) {
+    S.compares = S.compares.filter((x) => x.id !== c.id);
+    render();
+    invoke("social_compare", { username: accountName(), body: { action: "decline", id: c.id } }).catch(() => {});
+  }
+
+  // A friend accepted a request of mine: their list comes, and Comparador opens with both.
+  async function compareReady(e) {
+    const from = lower(e.from);
+    const path = readMine()[e.id];
+    try {
+      const theirs = await invoke("social_compare", { username: accountName(), body: { action: "get", id: e.id } });
+      forgetMine(e.id);
+      const mine = path ? (homeInstancesAll || homeInstancesList || []).find((i) => normInstancePath(i.path) === normInstancePath(path)) : null;
+      notify({ type: "success", title: `${from} aceptó comparar`, text: `Su «${theirs.inst?.name || "instancia"}» con tu ${mine ? `«${instLabel(mine)}»` : "instancia"}.` });
+      close();
+      window.ikaComparer?.openRemote({ friend: from, inst: theirs.inst, mods: theirs.mods }, mine);
+    } catch (err) {
+      showToast(String(err));
+    }
+  }
+
+  function render() {
+    const btn = document.getElementById("btn-user-friends");
+    if (btn) {
+      if (S.requests.length + S.compares.length) btn.dataset.badge = String(S.requests.length + S.compares.length);
+      else delete btn.dataset.badge;
+    }
+    if (!modal || modal.classList.contains("hidden")) return;
+
+
+    const reqList = $("friends-requests");
+    reqList.replaceChildren(
+      ...S.requests.map((r) =>
+        row(r.from, [
+          ["Aceptar", "btn-purple", () => act("accept", r.from)],
+          ["Rechazar", "btn-secondary", () => act("decline", r.from)],
+        ])
+      )
+    );
+    $("friends-requests-card").classList.toggle("hidden", !S.requests.length);
+
+    $("friends-compares").replaceChildren(
+      ...S.compares.map((c) =>
+        row(
+          c.from,
+          [
+            ["Comparar", "btn-purple", () => acceptCompare(c)],
+            ["Rechazar", "btn-secondary", () => declineCompare(c)],
+          ],
+          `Su «${c.inst.name || "instancia"}»${c.inst.mc ? ` · ${c.inst.mc}` : ""}${c.inst.loader ? ` ${c.inst.loader}` : ""} · ${c.count} mods`
+        )
+      )
+    );
+    $("friends-compares-card").classList.toggle("hidden", !S.compares.length);
+
+    const list = $("friends-list");
+    list.replaceChildren(
+      ...[...S.friends].sort().map((name) =>
+        row(name, [
+          ["Enviar instancia", "btn-purple", () => sendTo(name)],
+          ["Comparar", "btn-secondary", () => requestCompare(name)],
+          [
+            "Quitar",
+            "btn-secondary",
+            async () => {
+              const ok = await showConfirmDialog({
+                title: "QUITAR AMIGO",
+                message: `¿Quitar a ${name} de tus amigos?`,
+                itemTitle: name,
+                itemDesc: "Dejaréis de veros en Amigos. Podéis volver a enviaros una solicitud cuando queráis.",
+                confirmText: "Quitar",
+                warnText: "Las instancias que ya os enviasteis no se tocan.",
+              });
+              if (ok) act("remove", name);
+            },
+          ],
+        ])
+      )
+    );
+    $("friends-count").textContent = S.friends.length ? `(${S.friends.length})` : "";
+    $("friends-empty").classList.toggle("hidden", S.friends.length > 0);
+
+    const sentList = $("friends-sent");
+    sentList.replaceChildren(...S.sent.map((name) => row(name, [["Cancelar", "btn-secondary", () => act("cancel", name)]])));
+    $("friends-sent-card").classList.toggle("hidden", !S.sent.length);
+
+    $("friends-autoaccept").checked = readAuto();
+    requestAnimationFrame(() => fitPixelHeads(modal));
+  }
+
+  async function open() {
+    if (!modal) return;
+    const name = accountName();
+    if (!NAME_RE.test(name)) {
+      showToast("Inicia sesión con una cuenta para usar Amigos.");
+      return;
+    }
+    modal.classList.remove("hidden");
+    showError("");
+    render();
+    // no profile yet: created here, inside Amigos, before anything else
+    if (!(await ikaIdentity.gate(modal.querySelector(".friends-modal-box"), name))) return;
+    if (!S.ws) {
+      S.retryMs = RETRY_MIN_MS;
+      connect();
+    }
+    const cols = modal.querySelectorAll(".friends-col");
+    cols.forEach((col, i) =>
+      col.animate(
+        [
+          { opacity: 0, transform: `translateX(${i ? 18 : -18}px)` },
+          { opacity: 1, transform: "none" },
+        ],
+        { duration: 520, delay: 80 + i * 70, easing: "cubic-bezier(0.16, 1, 0.3, 1)", fill: "backwards" }
+      )
+    );
+    animateIn(modal.querySelectorAll(".friends-col .friends-row, .friends-empty-state, .friends-add-card"), { y: 12, stagger: 45, delay: 160 });
+    // without the connection, the panel shows what the service says now
+    if (!S.live) {
+      try {
+        const snap = await invoke("social_sync", { username: name });
+        handle(snap);
+      } catch (err) {
+        showError(String(err));
+      }
+      if (!S.ws) {
+        S.retryMs = RETRY_MIN_MS;
+        connect();
+      }
+    }
+    $("input-friend-name")?.focus();
+  }
+
+  function close() {
+    modal?.classList.add("hidden");
+  }
+
+  if (modal) {
+    $("btn-close-friends").addEventListener("click", close);
+    let downOnBackdrop = false;
+    modal.addEventListener("mousedown", (e) => (downOnBackdrop = e.target === modal));
+    modal.addEventListener("click", (e) => {
+      if (e.target === modal && downOnBackdrop) close();
+    });
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && !modal.classList.contains("hidden")) close();
+    });
+    $("friends-add-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const input = $("input-friend-name");
+      const who = lower(input.value);
+      if (!NAME_RE.test(who)) {
+        showError("Escribe un nombre de jugador válido (2 a 16 letras, números o _).");
+        return;
+      }
+      if (who === lower(accountName())) {
+        showError("No puedes añadirte a ti mismo como amigo.");
+        return;
+      }
+      if (S.friends.includes(who)) {
+        showError(`${who} ya es tu amigo.`);
+        return;
+      }
+      if (await act("request", who)) input.value = "";
+    });
+    // the head of the player whose name is being typed, once typing pauses
+    const addHead = $("friend-add-head");
+    let addHeadTimer = 0;
+    const showAddHead = () => {
+      const who = lower($("input-friend-name").value);
+      clearTimeout(addHeadTimer);
+      if (!NAME_RE.test(who)) {
+        addHead.src = BLANK_AVATAR;
+        addHead.classList.remove("is-shown");
+        return;
+      }
+      addHeadTimer = setTimeout(() => {
+        friendHead(who).then((url) => {
+          if (lower($("input-friend-name").value) !== who) return;
+          addHead.src = url;
+          addHead.classList.add("is-shown");
+        });
+      }, 350);
+    };
+    addHead.src = BLANK_AVATAR;
+    $("input-friend-name").addEventListener("input", showAddHead);
+    $("friends-add-form").addEventListener("submit", () => setTimeout(showAddHead, 0));
+    $("friends-autoaccept").addEventListener("change", (e) => {
+      try {
+        localStorage.setItem(AUTO_KEY, e.target.checked ? "1" : "0");
+      } catch {}
+    });
+  }
+
+  return {
+    open,
+    render,
+    isLive: () => S.live,
+    head: friendHead,
+    // whether an invitation from `sender` (already vouched for by the service) installs unasked
+    autoAccepts: (sender) => readAuto() && S.friends.includes(lower(sender)),
+  };
+})();
+window.ikaSocial = ikaSocial;
+
+// =========================================================
+// GROUPS (dock button "Grupos")
+// A creator shares the instances they choose with the people who follow the group: open (anyone
+// can follow it, found by the creator's name) or selecto (only with its invitation code). Made for
+// groups of any size: nobody sees who follows, only how many. The service keeps each instance as
+// its package without the Modrinth/CurseForge mods, so it installs with the creator offline; a
+// new version is also kept as only what changed, which is all a follower with the previous one
+// downloads. Followers find out about new versions when the launcher opens or Grupos is opened,
+// and every few hours.
+// =========================================================
+const ikaGroups = (() => {
+  const INSTALLS_KEY = "ika_group_installs"; // "gid:pid" -> {ver, path}
+  const PUBLISHED_KEY = "ika_group_published"; // "gid:pid" -> path of the instance it came from
+  const ANNOUNCED_KEY = "ika_group_announced"; // "gid:pid" -> version already announced
+  const REFRESH_MS = 6 * 60 * 60 * 1000;
+  const MAX_PACK_BYTES = 50 * 1024 * 1024;
+  const MAX_PACKS = 50; // a sanity cap: the real limit is the 150 MB a creator may use
+  const MAX_OWNED = 3;
+  const $ = (id) => document.getElementById(id);
+  const modal = $("modal-groups");
+  const G = {
+    groups: new Map(), // id -> group as the service shows it to this player
+    found: [], // open groups discovered for what is typed
+    coded: null, // {group, code}: a selecto group entered with its invitation code
+    packChanged: new Map(), // "gid:pid" -> true (changed since published here) / false (the same) / null (unknown)
+    tasks: new Map(), // "gid:pid" (or "gid:new") -> {id, label}
+    publishPick: new Map(), // gid -> path of the instance chosen to publish (until the panel closes)
+    pendingMode: null, // Abierto/Selecto picked on the creator's page, applied by Guardar
+  };
+  const me = () => (state.activeUser?.username || "").trim();
+  const lower = (n) => String(n || "").trim().toLowerCase();
+  const readMap = (key) => {
+    try {
+      return JSON.parse(localStorage.getItem(key) || "{}") || {};
+    } catch {
+      return {};
+    }
+  };
+  const writeMap = (key, map) => {
+    try {
+      localStorage.setItem(key, JSON.stringify(map));
+    } catch {}
+  };
+  const randomId = (len) => {
+    const abc = "abcdefghijklmnopqrstuvwxyz0123456789";
+    return [...crypto.getRandomValues(new Uint8Array(len))].map((b) => abc[b % abc.length]).join("");
+  };
+  const call = (method, path, body = null) => invoke("group_call", { username: me(), method, path, body });
+  const mb = (bytes) => {
+    const n = Math.max(0, Number(bytes) || 0);
+    if (n < 1024 * 1024) return `${Math.max(1, Math.round(n / 1024))} KB`;
+    return `${(n / (1024 * 1024)).toFixed(n > 100 * 1024 * 1024 ? 0 : 1)} MB`;
+  };
+  const packLine = (p) => [p.mc, p.loader, p.mods ? `${p.mods} ${p.mods === 1 ? "mod" : "mods"}` : "", p.size ? mb(p.size) : ""].filter(Boolean).join(" · ");
+
+  function showError(text) {
+    const el = $("groups-error");
+    if (el) el.textContent = text || "";
+  }
+
+  // The copy installed from a group, if it is still in the launcher.
+  function installedCopy(gid, pid) {
+    const copy = readMap(INSTALLS_KEY)[`${gid}:${pid}`];
+    if (!copy) return null;
+    const exists = homeInstancesList.some((i) => normInstancePath(i.path) === normInstancePath(copy.path));
+    return exists ? copy : null;
+  }
+
+  // ---------------------------------------------------------------------------------------
+  // What the service reports (through ikaSocial)
+  // ---------------------------------------------------------------------------------------
+  // Tells once about each new version of an installed instance, and about instances published
+  // since the group was last seen (not about what a group already had when it was followed).
+  function announce(g, prev) {
+    if (g.role !== "member") return;
+    const announced = readMap(ANNOUNCED_KEY);
+    let changed = false;
+    for (const p of g.packs) {
+      const key = `${g.id}:${p.pid}`;
+      const copy = installedCopy(g.id, p.pid);
+      if (copy && copy.ver !== p.ver && announced[key] !== p.ver) {
+        notify({ type: "info", title: `Nueva versión de «${p.name}»`, text: `${g.owner} la actualizó en ${g.name}. Actualízala desde Grupos.` });
+        showToast(`Hay una versión nueva de «${p.name}» en ${g.name}.`);
+      } else if (!copy && prev && !prev.packs.some((x) => x.pid === p.pid) && !announced[key]) {
+        notify({ type: "info", title: `${g.owner} publicó «${p.name}»`, text: `En el grupo ${g.name}. Instálala desde Grupos.` });
+      } else if (announced[key] === p.ver) {
+        continue;
+      }
+      announced[key] = p.ver;
+      changed = true;
+    }
+    if (changed) writeMap(ANNOUNCED_KEY, announced);
+  }
+
+  function setGroups(list) {
+    const before = G.groups;
+    G.groups = new Map((list || []).map((g) => [g.id, g]));
+    G.groupsLoaded = true;
+    for (const g of G.groups.values()) announce(g, before.get(g.id));
+    render();
+  }
+
+  function onGroup(g) {
+    if (!g?.id) return;
+    const prev = G.groups.get(g.id);
+    if (g.role === "none") G.groups.delete(g.id);
+    else G.groups.set(g.id, g);
+    announce(g, prev);
+    G.found = G.found.map((f) => (f.id === g.id ? { ...f, ...g, packs: g.packs.length ? g.packs : f.packs } : f));
+    render();
+  }
+
+  // What the groups look like now: one request, whatever the number of groups or followers.
+  async function refresh() {
+    if (!/^[A-Za-z0-9_]{2,16}$/.test(me())) return;
+    try {
+      setGroups((await call("GET", "/groups/mine?")).groups);
+    } catch (err) {
+      showError(String(err));
+    }
+  }
+  setInterval(() => {
+    if (!document.hidden) refresh();
+  }, REFRESH_MS);
+
+  function onGone(id) {
+    const g = G.groups.get(id);
+    if (g && g.role === "member") showToast(`El grupo «${g.name}» ya no está disponible.`);
+    G.groups.delete(id);
+    render();
+  }
+
+  // ---------------------------------------------------------------------------------------
+  // Progress of publishing / installing, from the backend events
+  // ---------------------------------------------------------------------------------------
+  const taskById = (id) => [...G.tasks.values()].find((t) => t.id === id);
+  let paintTimer = 0;
+  const paintSoon = () => {
+    if (!paintTimer) paintTimer = setTimeout(() => ((paintTimer = 0), render()), 150);
+  };
+  const percent = (a, b) => `${Math.min(100, Math.round(((Number(a) || 0) / Math.max(1, Number(b) || 1)) * 100))}%`;
+  listen("group-upload-progress", (ev) => {
+    const t = taskById(ev.payload?.id);
+    if (t) (t.label = `Subiendo ${percent(ev.payload.sent, ev.payload.total)}`), paintSoon();
+  });
+  listen("group-download-progress", (ev) => {
+    const t = taskById(ev.payload?.id);
+    if (t) (t.label = `Descargando ${percent(ev.payload.got, ev.payload.total)}`), paintSoon();
+  });
+  listen("share-transfer-progress", (ev) => {
+    const t = taskById(ev.payload?.id);
+    if (!t) return;
+    if (ev.payload.stage === "cdn") t.label = `Descargando mods ${percent(ev.payload.cdnDone, ev.payload.cdnTotal)}`;
+    else if (ev.payload.stage === "runtime") t.label = "Preparando Minecraft y Java…";
+    else if (ev.payload.stage === "base") t.label = ev.payload.message || "Descargando el modpack base…";
+    paintSoon();
+  });
+
+  async function runTask(key, firstLabel, work) {
+    if (G.tasks.has(key)) return;
+    const task = { id: `grp${randomId(12)}`, label: firstLabel };
+    G.tasks.set(key, task);
+    showError("");
+    render();
+    try {
+      await work(task);
+    } catch (err) {
+      showError(String(err));
+    } finally {
+      G.tasks.delete(key);
+      render();
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------
+  // Actions
+  // ---------------------------------------------------------------------------------------
+  async function act(gid, action, extra = {}) {
+    const slow = ikaThrottle.check([["group-act", 15, 60 * 1000]]);
+    if (slow) {
+      showError(slow);
+      return null;
+    }
+    try {
+      const res = await call("POST", "/groups/act?", { gid, action, ...extra });
+      if (action === "leave" || action === "delete") onGone(gid);
+      else onGroup(res);
+      return res;
+    } catch (err) {
+      showError(String(err));
+      return null;
+    }
+  }
+
+  // Publishes `inst` as a new instance of the group, or as a new version of `pack`: whole, and
+  // as only what changed since the version this PC published last (when it is the current one).
+  function publish(g, inst, pack = null) {
+    if (!inst) return showError("Elige la instancia que quieres publicar.");
+    const key = `${g.id}:${pack ? pack.pid : "new"}`;
+    if (G.tasks.has(key)) return;
+    const slow = ikaThrottle.check([
+      [`publish:${key}`, 1, 20 * 1000],
+      ["publish", 6, 10 * 60 * 1000],
+    ]);
+    if (slow) return showError(slow);
+    return runTask(key, "Empaquetando…", async (task) => {
+      const fullId = task.id; // task.id follows whichever package is uploading, for its progress
+      // base: files identical to the modpack the instance came from stay out of the package
+      const pkg = await invoke("share_pack", { instancePath: inst.path, id: fullId, base: true });
+      let delta = null;
+      try {
+        if (pkg.zip_size > MAX_PACK_BYTES) {
+          throw new Error(
+            `«${inst.name}» pesa ${mb(pkg.zip_size)} sin contar los mods de Modrinth y CurseForge, y el máximo es 50 MB. Quita archivos grandes que no sean mods (resource packs propios, mundos) e inténtalo de nuevo.`
+          );
+        }
+        const pid = pack ? pack.pid : randomId(10);
+        const ver = randomId(8);
+        if (pack) {
+          delta = await invoke("group_pack_delta", { gid: g.id, pid, id: fullId });
+          if (delta && delta.from !== pack.ver) delta = null;
+        }
+        task.label = "Subiendo 0%";
+        render();
+        // links to upload straight to the service's storage (none: through the service itself);
+        // asked for right before uploading, since they last an hour
+        let links = await call("POST", "/groups/act?", { gid: g.id, action: "upload" });
+        const up = async (kind, id) => {
+          const send = () => invoke("group_upload", { username: me(), gid: g.id, kind, id, url: links.direct ? links[kind] : null });
+          try {
+            return await send();
+          } catch (err) {
+            if (!String(err).includes("ika-link-expired")) throw err;
+            links = await call("POST", "/groups/act?", { gid: g.id, action: "upload" });
+            return send();
+          }
+        };
+        const chunks = await up("full", fullId);
+        const body = {
+          gid: g.id,
+          action: "publish",
+          pid,
+          ver,
+          chunks,
+          zipSize: pkg.zip_size,
+          sha256: pkg.sha256,
+          meta: { name: inst.name || inst.folder_name || "Instancia", mc: inst.mc_version || "", loader: inst.loader || "", mods: pkg.mods, size: pkg.size },
+        };
+        if (delta) {
+          task.id = delta.id;
+          task.label = "Subiendo cambios 0%";
+          render();
+          body.delta = { from: delta.from, chunks: await up("delta", delta.id), zipSize: delta.zip_size, sha256: delta.sha256 };
+        }
+        const res = await call("POST", "/groups/act?", body);
+        await invoke("group_pack_remember", { gid: g.id, pid, ver, id: fullId, instancePath: inst.path }).catch(() => {});
+        G.packChanged.set(`${g.id}:${pid}`, false);
+        const published = readMap(PUBLISHED_KEY);
+        published[`${g.id}:${pid}`] = inst.path;
+        writeMap(PUBLISHED_KEY, published);
+        onGroup(res);
+        artFromInstance(res, pid, inst);
+        const saved = res.packs.find((p) => p.pid === pid)?.delta;
+        showToast(
+          pack
+            ? `Versión nueva de «${inst.name}» publicada en ${g.name}.${saved ? ` Quien tenga la anterior solo descarga ${mb(saved.zipSize)}.` : ""}`
+            : `«${inst.name}» publicada en ${g.name}.`
+        );
+      } finally {
+        invoke("share_discard", { id: fullId }).catch(() => {});
+        if (delta) invoke("share_discard", { id: delta.id }).catch(() => {});
+      }
+    });
+  }
+
+  // Whether each instance of `g` changed since this PC published it (a quick look at its files
+  // in Rust), for "Al día" / "Publicar cambios". Repaints only if an answer changed.
+  let statusSeq = 0;
+  async function checkPackChanges(g) {
+    if (!g || g.owner !== lower(me())) return;
+    const seq = ++statusSeq;
+    let changed = false;
+    await Promise.all(
+      (g.packs || []).map(async (p) => {
+        const path = readMap(PUBLISHED_KEY)[`${g.id}:${p.pid}`];
+        const key = `${g.id}:${p.pid}`;
+        const now = path ? await invoke("group_pack_changed", { gid: g.id, pid: p.pid, instancePath: path }).catch(() => null) : null;
+        if (G.packChanged.get(key) !== now) {
+          G.packChanged.set(key, now);
+          changed = true;
+        }
+      })
+    );
+    if (changed && seq === statusSeq && G.view === "detail" && G.detailId === g.id) render();
+  }
+  // back to the launcher (maybe after playing or editing the instance): looked at again
+  window.addEventListener("focus", () => {
+    if (modal && !modal.classList.contains("hidden") && G.view === "detail") checkPackChanges(G.groups.get(G.detailId));
+  });
+
+  // The instance a pack was published from (for a new version), else the one chosen in Inicio.
+  function sourceOf(g, pack) {
+    const path = readMap(PUBLISHED_KEY)[`${g.id}:${pack.pid}`];
+    return (path && homeInstancesList.find((i) => normInstancePath(i.path) === normInstancePath(path))) || currentHomeInstance();
+  }
+
+  // Installs, or updates the installed copy: with only what changed when it has the previous
+  // version, the whole version otherwise (or when the changes can't be applied to it).
+  function install(g, pack) {
+    const copy = installedCopy(g.id, pack.pid);
+    return runTask(`${g.id}:${pack.pid}`, "Descargando 0%", async (task) => {
+      const get = (kind) =>
+        invoke("group_install", {
+          username: me(),
+          gid: g.id,
+          pid: pack.pid,
+          ver: pack.ver,
+          kind,
+          size: kind === "delta" ? pack.delta.zipSize : pack.zipSize,
+          sha256: kind === "delta" ? pack.delta.sha256 : pack.sha256,
+          name: pack.name,
+          updatePath: copy ? copy.path : null,
+          url: (kind === "delta" ? pack.delta?.url : pack.url) || null,
+          id: task.id,
+        });
+      // a download link lasts an hour: an old one is replaced by asking for the groups again
+      const fetchKind = async (kind) => {
+        try {
+          return await get(kind);
+        } catch (err) {
+          if (!String(err).includes("ika-link-expired")) throw err;
+          await refresh();
+          const fresh = G.groups.get(g.id)?.packs.find((x) => x.pid === pack.pid && x.ver === pack.ver);
+          if (!fresh) throw new Error("Esa versión ya no está publicada. Mira si hay una más nueva.");
+          pack = fresh;
+          return get(kind);
+        }
+      };
+      let path;
+      if (copy && pack.delta && pack.delta.from === copy.ver) {
+        try {
+          path = await fetchKind("delta");
+        } catch (err) {
+          if (!String(err).includes("ika-need-full")) throw err;
+          task.label = "Descargando la versión completa 0%";
+          render();
+          path = await fetchKind("full");
+        }
+      } else {
+        path = await fetchKind("full");
+      }
+      const installs = readMap(INSTALLS_KEY);
+      installs[`${g.id}:${pack.pid}`] = { ver: pack.ver, path };
+      writeMap(INSTALLS_KEY, installs);
+      if (!copy) await keepArt(g, pack, path);
+      await reloadAllHomeInstances();
+      showToast(copy ? `«${pack.name}» actualizada.` : `«${pack.name}» instalada. Ya está en tus instancias.`);
+    });
+  }
+
+  // ---------------------------------------------------------------------------------------
+  // Discover: open groups only (most followed first), filtered by what is typed. Selecto
+  // groups never show there: they are entered with their invitation code (enterCode).
+  // ---------------------------------------------------------------------------------------
+  let discoverSeq = 0;
+  async function discover(query = "") {
+    const q = String(query || "").trim();
+    const seq = ++discoverSeq;
+    G.loading = true;
+    showError("");
+    render();
+    let found = [];
+    try {
+      found = ((await call("GET", `/groups/discover?q=${encodeURIComponent(q)}`)).groups || []).filter((g) => g.mode === "open");
+      G.discoverError = "";
+    } catch (err) {
+      G.discoverError = String(err);
+    }
+    if (seq !== discoverSeq) return;
+    G.loading = false;
+    G.found = found;
+    G.query = q;
+    render();
+  }
+
+  // A selecto group by its invitation code: its page opens, ready to follow.
+  async function enterCode(raw) {
+    const code = String(raw || "").trim().toUpperCase();
+    if (!/^[A-Z0-9]{8}$/.test(code)) return showError("Un código de invitación tiene 8 letras y números.");
+    const slow = ikaThrottle.check([["group-code", 10, 60 * 1000]]);
+    if (slow) return showError(slow);
+    showError("");
+    try {
+      const g = await call("GET", `/groups/code?code=${encodeURIComponent(code)}`);
+      G.coded = { group: g, code };
+      $("input-groups-code").value = "";
+      showDetail(g.id);
+    } catch (err) {
+      showError(String(err).includes("no existe") || String(err).includes("404") ? "Ese código no es de ningún grupo. Revisa que esté bien escrito." : String(err));
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------
+  // Covers and instance images (see encodeImage): only references live in the groups
+  // ---------------------------------------------------------------------------------------
+  const DEFAULT_COVER = "/profile-cyber-bg.jpg";
+  const DEFAULT_COVER_SMALL = "/profile-cyber-bg-s.webp"; // the same pattern, card-sized
+  // each exactly the shape and size it is shown in
+  const ART_SIZE = { icon: [96, 96], cover: [600, 120] };
+  let serviceUrl = null;
+  const serviceReady = invoke("skins_service_status")
+    .then((url) => (serviceUrl = url || ""))
+    .catch(() => (serviceUrl = ""));
+  // Your own cover from this PC (until the service has it), made card-sized once.
+  let ownSmall = { from: "", url: "" };
+  async function ownCover(small) {
+    const stored = localStorage.getItem("ika_custom_cover_bg") || "";
+    if (!stored) return null;
+    if (!small) return stored;
+    if (ownSmall.from !== stored) ownSmall = { from: stored, url: `data:image/webp;base64,${await fitImageBase64(stored, 360, 172, 0.8)}` };
+    return ownSmall.url;
+  }
+  // A group's cover (its creator's): small for cards, large for its page.
+  async function coverInto(node, g, small = true) {
+    const fallback = small ? DEFAULT_COVER_SMALL : DEFAULT_COVER;
+    if (lower(g.owner) === lower(me())) {
+      const stored = localStorage.getItem("ika_custom_cover_bg") || "";
+      // already made: set now (awaiting would paint the default pattern for a frame first)
+      const ready = !stored ? fallback : !small ? stored : ownSmall.from === stored ? ownSmall.url : null;
+      const own = ready || (await ownCover(small).catch(() => null)) || fallback;
+      if (!loadedImages.has(own)) loadedImages.set(own, 0); // local: nothing to wait for
+      return lazyBackground(node, own, null, fallback);
+    }
+    const image = g.cover?.[small ? "small" : "large"];
+    const url = imageUrl(serviceUrl, g.owner, image);
+    lazyBackground(node, url || fallback, image?.ph, fallback);
+  }
+  const artOf = (p, kind) => p?.art?.[kind] || null;
+
+  // Sets an instance's icon or cover from `src` (a data URL or an address), or removes it.
+  async function setArt(g, pid, kind, src) {
+    const slow = ikaThrottle.check([["art", 12, 5 * 60 * 1000]]);
+    if (slow) throw new Error(slow);
+    const [w, h] = ART_SIZE[kind];
+    const image = src ? await serviceImage(me(), src, w, h, kind === "icon" ? 70 : 58) : null;
+    const res = await call("POST", "/groups/act?", { gid: g.id, action: "art", pid, kind, image });
+    onGroup(res);
+    return res;
+  }
+
+  // What the instance already looks like in the launcher, for a newly published one: its icon
+  // (custom, its own, or its block face) and its cover. Never over what the creator chose.
+  async function artFromInstance(g, pid, inst) {
+    const pack = G.groups.get(g.id)?.packs.find((p) => p.pid === pid);
+    const icons = getCustomInstanceIconsMap();
+    const icon = icons[inst.path] || icons[inst.folder_name] || icons[inst.name] || (inst.icon_path ? convertFileSrc(inst.icon_path) : getUniqueBlockFaceForInstance(inst.path, inst.name));
+    const cover = getInstanceCoverUrl(inst);
+    for (const [kind, src] of [
+      ["icon", icon],
+      ["cover", cover],
+    ]) {
+      if (src && !artOf(pack, kind)) await setArt(g, pid, kind, src).catch(() => {});
+    }
+  }
+
+  // A copy installed from a group arrives with the icon and cover its creator gave it (the
+  // launcher's own ones by name, the others as they were downloaded).
+  async function keepArt(g, pack, path) {
+    for (const [kind, save] of [
+      ["icon", saveCustomInstanceIcon],
+      ["cover", saveCustomInstanceCover],
+    ]) {
+      const image = artOf(pack, kind);
+      const builtin = image?.ref?.startsWith("builtin:") ? builtinPath(image.ref.slice(8)) : null;
+      const url = builtin ? null : imageUrl(serviceUrl, g.owner, image);
+      const data = builtin || (url ? await fetchAsDataUrl(url) : null);
+      if (data) save(path, data);
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------
+  // Panel
+  // ---------------------------------------------------------------------------------------
+  const el = (tag, cls, text) => {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined) n.textContent = text;
+    return n;
+  };
+  const button = (text, cls, onClick, disabled = false) => {
+    const b = el("button", `btn btn-sm ${cls}`, text);
+    b.type = "button";
+    b.disabled = disabled;
+    b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      onClick(e);
+    });
+    return b;
+  };
+  const head = (name, cls = "friends-head") => {
+    const img = el("img", `${cls} px-head`);
+    img.alt = "";
+    img.src = BLANK_AVATAR;
+    window.ikaSocial?.head(name).then((url) => (img.src = url));
+    return img;
+  };
+  const modeText = (g) => (g.mode === "open" ? "Abierto" : "Selecto");
+  const followers = (n) => `${Number(n || 0).toLocaleString(getLocale())} ${n === 1 ? "seguidor" : "seguidores"}`;
+  const instancesText = (n) => `${n} ${n === 1 ? "instancia" : "instancias"}`;
+  // the freshest view of a group: as followed/owned, else as discovered
+  const groupById = (id) => G.groups.get(id) || G.found.find((g) => g.id === id) || (G.coded?.group.id === id ? G.coded.group : null);
+  // whether `me` may follow it now: open, or selecto entered with its code
+  const canFollow = (g) => g.mode === "open" || G.coded?.group.id === g.id;
+  // what the service last said of this player's groups is the truth; a search result until then
+  const roleOf = (g) => (g.owner === lower(me()) ? "owner" : G.groups.get(g.id)?.role || (G.groupsLoaded ? "none" : g.role || "none"));
+
+  function follow(g) {
+    return act(g.id, "join", { code: G.coded?.group.id === g.id ? G.coded.code : "" });
+  }
+
+  const CUBE_SVG =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" aria-hidden="true"><path d="M12 2.8 20 7.2v9.6L12 21.2 4 16.8V7.2z"/><path d="M4 7.2l8 4.4 8-4.4M12 11.6v9.6"/></svg>';
+  const PEN_SVG =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg>';
+
+  // An instance's icon (or a cube while it has none)
+  function packIcon(g, p, cls) {
+    const box = el("div", cls);
+    const image = artOf(p, "icon");
+    const url = imageUrl(serviceUrl, g.owner, image);
+    if (url) {
+      const img = el("img");
+      img.alt = "";
+      img.decoding = "async";
+      lazyImg(img, url, image.ph);
+      box.appendChild(img);
+    } else {
+      box.innerHTML = CUBE_SVG;
+    }
+    return box;
+  }
+
+  // An instance as a card: its cover, its icon, what it is; `edit` lets the creator change both.
+  function packRow(p, buttons, status = "", g = null, edit = null) {
+    const li = el("li", "gpack");
+    const cover = el("div", "gpack-cover");
+    const coverImage = artOf(p, "cover");
+    const coverUrl = g ? imageUrl(serviceUrl, g.owner, coverImage) : null;
+    if (coverUrl) lazyBackground(cover, coverUrl, coverImage.ph);
+    const icon = packIcon(g || {}, p, "gpack-icon");
+    if (edit) {
+      for (const [kind, node, label] of [
+        ["cover", cover, "Cambiar portada"],
+        ["icon", icon, "Cambiar icono"],
+      ]) {
+        const b = el("button", `gpack-edit is-${kind}`);
+        b.type = "button";
+        b.title = label;
+        b.innerHTML = PEN_SVG;
+        b.disabled = !!G.tasks.get(`art:${p.pid}`);
+        b.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          const picked = await pickImageFile();
+          if (!picked) return;
+          const tiny = await loadImage(picked).then((i) => i.naturalWidth <= 64 && i.naturalHeight <= 64, () => false);
+          const data = tiny
+            ? picked
+            : await ikaCropper.open(
+                kind === "icon"
+                  ? { src: picked, aspect: 1, title: "AJUSTAR ICONO", outW: 384, outH: 384 }
+                  : { src: picked, aspect: ART_SIZE.cover[0] / ART_SIZE.cover[1], title: "AJUSTAR PORTADA", outW: ART_SIZE.cover[0] * 2, outH: ART_SIZE.cover[1] * 2 }
+              );
+          if (!data) return;
+          await runTask(`art:${p.pid}`, kind === "icon" ? "Subiendo icono…" : "Subiendo portada…", () => edit(kind, data));
+        });
+        node.appendChild(b);
+      }
+    }
+    const main = el("div", "gpack-main");
+    const text = el("div", "gpack-text");
+    const artTask = G.tasks.get(`art:${p.pid}`);
+    text.append(el("div", "gpack-name", p.name), el("div", "gpack-sub", status || (artTask ? artTask.label : packLine(p))));
+    const right = el("div", "gpack-actions");
+    right.append(...buttons);
+    main.append(icon, text);
+    li.append(cover, main, right);
+    return li;
+  }
+
+  // The card of a group, the same element while nothing it shows changed (rebuilding it on every
+  // update made its images blink).
+  const cardCache = new Map(); // id -> {sig, node}
+  function cardFor(g) {
+    const sig = JSON.stringify([g.name, g.desc, g.owner, g.mode, g.memberCount, g.cover, (g.packs || []).map((p) => [p.pid, p.name, p.art]), roleOf(g), canFollow(g), ikaVerified.has(g.owner), serviceUrl]);
+    const key = `${G.view}:${g.id}`;
+    const cached = cardCache.get(key);
+    if (cached && cached.sig === sig) return cached.node;
+    const node = groupCard(g);
+    cardCache.set(key, { sig, node });
+    return node;
+  }
+  let newCard = null;
+
+  // A group as a card of the carousel; opens its page.
+  function groupCard(g) {
+    const role = roleOf(g);
+    const card = el("article", "gcard");
+    card.tabIndex = 0;
+    const cover = el("div", "gcard-cover");
+    coverInto(cover, g, true);
+    cover.appendChild(el("span", `gcard-mode is-${g.mode === "open" ? "open" : "invite"}`, modeText(g)));
+    const body = el("div", "gcard-body");
+    const who = el("div", "gcard-who");
+    const ownerName = el("span", "gcard-owner", g.owner);
+    if (ikaVerified.has(g.owner)) ownerName.appendChild(ikaVerified.badge());
+    who.append(head(g.owner, "gcard-head"), ownerName);
+    const packs = g.packs || [];
+    const stats = el("div", "gcard-stats");
+    stats.append(el("span", "", followers(g.memberCount)), el("span", "", instancesText(packs.length)));
+    body.append(who, el("div", "gcard-name", g.name), stats);
+    if (g.desc) body.appendChild(el("div", "gcard-desc", g.desc));
+    if (packs.length) {
+      const icons = el("div", "gcard-packs");
+      for (const p of packs.slice(0, 5)) {
+        const i = packIcon(g, p, "gcard-pack");
+        i.title = p.name;
+        icons.appendChild(i);
+      }
+      body.appendChild(icons);
+    }
+    const foot = el("div", "gcard-foot");
+    if (role === "owner") foot.appendChild(el("span", "gcard-tag", "Tu grupo"));
+    else if (role === "member") foot.appendChild(el("span", "gcard-tag is-member", "Siguiendo"));
+    else if (canFollow(g)) foot.appendChild(button("Seguir", "btn-purple", () => follow(g)));
+    else foot.appendChild(el("span", "gcard-tag is-locked", "Necesitas su código"));
+    body.appendChild(foot);
+    card.append(cover, body);
+    const openIt = () => showDetail(g.id, card);
+    card.addEventListener("click", openIt);
+    card.addEventListener("contextmenu", (e) => ownerMenu(e, g));
+    card.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        openIt();
+      }
+    });
+    return card;
+  }
+
+  function createCard() {
+    const card = el("article", "gcard gcard-new");
+    card.tabIndex = 0;
+    card.innerHTML =
+      '<div class="gcard-new-plus"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></div><div class="gcard-new-title">Crear un grupo</div><div class="gcard-new-sub">Publica tus instancias para quien te siga</div>';
+    card.addEventListener("click", () => setView("create"));
+    card.addEventListener("keydown", (e) => e.key === "Enter" && setView("create"));
+    return card;
+  }
+
+  // A horizontal carousel: the wheel scrolls it sideways, the arrows a page at a time.
+  function fillCarousel(host, cards) {
+    let track = host.querySelector(".gcar-track");
+    if (!track) {
+      const prev = el("button", "gcar-arrow is-prev");
+      const next = el("button", "gcar-arrow is-next");
+      for (const [b, d] of [
+        [prev, "M15 18l-6-6 6-6"],
+        [next, "M9 18l6-6-6-6"],
+      ]) {
+        b.type = "button";
+        b.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${d}"/></svg>`;
+      }
+      track = el("div", "gcar-track");
+      host.append(prev, track, next);
+      const page = (dir) => track.scrollBy({ left: dir * Math.max(240, track.clientWidth * 0.8), behavior: "smooth" });
+      prev.addEventListener("click", () => page(-1));
+      next.addEventListener("click", () => page(1));
+      track.addEventListener(
+        "wheel",
+        (e) => {
+          if (Math.abs(e.deltaY) <= Math.abs(e.deltaX) || track.scrollWidth <= track.clientWidth) return;
+          e.preventDefault();
+          track.scrollBy({ left: e.deltaY, behavior: "auto" });
+        },
+        { passive: false }
+      );
+      const arrows = () => {
+        prev.classList.toggle("is-hidden", track.scrollLeft < 4);
+        next.classList.toggle("is-hidden", track.scrollLeft + track.clientWidth > track.scrollWidth - 4);
+      };
+      track.addEventListener("scroll", arrows, { passive: true });
+      host._arrows = arrows;
+    }
+    const same = cards.length === track.children.length && cards.every((c, i) => track.children[i] === c);
+    if (!same) {
+      const before = new Set(track.children);
+      const left = track.scrollLeft;
+      track.replaceChildren(...cards);
+      track.scrollLeft = left;
+      // only cards that weren't there come in
+      animateIn(cards.filter((c) => !before.has(c)), { y: 22, scale: 0.95, stagger: 55 });
+    }
+    requestAnimationFrame(() => host._arrows?.());
+  }
+
+  // A group's page: its cover, creator and instances; the creator manages it from here.
+  let detailSig = "";
+  function detail(g) {
+    const role = roleOf(g);
+    const full = G.groups.get(g.id) || g;
+    const pane = $("groups-detail");
+    // the creator previewing it as a follower: everything as members see it
+    const preview = role === "owner" && G.preview === g.id;
+    const shown = preview ? "member" : role;
+    const sig = JSON.stringify([full, role, preview, canFollow(full), [...G.tasks.entries()].map(([k, t]) => [k, t.label]), ikaVerified.has(full.owner), serviceUrl, [...G.packChanged.entries()]]);
+    if (sig === detailSig && pane.childElementCount) return;
+    detailSig = sig;
+    // only coming into the page animates; updates while on it (progress, a new version) just
+    // repaint
+    const entering = G.detailEntering;
+    G.detailEntering = false;
+    const hero = el("div", "gdetail-hero");
+    coverInto(hero, full, false);
+    const heroText = el("div", "gdetail-hero-text");
+    const title = el("div", "gdetail-title", full.name);
+    const meta = el("div", "gdetail-meta", "de ");
+    const ownerName = el("strong", "gdetail-owner", full.owner);
+    if (ikaVerified.has(full.owner)) ownerName.appendChild(ikaVerified.badge());
+    meta.append(ownerName, ` · ${modeText(full)} · ${followers(full.memberCount)}`);
+    heroText.append(title, meta);
+    const heroActions = el("div", "gdetail-hero-actions");
+    if (preview) {
+      const fake = button("Dejar de seguir", "btn-secondary", () => {});
+      fake.disabled = true;
+      fake.title = "Así lo ven tus seguidores (vista previa)";
+      heroActions.appendChild(fake);
+    } else if (role === "member") heroActions.appendChild(button("Dejar de seguir", "btn-secondary", () => act(g.id, "leave")));
+    else if (role === "none" && canFollow(full)) heroActions.appendChild(button("Seguir grupo", "btn-purple", () => follow(full)));
+    hero.append(head(full.owner, "gdetail-head"), heroText, heroActions);
+    hero.addEventListener("contextmenu", (e) => ownerMenu(e, full));
+
+    const nodes = [hero];
+    if (full.desc) nodes.push(el("p", "gdetail-desc", full.desc));
+
+    if (shown === "owner") nodes.push(ownerTools(full));
+
+    const packs = full.packs || [];
+    const listTitle = el("div", "gdetail-section", shown === "owner" ? "Instancias publicadas " : "Instancias ");
+    listTitle.appendChild(el("span", "gdetail-section-count", String(packs.length)));
+    const list = el("ul", "gpack-list");
+    for (const p of packs) {
+      const task = p.pid ? G.tasks.get(`${g.id}:${p.pid}`) : null;
+      if (shown === "owner") {
+        const src = sourceOf(full, p);
+        const state = G.packChanged.get(`${g.id}:${p.pid}`); // true / false / null (unknown)
+        const main = task
+          ? []
+          : state === false
+            ? [el("span", "group-uptodate", "Al día")]
+            : [button(state ? "Publicar cambios" : "Publicar versión nueva", state ? "gpack-install" : "btn-purple", () => publish(full, src, p), !src)];
+        const row = packRow(
+          p,
+          [...main, button("Retirar", "btn-secondary", () => act(g.id, "unpublish", { pid: p.pid }), !!task)],
+          task ? task.label : state === true ? "Tiene cambios sin publicar" : state === false ? `Publicada · ${packLine(p)}` : "",
+          full,
+          (kind, data) => setArt(full, p.pid, kind, data)
+        );
+        if (src && !task) row.title = `La versión nueva se publicará desde «${src.name}»`;
+        list.appendChild(row);
+      } else if (shown === "member") {
+        const copy = installedCopy(g.id, p.pid);
+        const buttons = task
+          ? []
+          : copy && copy.ver === p.ver
+            ? [el("span", "group-installed", "Instalada")]
+            : [button(copy ? "Actualizar" : "Instalar", "gpack-install", () => install(full, p))];
+        const onlyChanges = copy && p.delta && p.delta.from === copy.ver;
+        const status = task ? task.label : copy && copy.ver !== p.ver ? `Versión nueva · ${onlyChanges ? `solo ${mb(p.delta.zipSize)} de cambios` : packLine(p)}` : "";
+        list.appendChild(packRow(p, buttons, status, full));
+      } else {
+        list.appendChild(packRow(p, [el("span", "gpack-hint", "Síguelo para instalarla")], "", full));
+      }
+    }
+    // removed by the service after two months without opening Ika: one click puts them back
+    if (shown === "owner") {
+      for (const r of Array.isArray(full.retired) ? full.retired : []) {
+        const task = G.tasks.get(`${g.id}:${r.pid}`);
+        const src = sourceOf(full, r);
+        list.appendChild(
+          packRow({ name: r.name }, [button("Publicar de nuevo", "btn-purple", () => publish(full, src, { pid: r.pid, ver: null }), !!task || !src)], task ? task.label : "Retirada: pasaste 2 meses sin abrir Ika")
+        );
+      }
+      const newTask = G.tasks.get(`${g.id}:new`);
+      if (newTask) list.appendChild(packRow({ name: "Publicando…" }, [], newTask.label));
+    }
+    if (!list.children.length) {
+      const empty =
+        shown === "owner"
+          ? "Aún no has publicado ninguna instancia. Pulsa «Elegir instancia» y tus seguidores podrán instalarla."
+          : full.retired
+            ? "Su creador lleva 2 meses sin abrir Ika y sus instancias se retiraron. Las que ya instalaste siguen en tu launcher."
+            : "Todavía no ha publicado ninguna instancia.";
+      list.appendChild(el("li", "gpack-empty", empty));
+    }
+    nodes.push(listTitle, list);
+    pane.replaceChildren(...nodes);
+    // the page comes in: the cover settles, the rest rises after it
+    if (!entering) return;
+    if (!G.flying) {
+      hero.animate(
+        [
+          { opacity: 0, transform: "scale(0.975) translateY(8px)" },
+          { opacity: 1, transform: "none" },
+        ],
+        { duration: 560, easing: "cubic-bezier(0.16, 1, 0.3, 1)" }
+      );
+    }
+    const later = G.flying ? 220 : 0;
+    animateIn(nodes.slice(1), { y: 18, scale: 1, stagger: 60, delay: 90 + later });
+    animateIn(list.children, { y: 22, stagger: 60, delay: 180 + later });
+  }
+
+  // The creator's controls: who can follow it, its code, deleting it.
+  function ownerTools(g) {
+    const tools = el("div", "gdetail-tools");
+    const mode = el("div", "gdetail-mode");
+    for (const [value, label] of [
+      ["open", "Abierto"],
+      ["invite", "Selecto"],
+    ]) {
+      const b = el("button", `gdetail-mode-opt${(G.pendingMode ?? g.mode) === value ? " is-active" : ""}`, label);
+      b.type = "button";
+      b.title = value === "open" ? "Aparece en Descubrir y cualquiera puede seguirlo" : "Solo con su código de invitación";
+      b.addEventListener("click", () => {
+        if ((G.pendingMode ?? g.mode) === value) return;
+        // the pill glides at once; the service hears it when Guardar is pressed
+        G.pendingMode = value === g.mode ? null : value;
+        for (const o of mode.children) o.classList.toggle("is-active", o === b);
+        glideThumb(mode);
+      });
+      mode.appendChild(b);
+    }
+    tools.appendChild(mode);
+    requestAnimationFrame(() => glideThumb(mode, true));
+    // at the far right (after the code): previewing it as followers see it (the note at the top
+    // of the window leaves it), then adding an instance
+    const right = el("div", "gdetail-tools-right");
+    const eye = button("Previsualizar", "btn-secondary gdetail-preview-btn", () => {
+      G.preview = g.id;
+      render();
+    });
+    eye.insertAdjacentHTML("afterbegin", '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>');
+    right.appendChild(eye);
+    const add = addInstanceButton(g);
+    if (add) right.appendChild(add);
+    if (g.mode === "invite") {
+      const codeRow = el("div", "group-code-row");
+      codeRow.append(el("span", "group-sub", "Código:"), el("code", "group-code", g.code || ""));
+      codeRow.append(
+        button("Copiar", "btn-secondary", () => {
+          navigator.clipboard?.writeText(g.code || "").then(() => showToast("Código copiado."), () => {});
+        }),
+        button("Nuevo código", "btn-secondary", () => act(g.id, "newcode"))
+      );
+      tools.appendChild(codeRow);
+    }
+    tools.appendChild(right);
+    return tools;
+  }
+
+  // Deleting a group (from its card's right-click menu), after asking.
+  async function confirmDelete(g) {
+    const ok = await showConfirmDialog({
+      title: "ELIMINAR GRUPO",
+      message: `¿Seguro que quieres eliminar el grupo «${g.name}»?`,
+      itemTitle: g.name,
+      itemDesc: "Sus seguidores dejarán de verlo. Las instancias que ya instalaron se quedan en su launcher.",
+      confirmText: "Eliminar grupo",
+      warnText: "Se borran del servicio las instancias publicadas en él.",
+    });
+    if (ok && (await act(g.id, "delete")) && G.view === "detail") setView("mine");
+  }
+  function ownerMenu(e, g) {
+    if (roleOf(g) !== "owner") return;
+    e.preventDefault();
+    showContextMenu(e.clientX, e.clientY, [
+      {
+        label: "Eliminar grupo",
+        danger: true,
+        icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/></svg>',
+        onClick: () => confirmDelete(g),
+      },
+    ]);
+  }
+
+  // Adding another instance to the group: chosen in the picker (the ones already published in
+  // it from this PC are shown taken).
+  function addInstanceButton(g) {
+    if ((g.packs || []).length >= MAX_PACKS || G.tasks.has(`${g.id}:new`)) return null;
+    const published = Object.entries(readMap(PUBLISHED_KEY))
+      .filter(([k]) => k.startsWith(`${g.id}:`) && (g.packs || []).some((p) => k === `${g.id}:${p.pid}`))
+      .map(([, path]) => path);
+    const add = button("Añadir instancia", "gdetail-add", async () => {
+      const inst = await ikaInstancePicker.open({
+        title: `PUBLICAR EN «${g.name.toUpperCase()}»`,
+        okText: "Publicar",
+        taken: published,
+        initial: currentHomeInstance()?.path,
+      });
+      if (inst) publish(g, inst);
+    });
+    add.insertAdjacentHTML(
+      "afterbegin",
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>'
+    );
+    return add;
+  }
+
+  function setView(view, id = null) {
+    if (["discover", "following", "mine"].includes(view)) G.lastTab = view;
+    if (view === "detail") {
+      G.detailEntering = true;
+      checkPackChanges(G.groups.get(id));
+    }
+    if (view !== "detail") G.preview = null;
+    if (view !== "detail" || id !== G.detailId) G.pendingMode = null;
+    G.view = view;
+    G.detailId = id;
+    showError("");
+    render();
+    const pane = modal?.querySelector(`.groups-pane[data-pane="${view}"]`);
+    if (pane) pane.scrollTop = 0;
+    if (view === "create") setTimeout(() => $("input-group-name")?.focus(), 30);
+  }
+
+  // ---------------------------------------------------------------------------------------
+  // Into a group and back: the card's cover flies to become the page's cover (and back to its
+  // card), the creator's head with it, while the rest of the page rises in. A copy of each
+  // flies over, inside the window; the real ones show when it lands.
+  // ---------------------------------------------------------------------------------------
+  const FLY_MS = 560;
+  const FLY_EASE = "cubic-bezier(0.22, 1, 0.36, 1)";
+  const boxEl = modal?.querySelector(".groups-modal-box");
+  function flyCopy(fromNode, fromRect, toRect, { radius = [16, 16], cover = true, onLand } = {}) {
+    if (!boxEl || !fromRect || !toRect || !toRect.width) return onLand?.();
+    const box = boxEl.getBoundingClientRect();
+    const ghost = document.createElement("div");
+    ghost.className = cover ? "gflip gflip-cover" : "gflip";
+    if (cover) ghost.style.backgroundImage = getComputedStyle(fromNode).backgroundImage;
+    else ghost.appendChild(fromNode.cloneNode(true));
+    boxEl.appendChild(ghost);
+    const at = (r, rad) => ({ left: `${r.left - box.left}px`, top: `${r.top - box.top}px`, width: `${r.width}px`, height: `${r.height}px`, borderRadius: `${rad}px` });
+    const anim = ghost.animate([at(fromRect, radius[0]), at(toRect, radius[1])], { duration: FLY_MS, easing: FLY_EASE, fill: "forwards" });
+    anim.finished.then(() => {
+      onLand?.();
+      ghost.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 180, easing: "ease-out", fill: "forwards" }).finished.then(() => ghost.remove());
+    });
+  }
+
+  function showDetail(id, fromCard = null) {
+    const from = fromCard && {
+      cover: fromCard.querySelector(".gcard-cover"),
+      head: fromCard.querySelector(".gcard-head"),
+    };
+    const rects = from && { cover: from.cover.getBoundingClientRect(), head: from.head?.getBoundingClientRect() };
+    G.flying = !!from;
+    setView("detail", id);
+    G.flying = false;
+    if (!from) return;
+    const hero = $("groups-detail").querySelector(".gdetail-hero");
+    const heroHead = hero?.querySelector(".gdetail-head");
+    if (!hero) return;
+    // the page's own cover and head wait under the flying copies
+    hero.classList.add("is-landing");
+    if (heroHead) heroHead.style.visibility = "hidden";
+    flyCopy(from.cover, rects.cover, hero.getBoundingClientRect(), {
+      onLand: () => {
+        hero.classList.remove("is-landing");
+        hero.animate([{ filter: "brightness(1.25)" }, { filter: "none" }], { duration: 420, easing: "ease-out" });
+      },
+    });
+    if (from.head && heroHead) {
+      flyCopy(from.head, rects.head, heroHead.getBoundingClientRect(), { cover: false, radius: [11, 14], onLand: () => (heroHead.style.visibility = "") });
+    }
+    // the title and its line come in from where the card had them
+    const text = hero.querySelector(".gdetail-hero-text");
+    text?.animate(
+      [
+        { opacity: 0, transform: "translateY(14px)" },
+        { opacity: 1, transform: "none" },
+      ],
+      { duration: 480, delay: FLY_MS * 0.55, easing: FLY_EASE, fill: "backwards" }
+    );
+  }
+
+  // Back from a group to its tab: the page's cover flies back into its card.
+  function leaveDetail() {
+    const id = G.detailId;
+    const hero = G.view === "detail" ? $("groups-detail").querySelector(".gdetail-hero") : null;
+    const heroHead = hero?.querySelector(".gdetail-head");
+    const rects = hero && { cover: hero.getBoundingClientRect(), head: heroHead?.getBoundingClientRect() };
+    const heroBg = hero && getComputedStyle(hero).backgroundImage;
+    setView(G.lastTab);
+    const card = id && cardCache.get(`${G.view}:${id}`)?.node;
+    if (!hero || !card?.isConnected) return;
+    const cover = card.querySelector(".gcard-cover");
+    const head = card.querySelector(".gcard-head");
+    // the card is scrolled into view first, so the cover has somewhere to land
+    card.scrollIntoView({ block: "nearest", inline: "nearest" });
+    const target = cover.getBoundingClientRect();
+    const fake = document.createElement("div");
+    fake.style.backgroundImage = heroBg;
+    document.body.appendChild(fake);
+    cover.style.opacity = "0";
+    flyCopy(fake, rects.cover, target, { onLand: () => (cover.style.opacity = "") });
+    fake.remove();
+    if (head && heroHead) {
+      head.style.visibility = "hidden";
+      flyCopy(heroHead, rects.head, head.getBoundingClientRect(), { cover: false, radius: [14, 11], onLand: () => (head.style.visibility = "") });
+    }
+    // the other cards settle around it
+    card.parentElement && animateIn([...card.parentElement.children].filter((c) => c !== card), { y: 10, scale: 0.96, stagger: 35 });
+    card.querySelector(".gcard-body")?.animate(
+      [
+        { opacity: 0, transform: "translateY(10px)" },
+        { opacity: 1, transform: "none" },
+      ],
+      { duration: 420, delay: FLY_MS * 0.5, easing: FLY_EASE, fill: "backwards" }
+    );
+  }
+
+  function render() {
+    if (!modal || modal.classList.contains("hidden")) return;
+
+    const mine = lower(me());
+    const groups = [...G.groups.values()];
+    const owned = groups.filter((g) => g.owner === mine);
+    const joined = groups.filter((g) => g.owner !== mine);
+
+    for (const tab of modal.querySelectorAll(".groups-tab")) {
+      tab.classList.toggle("is-active", tab.dataset.tab === (G.view === "detail" || G.view === "create" ? G.lastTab : G.view));
+    }
+    glideThumb(modal.querySelector(".groups-tabs"));
+    for (const pane of modal.querySelectorAll(".groups-pane")) {
+      const show = pane.dataset.pane === G.view;
+      const was = !pane.classList.contains("hidden");
+      pane.classList.toggle("hidden", !show);
+      // a pane that comes into view glides in from the side of its tab
+      if (show && !was && pane.dataset.pane !== "detail") {
+        const order = ["discover", "following", "mine"];
+        const dir = Math.sign(order.indexOf(G.view) - order.indexOf(G.prevPane ?? G.view)) || 0;
+        pane.animate(
+          [
+            { opacity: 0, transform: `translateX(${dir * 26}px)` },
+            { opacity: 1, transform: "none" },
+          ],
+          { duration: 380, easing: "cubic-bezier(0.16, 1, 0.3, 1)" }
+        );
+      }
+    }
+    if (["discover", "following", "mine"].includes(G.view)) G.prevPane = G.view;
+    $("groups-footer").classList.toggle("hidden", G.view !== "detail" && G.view !== "create");
+    // on the creator's own page: Cancelar and Guardar instead of Volver
+    const editing = G.view === "detail" && G.preview !== G.detailId && roleOf(G.groups.get(G.detailId) || {}) === "owner";
+    $("btn-groups-back").classList.toggle("hidden", editing);
+    $("btn-groups-cancel").classList.toggle("hidden", !editing);
+    $("btn-groups-save").classList.toggle("hidden", !editing);
+    $("groups-preview-note").classList.toggle("hidden", !(G.view === "detail" && G.preview && G.preview === G.detailId));
+    $("groups-following-count").textContent = joined.length ? String(joined.length) : "";
+    $("groups-mine-count").textContent = owned.length ? String(owned.length) : "";
+
+    if (G.view === "discover") {
+      fillCarousel($("groups-discover"), G.found.map(cardFor));
+      $("groups-discover-lead").textContent = G.query ? `Resultados para «${G.query}»` : "Los grupos más seguidos";
+      const empty = $("groups-discover-empty");
+      const text = G.loading && !G.found.length ? "Buscando grupos…" : G.discoverError ? G.discoverError : G.found.length ? "" : G.query ? `No hay grupos abiertos que coincidan con «${G.query}». Si es selecto, entra con su código.` : "Aún no hay grupos abiertos. ¡Crea el primero en Mis grupos!";
+      empty.textContent = text;
+      empty.classList.toggle("hidden", !text);
+    } else if (G.view === "following") {
+      fillCarousel($("groups-joined"), joined.map(cardFor));
+      $("groups-joined-empty").classList.toggle("hidden", joined.length > 0);
+    } else if (G.view === "mine") {
+      fillCarousel($("groups-owned"), [...owned.map(cardFor), ...(owned.length < MAX_OWNED ? [(newCard ||= createCard())] : [])]);
+    } else if (G.view === "detail") {
+      const g = groupById(G.detailId);
+      if (!g) return setView(G.lastTab);
+      detail(g);
+    }
+    requestAnimationFrame(() => fitPixelHeads(modal));
+  }
+
+  async function open() {
+    if (!modal) return;
+    if (!/^[A-Za-z0-9_]{2,16}$/.test(me())) {
+      showToast("Inicia sesión con una cuenta para usar Grupos.");
+      return;
+    }
+    modal.classList.remove("hidden");
+    G.view = G.view === "create" ? G.lastTab : G.view;
+    showError("");
+    await serviceReady;
+    render();
+    // no profile yet: created here, inside Grupos, before anything else
+    if (!(await window.ikaIdentity.gate(modal.querySelector(".groups-modal-box"), me()))) return;
+    refresh();
+    discover($("input-groups-find").value);
+  }
+
+  function close() {
+    modal?.classList.add("hidden");
+    G.publishPick.clear();
+  }
+
+  if (modal) {
+    G.view = "discover";
+    G.lastTab = "discover";
+    G.query = "";
+    $("btn-close-groups").addEventListener("click", close);
+    let downOnBackdrop = false;
+    modal.addEventListener("mousedown", (e) => (downOnBackdrop = e.target === modal));
+    modal.addEventListener("click", (e) => {
+      if (e.target === modal && downOnBackdrop) close();
+    });
+    window.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" || modal.classList.contains("hidden")) return;
+      // Esc steps back from a group's page first
+      if (G.view === "detail") leaveDetail();
+      else if (G.view === "create") setView(G.lastTab);
+      else close();
+    });
+    for (const tab of modal.querySelectorAll(".groups-tab")) tab.addEventListener("click", () => setView(tab.dataset.tab));
+    $("btn-groups-go-discover").addEventListener("click", () => setView("discover"));
+    $("btn-groups-back").addEventListener("click", () => (G.view === "detail" ? leaveDetail() : setView(G.lastTab)));
+    $("btn-groups-cancel").addEventListener("click", () => {
+      G.pendingMode = null;
+      leaveDetail();
+    });
+    $("btn-groups-save").addEventListener("click", async () => {
+      const g = G.groups.get(G.detailId);
+      const btn = $("btn-groups-save");
+      if (g && G.pendingMode && G.pendingMode !== g.mode) {
+        btn.disabled = true;
+        const ok = await act(g.id, "update", { mode: G.pendingMode });
+        btn.disabled = false;
+        if (!ok) return;
+        showToast("Cambios guardados.");
+      }
+      G.pendingMode = null;
+      if (G.view === "detail") leaveDetail();
+    });
+    $("groups-preview-note").addEventListener("click", () => {
+      G.preview = null;
+      render();
+    });
+    $("groups-find-form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      clearTimeout(findTimer);
+      discover($("input-groups-find").value);
+    });
+    $("groups-code-form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      enterCode($("input-groups-code").value);
+    });
+    $("input-groups-code").addEventListener("input", (e) => {
+      const v = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "");
+      if (v !== e.target.value) e.target.value = v;
+    });
+    // results follow what is typed, once typing pauses
+    let findTimer = 0;
+    $("input-groups-find").addEventListener("input", (e) => {
+      clearTimeout(findTimer);
+      findTimer = setTimeout(() => discover(e.target.value), 350);
+    });
+    let createMode = "open";
+    for (const opt of modal.querySelectorAll(".groups-mode-opt")) {
+      opt.addEventListener("click", () => {
+        createMode = opt.dataset.mode;
+        for (const o of modal.querySelectorAll(".groups-mode-opt")) o.classList.toggle("is-active", o === opt);
+      });
+    }
+    $("groups-create-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const name = $("input-group-name").value.trim();
+      if (!name) return showError("Ponle un nombre al grupo.");
+      const slow = ikaThrottle.check([["group-create", 3, 10 * 60 * 1000]]);
+      if (slow) return showError(slow);
+      try {
+        const g = await call("POST", "/groups/create?", { name, desc: $("input-group-desc").value.trim(), mode: createMode });
+        $("input-group-name").value = "";
+        $("input-group-desc").value = "";
+        onGroup(g);
+        G.lastTab = "mine";
+        showDetail(g.id);
+        if (g.mode === "open") discover(G.query);
+      } catch (err) {
+        showError(String(err));
+      }
+    });
+  }
+
+  return { open, setGroups, onGroup, onGone, render, refresh };
+})();
+window.ikaGroups = ikaGroups;
+
+// =========================================================
+// PROFILE COVER on the service: the cover of Preferencias is what others see on your groups.
+// Sent when it changes (or the account does), never more than that.
+// =========================================================
+(function initProfileCoverSync() {
+  const SYNCED_KEY = "ika_cover_synced"; // "account|fingerprint" of the cover the service has
+  const account = () => (state.activeUser?.username || "").trim().toLowerCase();
+  // a cheap fingerprint of the stored data URL (it is replaced whole when it changes)
+  const fingerprint = (text) => {
+    if (!text) return "none";
+    let h = 2166136261;
+    for (let i = 0; i < text.length; i += 7) h = Math.imul(h ^ text.charCodeAt(i), 16777619);
+    return `${text.length}:${(h >>> 0).toString(36)}`;
+  };
+  // each exactly the shape and size it is shown in: a card, and the top of a group's page
+  const SIZES = { small: [360, 172], large: [1000, 200] };
+  let running = false;
+  async function sync() {
+    const name = account();
+    if (running || !/^[a-z0-9_]{2,16}$/.test(name) || !navigator.onLine) return;
+    const cover = localStorage.getItem("ika_custom_cover_bg") || "";
+    const want = `${name}|${fingerprint(cover)}`;
+    if (localStorage.getItem(SYNCED_KEY) === want) return;
+    running = true;
+    try {
+      const body = {};
+      if (cover) {
+        for (const [size, [w, h]] of Object.entries(SIZES)) body[size] = await serviceImage(name, cover, w, h, 55);
+      }
+      await invoke("group_call", { username: name, method: "POST", path: "/groups/cover?", body });
+      window.ikaGroups?.refresh();
+      localStorage.setItem(SYNCED_KEY, want);
+    } catch {
+      // the next change or start tries again
+    } finally {
+      running = false;
+    }
+  }
+  window.addEventListener("ika-cover-changed", () => setTimeout(sync, 500));
+  setTimeout(sync, 8000);
+  // an account switch brings its own cover (a local check, no request)
+  let lastAccount = "";
+  setInterval(() => {
+    if (account() !== lastAccount) (lastAccount = account()), sync();
+  }, 60000);
+})();
 
 // =========================================================
 // DOCK BUTTONS: chromatic glitch on press (same feel as loquesuenaspotify's elegantChromaticPulse)
@@ -30932,530 +37160,213 @@ window.ikaShare = ikaShare;
 })();
 
 // =========================================================
-// THEME MANAGER (Full Cyber Spectrum & Special Aurora)
+// Themes (src/theme/palette.js): a theme is a class on <body> that gives every colour of the
+// launcher's identity its value in that theme (generated when building, see
+// vite-plugin-ika-themes.js). Code that draws in canvas / WebGL hears "ika-theme".
 // =========================================================
 (() => {
   const THEME_KEY = "ika_theme_color";
-  const gradCache = {};
-
-  function cacheGradient(id) {
-    const el = document.getElementById(id);
-    if (el && !gradCache[id]) {
-      gradCache[id] = el.innerHTML;
-    }
-  }
-
-  function setGradientHTML(id, customHTML) {
-    const el = document.getElementById(id);
-    if (!el) return;
-    cacheGradient(id);
-    if (customHTML) {
-      el.innerHTML = customHTML;
-    } else if (gradCache[id]) {
-      el.innerHTML = gradCache[id];
-    }
-  }
-
-  const THEME_GRADIENTS = {
-    crimson: {
-      dockStroke: `
-        <stop offset="0%" stop-color="#8c1f2a" stop-opacity="0.0"/>
-        <stop offset="4.5%" stop-color="#ff2a4b" stop-opacity="0.85"/>
-        <stop offset="7%" stop-color="#c41432" stop-opacity="0.6"/>
-        <stop offset="12%" stop-color="#730e1f" stop-opacity="0.38"/>
-        <stop offset="35%" stop-color="#5a0b18" stop-opacity="0.45"/>
-        <stop offset="48%" stop-color="#a8132e" stop-opacity="0.7"/>
-        <stop offset="50%" stop-color="#ff3b5c" stop-opacity="0.85"/>
-        <stop offset="52%" stop-color="#a8132e" stop-opacity="0.7"/>
-        <stop offset="65%" stop-color="#5a0b18" stop-opacity="0.45"/>
-        <stop offset="88%" stop-color="#730e1f" stop-opacity="0.38"/>
-        <stop offset="93%" stop-color="#c41432" stop-opacity="0.6"/>
-        <stop offset="95.5%" stop-color="#ff2a4b" stop-opacity="0.85"/>
-        <stop offset="100%" stop-color="#8c1f2a" stop-opacity="0.0"/>
-      `,
-      jugarLinear: `
-        <stop offset="0%" stop-color="#ff4d64"/>
-        <stop offset="10%" stop-color="#f4374f"/>
-        <stop offset="25%" stop-color="#e6223b"/>
-        <stop offset="45%" stop-color="#d4142d"/>
-        <stop offset="68%" stop-color="#c00c24"/>
-        <stop offset="88%" stop-color="#b0061e"/>
-        <stop offset="100%" stop-color="#bd0922"/>
-      `,
-      jugarCenterBloom: `
-        <stop offset="0%" stop-color="#ff758a" stop-opacity="0.55"/>
-        <stop offset="35%" stop-color="#ff3b56" stop-opacity="0.38"/>
-        <stop offset="70%" stop-color="#d91833" stop-opacity="0.15"/>
-        <stop offset="100%" stop-color="#b0061e" stop-opacity="0.0"/>
-      `,
-      jugarTopSheen: `
-        <stop offset="0%" stop-color="#ffe8ed" stop-opacity="0.52"/>
-        <stop offset="12%" stop-color="#ff8a9c" stop-opacity="0.28"/>
-        <stop offset="30%" stop-color="#e6223b" stop-opacity="0.0"/>
-        <stop offset="90%" stop-color="#b0061e" stop-opacity="0.0"/>
-        <stop offset="100%" stop-color="#ff667e" stop-opacity="0.22"/>
-      `,
-      dockBgV: `
-        <stop offset="0%" stop-color="#120205"/>
-        <stop offset="55%" stop-color="#1a0409"/>
-        <stop offset="100%" stop-color="#28050e"/>
-      `,
-      dockBgH: `
-        <stop offset="0%" stop-color="#120205" stop-opacity="0.0"/>
-        <stop offset="24%" stop-color="#160307" stop-opacity="0.0"/>
-        <stop offset="30%" stop-color="#3d050f" stop-opacity="0.35"/>
-        <stop offset="38%" stop-color="#69091b" stop-opacity="0.75"/>
-        <stop offset="45%" stop-color="#990e28" stop-opacity="0.92"/>
-        <stop offset="50%" stop-color="#bd1433" stop-opacity="0.98"/>
-        <stop offset="55%" stop-color="#990e28" stop-opacity="0.92"/>
-        <stop offset="62%" stop-color="#69091b" stop-opacity="0.75"/>
-        <stop offset="70%" stop-color="#3d050f" stop-opacity="0.35"/>
-        <stop offset="76%" stop-color="#160307" stop-opacity="0.0"/>
-        <stop offset="100%" stop-color="#120205" stop-opacity="0.0"/>
-      `,
-      chassisCenterGlow: `
-        <stop offset="0%" stop-color="#ff2a4b" stop-opacity="0.75"/>
-        <stop offset="30%" stop-color="#cf1333" stop-opacity="0.60"/>
-        <stop offset="60%" stop-color="#800a1d" stop-opacity="0.38"/>
-        <stop offset="82%" stop-color="#450510" stop-opacity="0.18"/>
-        <stop offset="100%" stop-color="#140206" stop-opacity="0.0"/>
-      `,
-      btnSideBg: `
-        <stop offset="0%" stop-color="#140206"/>
-        <stop offset="100%" stop-color="#26040d"/>
-      `,
-      btnSideStroke: `
-        <stop offset="0%" stop-color="#ff3b56" stop-opacity="0.80"/>
-        <stop offset="100%" stop-color="#730a1c" stop-opacity="0.50"/>
-      `
-    },
-    pink: {
-      dockStroke: `
-        <stop offset="0%" stop-color="#8c1f60" stop-opacity="0.0"/>
-        <stop offset="4.5%" stop-color="#ff2a85" stop-opacity="0.85"/>
-        <stop offset="7%" stop-color="#c4146a" stop-opacity="0.6"/>
-        <stop offset="12%" stop-color="#730e3f" stop-opacity="0.38"/>
-        <stop offset="35%" stop-color="#5a0b32" stop-opacity="0.45"/>
-        <stop offset="48%" stop-color="#a8135e" stop-opacity="0.7"/>
-        <stop offset="50%" stop-color="#ff3b99" stop-opacity="0.85"/>
-        <stop offset="52%" stop-color="#a8135e" stop-opacity="0.7"/>
-        <stop offset="65%" stop-color="#5a0b32" stop-opacity="0.45"/>
-        <stop offset="88%" stop-color="#730e3f" stop-opacity="0.38"/>
-        <stop offset="93%" stop-color="#c4146a" stop-opacity="0.6"/>
-        <stop offset="95.5%" stop-color="#ff2a85" stop-opacity="0.85"/>
-        <stop offset="100%" stop-color="#8c1f60" stop-opacity="0.0"/>
-      `,
-      jugarLinear: `
-        <stop offset="0%" stop-color="#ff4da6"/>
-        <stop offset="10%" stop-color="#f43794"/>
-        <stop offset="25%" stop-color="#e62283"/>
-        <stop offset="45%" stop-color="#d41476"/>
-        <stop offset="68%" stop-color="#c00c69"/>
-        <stop offset="88%" stop-color="#b0065e"/>
-        <stop offset="100%" stop-color="#bd0966"/>
-      `,
-      jugarCenterBloom: `
-        <stop offset="0%" stop-color="#ff75b8" stop-opacity="0.55"/>
-        <stop offset="35%" stop-color="#ff3b99" stop-opacity="0.38"/>
-        <stop offset="70%" stop-color="#d9187a" stop-opacity="0.15"/>
-        <stop offset="100%" stop-color="#b0065e" stop-opacity="0.0"/>
-      `,
-      jugarTopSheen: `
-        <stop offset="0%" stop-color="#ffe8f4" stop-opacity="0.52"/>
-        <stop offset="12%" stop-color="#ff8ac4" stop-opacity="0.28"/>
-        <stop offset="30%" stop-color="#e62283" stop-opacity="0.0"/>
-        <stop offset="90%" stop-color="#b0065e" stop-opacity="0.0"/>
-        <stop offset="100%" stop-color="#ff66b0" stop-opacity="0.22"/>
-      `,
-      dockBgV: `
-        <stop offset="0%" stop-color="#12020e"/>
-        <stop offset="55%" stop-color="#1a0415"/>
-        <stop offset="100%" stop-color="#280521"/>
-      `,
-      dockBgH: `
-        <stop offset="0%" stop-color="#12020e" stop-opacity="0.0"/>
-        <stop offset="24%" stop-color="#160312" stop-opacity="0.0"/>
-        <stop offset="30%" stop-color="#3d052d" stop-opacity="0.35"/>
-        <stop offset="38%" stop-color="#69094e" stop-opacity="0.75"/>
-        <stop offset="45%" stop-color="#990e72" stop-opacity="0.92"/>
-        <stop offset="50%" stop-color="#bd148e" stop-opacity="0.98"/>
-        <stop offset="55%" stop-color="#990e72" stop-opacity="0.92"/>
-        <stop offset="62%" stop-color="#69094e" stop-opacity="0.75"/>
-        <stop offset="70%" stop-color="#3d052d" stop-opacity="0.35"/>
-        <stop offset="76%" stop-color="#160312" stop-opacity="0.0"/>
-        <stop offset="100%" stop-color="#12020e" stop-opacity="0.0"/>
-      `,
-      chassisCenterGlow: `
-        <stop offset="0%" stop-color="#ff2a85" stop-opacity="0.75"/>
-        <stop offset="30%" stop-color="#cf136c" stop-opacity="0.60"/>
-        <stop offset="60%" stop-color="#800a42" stop-opacity="0.38"/>
-        <stop offset="82%" stop-color="#450524" stop-opacity="0.18"/>
-        <stop offset="100%" stop-color="#14020b" stop-opacity="0.0"/>
-      `,
-      btnSideBg: `
-        <stop offset="0%" stop-color="#14020d"/>
-        <stop offset="100%" stop-color="#26041c"/>
-      `,
-      btnSideStroke: `
-        <stop offset="0%" stop-color="#ff3b99" stop-opacity="0.80"/>
-        <stop offset="100%" stop-color="#730a41" stop-opacity="0.50"/>
-      `
-    },
-    green: {
-      dockStroke: `
-        <stop offset="0%" stop-color="#0e6b37" stop-opacity="0.0"/>
-        <stop offset="4.5%" stop-color="#00ff88" stop-opacity="0.85"/>
-        <stop offset="7%" stop-color="#05c46b" stop-opacity="0.6"/>
-        <stop offset="12%" stop-color="#075e33" stop-opacity="0.38"/>
-        <stop offset="35%" stop-color="#064225" stop-opacity="0.45"/>
-        <stop offset="48%" stop-color="#088c4d" stop-opacity="0.7"/>
-        <stop offset="50%" stop-color="#10f089" stop-opacity="0.85"/>
-        <stop offset="52%" stop-color="#088c4d" stop-opacity="0.7"/>
-        <stop offset="65%" stop-color="#064225" stop-opacity="0.45"/>
-        <stop offset="88%" stop-color="#075e33" stop-opacity="0.38"/>
-        <stop offset="93%" stop-color="#05c46b" stop-opacity="0.6"/>
-        <stop offset="95.5%" stop-color="#00ff88" stop-opacity="0.85"/>
-        <stop offset="100%" stop-color="#0e6b37" stop-opacity="0.0"/>
-      `,
-      jugarLinear: `
-        <stop offset="0%" stop-color="#34d399"/>
-        <stop offset="10%" stop-color="#10b981"/>
-        <stop offset="25%" stop-color="#059669"/>
-        <stop offset="45%" stop-color="#047857"/>
-        <stop offset="68%" stop-color="#065f46"/>
-        <stop offset="88%" stop-color="#064e3b"/>
-        <stop offset="100%" stop-color="#047857"/>
-      `,
-      jugarCenterBloom: `
-        <stop offset="0%" stop-color="#6ee7b7" stop-opacity="0.55"/>
-        <stop offset="35%" stop-color="#10b981" stop-opacity="0.38"/>
-        <stop offset="70%" stop-color="#059669" stop-opacity="0.15"/>
-        <stop offset="100%" stop-color="#064e3b" stop-opacity="0.0"/>
-      `,
-      jugarTopSheen: `
-        <stop offset="0%" stop-color="#ecfdf5" stop-opacity="0.52"/>
-        <stop offset="12%" stop-color="#a7f3d0" stop-opacity="0.28"/>
-        <stop offset="30%" stop-color="#059669" stop-opacity="0.0"/>
-        <stop offset="90%" stop-color="#064e3b" stop-opacity="0.0"/>
-        <stop offset="100%" stop-color="#34d399" stop-opacity="0.22"/>
-      `,
-      dockBgV: `
-        <stop offset="0%" stop-color="#021208"/>
-        <stop offset="55%" stop-color="#031a0c"/>
-        <stop offset="100%" stop-color="#052814"/>
-      `,
-      dockBgH: `
-        <stop offset="0%" stop-color="#021208" stop-opacity="0.0"/>
-        <stop offset="24%" stop-color="#03160b" stop-opacity="0.0"/>
-        <stop offset="30%" stop-color="#053d1d" stop-opacity="0.35"/>
-        <stop offset="38%" stop-color="#096932" stop-opacity="0.75"/>
-        <stop offset="45%" stop-color="#0e9949" stop-opacity="0.92"/>
-        <stop offset="50%" stop-color="#14bd5c" stop-opacity="0.98"/>
-        <stop offset="55%" stop-color="#0e9949" stop-opacity="0.92"/>
-        <stop offset="62%" stop-color="#096932" stop-opacity="0.75"/>
-        <stop offset="70%" stop-color="#053d1d" stop-opacity="0.35"/>
-        <stop offset="76%" stop-color="#03160b" stop-opacity="0.0"/>
-        <stop offset="100%" stop-color="#021208" stop-opacity="0.0"/>
-      `,
-      chassisCenterGlow: `
-        <stop offset="0%" stop-color="#00ff88" stop-opacity="0.75"/>
-        <stop offset="30%" stop-color="#05c46b" stop-opacity="0.60"/>
-        <stop offset="60%" stop-color="#067841" stop-opacity="0.38"/>
-        <stop offset="82%" stop-color="#04381e" stop-opacity="0.18"/>
-        <stop offset="100%" stop-color="#021208" stop-opacity="0.0"/>
-      `,
-      btnSideBg: `
-        <stop offset="0%" stop-color="#02140a"/>
-        <stop offset="100%" stop-color="#042614"/>
-      `,
-      btnSideStroke: `
-        <stop offset="0%" stop-color="#10b981" stop-opacity="0.80"/>
-        <stop offset="100%" stop-color="#075e33" stop-opacity="0.50"/>
-      `
-    },
-    cyan: {
-      dockStroke: `
-        <stop offset="0%" stop-color="#0e5473" stop-opacity="0.0"/>
-        <stop offset="4.5%" stop-color="#00d2ff" stop-opacity="0.85"/>
-        <stop offset="7%" stop-color="#0ea5e9" stop-opacity="0.6"/>
-        <stop offset="12%" stop-color="#0369a1" stop-opacity="0.38"/>
-        <stop offset="35%" stop-color="#073b5c" stop-opacity="0.45"/>
-        <stop offset="48%" stop-color="#0284c7" stop-opacity="0.7"/>
-        <stop offset="50%" stop-color="#38bdf8" stop-opacity="0.85"/>
-        <stop offset="52%" stop-color="#0284c7" stop-opacity="0.7"/>
-        <stop offset="65%" stop-color="#073b5c" stop-opacity="0.45"/>
-        <stop offset="88%" stop-color="#0369a1" stop-opacity="0.38"/>
-        <stop offset="93%" stop-color="#0ea5e9" stop-opacity="0.6"/>
-        <stop offset="95.5%" stop-color="#00d2ff" stop-opacity="0.85"/>
-        <stop offset="100%" stop-color="#0e5473" stop-opacity="0.0"/>
-      `,
-      jugarLinear: `
-        <stop offset="0%" stop-color="#38bdf8"/>
-        <stop offset="10%" stop-color="#0ea5e9"/>
-        <stop offset="25%" stop-color="#0284c7"/>
-        <stop offset="45%" stop-color="#0369a1"/>
-        <stop offset="68%" stop-color="#075985"/>
-        <stop offset="88%" stop-color="#0c4a6e"/>
-        <stop offset="100%" stop-color="#0369a1"/>
-      `,
-      jugarCenterBloom: `
-        <stop offset="0%" stop-color="#7dd3fc" stop-opacity="0.55"/>
-        <stop offset="35%" stop-color="#38bdf8" stop-opacity="0.38"/>
-        <stop offset="70%" stop-color="#0284c7" stop-opacity="0.15"/>
-        <stop offset="100%" stop-color="#0c4a6e" stop-opacity="0.0"/>
-      `,
-      jugarTopSheen: `
-        <stop offset="0%" stop-color="#f0f9ff" stop-opacity="0.52"/>
-        <stop offset="12%" stop-color="#bae6fd" stop-opacity="0.28"/>
-        <stop offset="30%" stop-color="#0284c7" stop-opacity="0.0"/>
-        <stop offset="90%" stop-color="#0c4a6e" stop-opacity="0.0"/>
-        <stop offset="100%" stop-color="#38bdf8" stop-opacity="0.22"/>
-      `,
-      dockBgV: `
-        <stop offset="0%" stop-color="#020e14"/>
-        <stop offset="55%" stop-color="#031621"/>
-        <stop offset="100%" stop-color="#052133"/>
-      `,
-      dockBgH: `
-        <stop offset="0%" stop-color="#020e14" stop-opacity="0.0"/>
-        <stop offset="24%" stop-color="#03141f" stop-opacity="0.0"/>
-        <stop offset="30%" stop-color="#06324d" stop-opacity="0.35"/>
-        <stop offset="38%" stop-color="#095682" stop-opacity="0.75"/>
-        <stop offset="45%" stop-color="#0c7cb8" stop-opacity="0.92"/>
-        <stop offset="50%" stop-color="#0ea5e9" stop-opacity="0.98"/>
-        <stop offset="55%" stop-color="#0c7cb8" stop-opacity="0.92"/>
-        <stop offset="62%" stop-color="#095682" stop-opacity="0.75"/>
-        <stop offset="70%" stop-color="#06324d" stop-opacity="0.35"/>
-        <stop offset="76%" stop-color="#03141f" stop-opacity="0.0"/>
-        <stop offset="100%" stop-color="#020e14" stop-opacity="0.0"/>
-      `,
-      chassisCenterGlow: `
-        <stop offset="0%" stop-color="#00d2ff" stop-opacity="0.75"/>
-        <stop offset="30%" stop-color="#0ea5e9" stop-opacity="0.60"/>
-        <stop offset="60%" stop-color="#0284c7" stop-opacity="0.38"/>
-        <stop offset="82%" stop-color="#073b5c" stop-opacity="0.18"/>
-        <stop offset="100%" stop-color="#020e14" stop-opacity="0.0"/>
-      `,
-      btnSideBg: `
-        <stop offset="0%" stop-color="#021018"/>
-        <stop offset="100%" stop-color="#042030"/>
-      `,
-      btnSideStroke: `
-        <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.80"/>
-        <stop offset="100%" stop-color="#0369a1" stop-opacity="0.50"/>
-      `
-    },
-    orange: {
-      dockStroke: `
-        <stop offset="0%" stop-color="#8c440e" stop-opacity="0.0"/>
-        <stop offset="4.5%" stop-color="#ff7b00" stop-opacity="0.85"/>
-        <stop offset="7%" stop-color="#ea580c" stop-opacity="0.6"/>
-        <stop offset="12%" stop-color="#733207" stop-opacity="0.38"/>
-        <stop offset="35%" stop-color="#5a2705" stop-opacity="0.45"/>
-        <stop offset="48%" stop-color="#a8490a" stop-opacity="0.7"/>
-        <stop offset="50%" stop-color="#ff9500" stop-opacity="0.85"/>
-        <stop offset="52%" stop-color="#a8490a" stop-opacity="0.7"/>
-        <stop offset="65%" stop-color="#5a2705" stop-opacity="0.45"/>
-        <stop offset="88%" stop-color="#733207" stop-opacity="0.38"/>
-        <stop offset="93%" stop-color="#ea580c" stop-opacity="0.6"/>
-        <stop offset="95.5%" stop-color="#ff7b00" stop-opacity="0.85"/>
-        <stop offset="100%" stop-color="#8c440e" stop-opacity="0.0"/>
-      `,
-      jugarLinear: `
-        <stop offset="0%" stop-color="#fb923c"/>
-        <stop offset="10%" stop-color="#f97316"/>
-        <stop offset="25%" stop-color="#ea580c"/>
-        <stop offset="45%" stop-color="#c2410c"/>
-        <stop offset="68%" stop-color="#9a3412"/>
-        <stop offset="88%" stop-color="#7c2d12"/>
-        <stop offset="100%" stop-color="#c2410c"/>
-      `,
-      jugarCenterBloom: `
-        <stop offset="0%" stop-color="#fdba74" stop-opacity="0.55"/>
-        <stop offset="35%" stop-color="#f97316" stop-opacity="0.38"/>
-        <stop offset="70%" stop-color="#ea580c" stop-opacity="0.15"/>
-        <stop offset="100%" stop-color="#7c2d12" stop-opacity="0.0"/>
-      `,
-      jugarTopSheen: `
-        <stop offset="0%" stop-color="#fff7ed" stop-opacity="0.52"/>
-        <stop offset="12%" stop-color="#fed7aa" stop-opacity="0.28"/>
-        <stop offset="30%" stop-color="#ea580c" stop-opacity="0.0"/>
-        <stop offset="90%" stop-color="#7c2d12" stop-opacity="0.0"/>
-        <stop offset="100%" stop-color="#fb923c" stop-opacity="0.22"/>
-      `,
-      dockBgV: `
-        <stop offset="0%" stop-color="#140802"/>
-        <stop offset="55%" stop-color="#1f0c03"/>
-        <stop offset="100%" stop-color="#301405"/>
-      `,
-      dockBgH: `
-        <stop offset="0%" stop-color="#140802" stop-opacity="0.0"/>
-        <stop offset="24%" stop-color="#1a0b03" stop-opacity="0.0"/>
-        <stop offset="30%" stop-color="#421a05" stop-opacity="0.35"/>
-        <stop offset="38%" stop-color="#732e08" stop-opacity="0.75"/>
-        <stop offset="45%" stop-color="#a8430b" stop-opacity="0.92"/>
-        <stop offset="50%" stop-color="#d9560e" stop-opacity="0.98"/>
-        <stop offset="55%" stop-color="#a8430b" stop-opacity="0.92"/>
-        <stop offset="62%" stop-color="#732e08" stop-opacity="0.75"/>
-        <stop offset="70%" stop-color="#421a05" stop-opacity="0.35"/>
-        <stop offset="76%" stop-color="#1a0b03" stop-opacity="0.0"/>
-        <stop offset="100%" stop-color="#140802" stop-opacity="0.0"/>
-      `,
-      chassisCenterGlow: `
-        <stop offset="0%" stop-color="#ff7b00" stop-opacity="0.75"/>
-        <stop offset="30%" stop-color="#ea580c" stop-opacity="0.60"/>
-        <stop offset="60%" stop-color="#9a3412" stop-opacity="0.38"/>
-        <stop offset="82%" stop-color="#5a1e05" stop-opacity="0.18"/>
-        <stop offset="100%" stop-color="#140802" stop-opacity="0.0"/>
-      `,
-      btnSideBg: `
-        <stop offset="0%" stop-color="#160802"/>
-        <stop offset="100%" stop-color="#2c1104"/>
-      `,
-      btnSideStroke: `
-        <stop offset="0%" stop-color="#f97316" stop-opacity="0.80"/>
-        <stop offset="100%" stop-color="#7c2d12" stop-opacity="0.50"/>
-      `
-    },
-    aurora: {
-      dockStroke: `
-        <stop offset="0%" stop-color="#164d36" stop-opacity="0.0"/>
-        <stop offset="4.5%" stop-color="#2df49d" stop-opacity="0.85"/>
-        <stop offset="7%" stop-color="#38cfff" stop-opacity="0.75"/>
-        <stop offset="12%" stop-color="#8070d6" stop-opacity="0.45"/>
-        <stop offset="35%" stop-color="#3b2075" stop-opacity="0.50"/>
-        <stop offset="48%" stop-color="#38cfff" stop-opacity="0.75"/>
-        <stop offset="50%" stop-color="#2df49d" stop-opacity="0.95"/>
-        <stop offset="52%" stop-color="#c5b4fb" stop-opacity="0.80"/>
-        <stop offset="65%" stop-color="#3b2075" stop-opacity="0.50"/>
-        <stop offset="88%" stop-color="#8070d6" stop-opacity="0.45"/>
-        <stop offset="93%" stop-color="#38cfff" stop-opacity="0.75"/>
-        <stop offset="95.5%" stop-color="#2df49d" stop-opacity="0.85"/>
-        <stop offset="100%" stop-color="#164d36" stop-opacity="0.0"/>
-      `,
-      jugarLinear: `
-        <stop offset="0%" stop-color="#2df49d"/>
-        <stop offset="25%" stop-color="#25d392"/>
-        <stop offset="50%" stop-color="#20b895"/>
-        <stop offset="75%" stop-color="#1e9496"/>
-        <stop offset="100%" stop-color="#1f718c"/>
-      `,
-      jugarCenterBloom: `
-        <stop offset="0%" stop-color="#38cfff" stop-opacity="0.65"/>
-        <stop offset="35%" stop-color="#2df49d" stop-opacity="0.45"/>
-        <stop offset="70%" stop-color="#9079ea" stop-opacity="0.25"/>
-        <stop offset="100%" stop-color="#110b28" stop-opacity="0.0"/>
-      `,
-      jugarTopSheen: `
-        <stop offset="0%" stop-color="#e6fff5" stop-opacity="0.60"/>
-        <stop offset="15%" stop-color="#a6ffe0" stop-opacity="0.35"/>
-        <stop offset="35%" stop-color="#38cfff" stop-opacity="0.0"/>
-        <stop offset="85%" stop-color="#c5b4fb" stop-opacity="0.0"/>
-        <stop offset="100%" stop-color="#c5b4fb" stop-opacity="0.30"/>
-      `,
-      dockBgV: `
-        <stop offset="0%" stop-color="#0a0718"/>
-        <stop offset="55%" stop-color="#110c28"/>
-        <stop offset="100%" stop-color="#1c1340"/>
-      `,
-      dockBgH: `
-        <stop offset="0%" stop-color="#0a0718" stop-opacity="0.0"/>
-        <stop offset="24%" stop-color="#0d0920" stop-opacity="0.0"/>
-        <stop offset="30%" stop-color="#172445" stop-opacity="0.35"/>
-        <stop offset="38%" stop-color="#19485e" stop-opacity="0.75"/>
-        <stop offset="45%" stop-color="#1b7278" stop-opacity="0.92"/>
-        <stop offset="50%" stop-color="#2df49d" stop-opacity="0.98"/>
-        <stop offset="55%" stop-color="#247895" stop-opacity="0.92"/>
-        <stop offset="62%" stop-color="#304482" stop-opacity="0.75"/>
-        <stop offset="70%" stop-color="#231750" stop-opacity="0.35"/>
-        <stop offset="76%" stop-color="#0d0920" stop-opacity="0.0"/>
-        <stop offset="100%" stop-color="#0a0718" stop-opacity="0.0"/>
-      `,
-      chassisCenterGlow: `
-        <stop offset="0%" stop-color="#2df49d" stop-opacity="0.75"/>
-        <stop offset="30%" stop-color="#38cfff" stop-opacity="0.60"/>
-        <stop offset="60%" stop-color="#7b5fd6" stop-opacity="0.40"/>
-        <stop offset="82%" stop-color="#271552" stop-opacity="0.20"/>
-        <stop offset="100%" stop-color="#0a0718" stop-opacity="0.0"/>
-      `,
-      btnSideBg: `
-        <stop offset="0%" stop-color="#0c081e"/>
-        <stop offset="100%" stop-color="#18103d"/>
-      `,
-      btnSideStroke: `
-        <stop offset="0%" stop-color="#2df49d" stop-opacity="0.80"/>
-        <stop offset="100%" stop-color="#38cfff" stop-opacity="0.50"/>
-      `
-    }
-  };
+  const LEGACY = { crimson: "crimson-coral" };
 
   function applyTheme(themeName) {
-    let activeTheme = themeName || "indigo";
-    if (activeTheme === "crimson") activeTheme = "crimson-coral";
-
-    const ALL_THEME_CLASSES = [
-      "theme-crimson",
-      "theme-crimson-coral",
-      "theme-crimson-amber",
-      "theme-crimson-ruby",
-      "theme-pink",
-      "theme-green",
-      "theme-cyan",
-      "theme-orange",
-      "theme-aurora"
-    ];
-    ALL_THEME_CLASSES.forEach((cls) => document.body.classList.remove(cls));
-
-    if (activeTheme.startsWith("crimson")) {
-      document.body.classList.add("theme-crimson");
-      document.body.classList.add(`theme-${activeTheme}`);
-    } else if (activeTheme !== "indigo") {
-      document.body.classList.add(`theme-${activeTheme}`);
-    }
-
-    // Update active state in Aspecto Visual cards
-    document.querySelectorAll(".theme-card").forEach((card) => {
-      const cardTheme = card.dataset.theme;
-      const isCardActive = (cardTheme === activeTheme) || (cardTheme === "crimson" && activeTheme === "crimson-coral");
-      card.classList.toggle("is-active", isCardActive);
-    });
-
-    const themeKey = activeTheme.startsWith("crimson") ? "crimson" : activeTheme;
-    const grads = THEME_GRADIENTS[themeKey];
-
-    const GRAD_IDS = [
-      "dockStroke",
-      "jugarLinear",
-      "jugarCenterBloom",
-      "jugarTopSheen",
-      "dockBgV",
-      "dockBgH",
-      "chassisCenterGlow",
-      "btnSideBg",
-      "btnSideStroke"
-    ];
-
-    GRAD_IDS.forEach((id) => {
-      setGradientHTML(id, grads ? grads[id] : null);
-    });
+    let theme = LEGACY[themeName] || themeName || DEFAULT_THEME;
+    if (!THEMES[theme]) theme = DEFAULT_THEME;
+    for (const id of Object.keys(THEMES)) document.body.classList.toggle(`theme-${id}`, id === theme && id !== DEFAULT_THEME);
+    document.body.dataset.theme = theme;
+    document.querySelectorAll(".theme-card").forEach((card) => card.classList.toggle("is-active", (LEGACY[card.dataset.theme] || card.dataset.theme) === theme));
+    window.dispatchEvent(new CustomEvent("ika-theme", { detail: theme }));
   }
 
-    // Restore saved theme on load
-  const initialTheme = localStorage.getItem(THEME_KEY) || "indigo";
-  applyTheme(initialTheme);
-
-  // Wire up theme cards in Aspecto Visual
-  const attachCardListeners = () => {
-    document.querySelectorAll(".theme-card").forEach((card) => {
-      card.addEventListener("click", () => {
-        const theme = card.dataset.theme;
-        if (!theme) return;
-        localStorage.setItem(THEME_KEY, theme);
-        applyTheme(theme);
-      });
+  // Each card shows its own theme: the glow and the three dots are that theme's violet, sky blue
+  // and fuchsia, worked out from the palette (so a new or retuned theme shows as it is).
+  const PREVIEW = [
+    [168, 85, 247],
+    [56, 189, 248],
+    [217, 70, 239],
+  ];
+  document.querySelectorAll(".theme-card").forEach((card) => {
+    const id = LEGACY[card.dataset.theme] || card.dataset.theme;
+    if (!THEMES[id]) return;
+    const [a, b, c] = PREVIEW.map((rgb) => `rgb(${themedRgb(rgb, id).join(",")})`);
+    card.querySelectorAll(".tp-dot").forEach((dot, i) => {
+      const col = [a, b, c][i] || a;
+      dot.style.background = col;
+      dot.style.boxShadow = `0 0 8px ${col}`;
     });
-  };
+    const glow = card.querySelector(".theme-preview-glow");
+    if (glow) glow.style.background = `radial-gradient(circle, rgba(${themedRgb(PREVIEW[0], id).join(",")}, 0.45) 0%, transparent 70%)`;
+    // the disc it is drawn as in Aspecto visual: its main colour, accent, contrast and left side
+    const g = `rgb(${themedRgb([45, 244, 157], id).join(",")})`;
+    card.style.setProperty("--disc", `conic-gradient(from 200deg, ${a} 0 40%, ${g} 40% 58%, ${c} 58% 80%, ${b} 80% 100%)`);
+    card.style.setProperty("--glow", a);
+    card.title = card.querySelector(".theme-card-name")?.textContent.trim() || THEMES[id].name;
+  });
 
-  document.addEventListener("DOMContentLoaded", attachCardListeners);
-  attachCardListeners();
+  applyTheme(localStorage.getItem(THEME_KEY));
+
+  const savedTheme = () => {
+    let t = null;
+    try {
+      t = localStorage.getItem(THEME_KEY);
+    } catch {}
+    t = LEGACY[t] || t;
+    return THEMES[t] ? t : DEFAULT_THEME;
+  };
+  function chooseTheme(theme) {
+    try {
+      localStorage.setItem(THEME_KEY, theme);
+    } catch {}
+    // choosing a theme turns the wallpaper's one off
+    if (autoOn()) setAuto(false);
+    applyTheme(theme);
+  }
+
+  // ---- "Tema según el fondo" (src/theme/auto.js): off unless chosen. While on, the theme is made
+  // from the wallpaper and remade when the wallpaper changes (when one is put, and every 8 s); the last one is
+  // kept so the launcher opens already in it.
+  const AUTO_KEY = "ika_theme_auto";
+  const AUTO_DEF_KEY = "ika_theme_auto_def";
+  const autoSwitch = document.getElementById("setting-theme-auto");
+  const autoOn = () => {
+    try {
+      return localStorage.getItem(AUTO_KEY) === "1";
+    } catch {
+      return false;
+    }
+  };
+  let autoTimer = 0;
+  async function refreshAuto(force = false) {
+    if (!autoOn()) return;
+    const px = await sampleWallpaper(invoke);
+    const def = px && themeFromPixels(px);
+    if (!def || !autoOn()) return;
+    const prev = THEMES[AUTO_ID]?.fromWallpaper;
+    const same = prev && Math.abs(((def.fromWallpaper[0] - prev[0] + 540) % 360) - 180) < 10 && (def.fromWallpaper[1] === null) === (prev[1] === null);
+    if (same && !force && document.body.classList.contains(`theme-${AUTO_ID}`)) return;
+    installAutoTheme(def);
+    try {
+      localStorage.setItem(AUTO_DEF_KEY, JSON.stringify(def));
+    } catch {}
+    applyTheme(AUTO_ID);
+  }
+  function setAuto(on) {
+    try {
+      localStorage.setItem(AUTO_KEY, on ? "1" : "0");
+    } catch {}
+    if (autoSwitch) autoSwitch.checked = on;
+    clearInterval(autoTimer);
+    if (on) {
+      refreshAuto(true);
+      autoTimer = setInterval(() => refreshAuto(), 8000);
+    } else {
+      applyTheme(savedTheme());
+    }
+  }
+  if (autoSwitch) {
+    autoSwitch.checked = autoOn();
+    autoSwitch.addEventListener("change", () => setAuto(autoSwitch.checked));
+  }
+  if (autoOn()) {
+    // the last one at once; the wallpaper's current one when it has loaded
+    try {
+      const last = JSON.parse(localStorage.getItem(AUTO_DEF_KEY) || "null");
+      if (last) {
+        installAutoTheme(last);
+        applyTheme(AUTO_ID);
+      }
+    } catch {}
+    setTimeout(() => setAuto(true), 2500);
+  }
+  // a new wallpaper: once it is on screen (a scene takes a moment), and again a little later
+  window.addEventListener("ika-wallpaper", () => {
+    if (!autoOn()) return;
+    setTimeout(() => refreshAuto(), 1500);
+    setTimeout(() => refreshAuto(), 4500);
+  });
+
+  document.querySelectorAll(".theme-card").forEach((card) => {
+    card.addEventListener("click", () => {
+      const theme = card.dataset.theme;
+      if (!theme) return;
+      chooseTheme(LEGACY[theme] || theme);
+    });
+  });
+
+  const nameOf = (id) => document.querySelector(`.theme-card[data-theme="${id}"] .theme-card-name`)?.textContent.trim() || THEMES[id].name;
+  // ---- Aspecto visual: the themes as Inicio's instance carousel. Five cards around the theme in
+  // use, which is always the one in the centre; clicking a side card (or the arrows, the arrow
+  // keys) slides it to the centre and puts it on. The wheel is left to scroll the window.
+  const track = document.getElementById("theme-carousel-track");
+  const sourceCards = [...document.querySelectorAll("#theme-carousel-scroller .theme-card")];
+  const order = sourceCards.map((c) => LEGACY[c.dataset.theme] || c.dataset.theme).filter((id) => THEMES[id]);
+  let sliding = false;
+  function renderThemeCarousel(dir = null) {
+    if (!track || !order.length) return;
+    const cur = order.indexOf(savedTheme());
+    const n = order.length;
+    const offsets = n >= 5 ? [-2, -1, 0, 1, 2] : n >= 3 ? [-1, 0, 1] : [0];
+    track.replaceChildren(
+      ...offsets.map((off) => {
+        const id = order[(cur + off + n * 100) % n];
+        const item = document.createElement("div");
+        item.className = `tc-item ${off === 0 ? "is-active" : Math.abs(off) === 1 ? "is-near" : "is-far"}`;
+        item.dataset.theme = id;
+        const card = sourceCards[order.indexOf(id)].cloneNode(true);
+        card.removeAttribute("id");
+        card.classList.toggle("is-active", off === 0);
+        item.title = off === 0 ? `${nameOf(id)} (en uso)` : `Usar ${nameOf(id)}`;
+        item.appendChild(card);
+        if (off === 0) {
+          // the same moving border as Inicio's active card
+          item.insertAdjacentHTML(
+            "beforeend",
+            `<svg class="tc-border" viewBox="0 0 364 218" preserveAspectRatio="none" aria-hidden="true"><rect x="1" y="1" width="362" height="216" rx="26" ry="40" fill="none" stroke="url(#cardGodStrokeGrad)" stroke-width="2" vector-effect="non-scaling-stroke" /></svg>`
+          );
+        } else {
+          item.addEventListener("click", () => stepTheme(off));
+        }
+        return item;
+      })
+    );
+    if (dir) {
+      track.classList.remove("glide-next", "glide-prev");
+      void track.offsetWidth;
+      track.classList.add(dir > 0 ? "glide-next" : "glide-prev");
+    }
+  }
+  function stepTheme(by) {
+    if (sliding || !order.length) return;
+    sliding = true;
+    const next = order[(order.indexOf(savedTheme()) + by + order.length * 100) % order.length];
+    chooseTheme(next);
+    renderThemeCarousel(by);
+    setTimeout(() => {
+      sliding = false;
+      track?.classList.remove("glide-next", "glide-prev");
+    }, 280);
+  }
+  document.getElementById("theme-carousel-prev")?.addEventListener("click", () => stepTheme(-1));
+  document.getElementById("theme-carousel-next")?.addEventListener("click", () => stepTheme(1));
+  track?.setAttribute("tabindex", "0");
+  track?.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+      e.preventDefault();
+      e.stopPropagation();
+      stepTheme(e.key === "ArrowRight" ? 1 : -1);
+    }
+  });
+  // a theme put on elsewhere (Ctrl+Shift+T) moves the carousel too
+  window.addEventListener("ika-theme", () => {
+    if (!sliding) renderThemeCarousel();
+  });
+  renderThemeCarousel();
+
+  // Ctrl+Shift+T: the next theme
+  document.addEventListener("keydown", (e) => {
+    if (!(e.ctrlKey && e.shiftKey && (e.key === "T" || e.key === "t"))) return;
+    e.preventDefault();
+    const next = THEME_IDS[(THEME_IDS.indexOf(savedTheme()) + 1) % THEME_IDS.length];
+    chooseTheme(next);
+    showToast(`Tema: ${nameOf(next)}`);
+  });
 })();

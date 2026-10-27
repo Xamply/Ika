@@ -1066,6 +1066,14 @@ pub fn launch_instance(
         .find(|p| p.join("mmc-pack.json").exists())
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or(inst_path);
+    let running_key = inst_path.replace('/', "\\").trim_end_matches('\\').to_lowercase();
+    let is_already_stopped = || {
+        STOPPED_GAMES.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or(false, |s| s.contains(&running_key))
+    };
+    if is_already_stopped() {
+        return Err("Instancia detenida por el usuario".to_string());
+    }
+
     let _busy = claim_instance(&inst_path.to_lowercase())?;
     let progress = Progress { app: Some(app), instance: inst_path.clone() };
     let result = prepare_and_spawn(&progress, Path::new(&inst_path), &username, skin);
@@ -1076,6 +1084,13 @@ pub fn launch_instance(
             return Err(e);
         }
     };
+
+    if is_already_stopped() {
+        let _ = started.child.kill();
+        #[cfg(target_os = "windows")]
+        crate::console_tools::kill_process(started.child.id());
+        return Err("Instancia detenida por el usuario".to_string());
+    }
 
     // Watch the game until it closes: the UI gets "mc-game-exit" with the exit code and, if
     // it crashed, the cause taken from the crash report.
@@ -1097,9 +1112,16 @@ pub fn launch_instance(
         for t in started.output_threads.drain(..) {
             let _ = t.join();
         }
-        let stopped = STOPPED_GAMES.lock().unwrap_or_else(|e| e.into_inner()).as_mut().is_some_and(|set| set.remove(&running_key));
+        let raw_watch_key = watch_progress.instance.replace('/', "\\").trim_end_matches('\\').to_lowercase();
+        let stopped = STOPPED_GAMES.lock().unwrap_or_else(|e| e.into_inner()).as_mut().map_or(false, |set| {
+            set.remove(&running_key) || set.remove(&raw_watch_key)
+        });
         let code = status.ok().and_then(|s| s.code()).unwrap_or(-1);
-        let report = find_crash_report(&started.game_dir, started.started_at);
+        let report = if stopped {
+            None
+        } else {
+            find_crash_report(&started.game_dir, started.started_at)
+        };
         let crashed = !stopped && (code != 0 || report.is_some());
         let summary = if crashed {
             report
@@ -1898,9 +1920,9 @@ pub(crate) fn prepare_and_spawn(
     args.push("-XX:HeapDumpPath=MojangTricksIntelDriversForPerformance_javaw.exe_minecraft.exe.heapdump".to_string());
     let mem = |k: &str, d: u32| cfg.get(k).and_then(|v| v.parse::<u32>().ok()).unwrap_or(d);
     let (min_mem, max_mem) = if cfg.get("OverrideMemory").map_or(false, |v| v == "true") {
-        (mem("MinMemAlloc", 512), mem("MaxMemAlloc", 4096))
+        (mem("MinMemAlloc", 512), mem("MaxMemAlloc", 8192))
     } else {
-        (512, 4096)
+        (512, 8192)
     };
     args.push(format!("-Xms{}m", min_mem.min(max_mem)));
     args.push(format!("-Xmx{}m", min_mem.max(max_mem)));
@@ -1984,6 +2006,10 @@ pub(crate) fn prepare_and_spawn(
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
+    let running_key = inst_dir.to_string_lossy().replace('/', "\\").trim_end_matches('\\').to_lowercase();
+    if STOPPED_GAMES.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or(false, |s| s.contains(&running_key)) {
+        return Err("Instancia detenida por el usuario".to_string());
+    }
     progress.emit("launch", "Iniciando Minecraft...", 0, 0);
     let started_at = std::time::SystemTime::now();
     let mut child = cmd.spawn().map_err(|e| format!("No se pudo iniciar Java ({}): {}", java_exe.display(), e))?;
@@ -2009,7 +2035,12 @@ pub(crate) fn prepare_and_spawn(
 // Loader version resolution & Modpack installation (Modrinth .mrpack / CurseForge .zip)
 // ---------------------------------------------------------------------------------------
 
-const CF_API_KEY: &str = "REMOVED_CF_API_KEY";
+/// CurseForge API key: set at build time from .env.local (IKA_CF_API_KEY, see build.rs), never
+/// written in the repository.
+pub(crate) const CF_API_KEY: &str = match option_env!("IKA_CF_API_KEY") {
+    Some(key) => key,
+    None => "",
+};
 
 /// Maps a loader name or Prism UID to `(uid, cached_name, canonical_loader_name)`.
 pub fn loader_uid_and_name(loader: &str) -> Option<(&'static str, &'static str, &'static str)> {
@@ -2192,6 +2223,9 @@ pub struct ModpackInstallOutcome {
     pub pack_type: String,
     pub pack_id: String,
     pub pack_name: String,
+    /// The exact version installed: CurseForge file id / Modrinth version id, and its name.
+    pub pack_version_id: String,
+    pub pack_version_name: String,
 }
 
 fn emit_modpack_progress(app: &Option<tauri::AppHandle>, inst_name: &str, stage: &str, message: &str, done: usize, total: usize) {
@@ -2269,7 +2303,7 @@ fn url_encode_simple(s: &str) -> String {
     out
 }
 
-fn cf_cdn_url(host: &str, file_id: u64, file_name: &str) -> String {
+pub(crate) fn cf_cdn_url(host: &str, file_id: u64, file_name: &str) -> String {
     let major = file_id / 1000;
     let minor = file_id % 1000;
     format!("https://{}/files/{}/{}/{}", host, major, minor, url_encode_simple(file_name))
@@ -2301,10 +2335,75 @@ fn cf_post_json(agent: &ureq::Agent, url: &str, body: &Value) -> Result<Value, S
 }
 
 #[derive(Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 struct ModpackFileTask {
     urls: Vec<String>,
     path: PathBuf,
     sha1: Option<String>,
+}
+
+/// Files of a modpack that couldn't be downloaded when it was installed. Kept in the instance
+/// so the launcher can say which ones and try again (retry_missing_files); gone once they are
+/// all there.
+const MISSING_FILES: &str = ".ika-missing.json";
+
+#[derive(serde::Serialize)]
+pub struct MissingFile {
+    pub name: String,
+    pub error: String,
+}
+
+fn missing_path(mc_dir: &Path) -> PathBuf {
+    mc_dir.parent().unwrap_or(mc_dir).join(MISSING_FILES)
+}
+
+fn write_missing(mc_dir: &Path, failed: &[(ModpackFileTask, String)]) {
+    let path = missing_path(mc_dir);
+    if failed.is_empty() {
+        let _ = std::fs::remove_file(path);
+        return;
+    }
+    let list: Vec<serde_json::Value> = failed.iter().map(|(t, e)| serde_json::json!({ "task": t, "error": e })).collect();
+    let _ = std::fs::write(path, serde_json::to_vec(&list).unwrap_or_default());
+}
+
+fn read_missing(mc_dir: &Path) -> Vec<(ModpackFileTask, String)> {
+    let Ok(bytes) = std::fs::read(missing_path(mc_dir)) else { return Vec::new() };
+    let list: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap_or_default();
+    list.into_iter()
+        .filter_map(|v| Some((serde_json::from_value::<ModpackFileTask>(v.get("task")?.clone()).ok()?, v.get("error").and_then(|e| e.as_str()).unwrap_or("").to_string())))
+        .filter(|(t, _)| !t.path.is_file())
+        .collect()
+}
+
+fn missing_view(list: &[(ModpackFileTask, String)]) -> Vec<MissingFile> {
+    list.iter()
+        .map(|(t, e)| MissingFile {
+            name: t.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+            error: e.clone(),
+        })
+        .collect()
+}
+
+/// The files of the instance's modpack that couldn't be downloaded (none: complete).
+#[tauri::command(async)]
+pub fn instance_missing_files(instance_path: String) -> Result<Vec<MissingFile>, String> {
+    let root = crate::instance_root_dir(&instance_path)?;
+    Ok(missing_view(&read_missing(&root.join(".minecraft"))))
+}
+
+/// Tries again to download them; answers the ones still missing.
+#[tauri::command(async)]
+pub fn retry_missing_files(instance_path: String) -> Result<Vec<MissingFile>, String> {
+    let root = crate::instance_root_dir(&instance_path)?;
+    let mc_dir = root.join(".minecraft");
+    let ag = agent();
+    let still: Vec<(ModpackFileTask, String)> = read_missing(&mc_dir)
+        .into_iter()
+        .filter_map(|(task, _)| fetch_modpack_task(&ag, &task).err().map(|e| (task, e)))
+        .collect();
+    write_missing(&mc_dir, &still);
+    Ok(missing_view(&still))
 }
 
 fn fetch_modpack_task(agent: &ureq::Agent, task: &ModpackFileTask) -> Result<usize, String> {
@@ -2376,10 +2475,14 @@ fn fetch_modpack_task(agent: &ureq::Agent, task: &ModpackFileTask) -> Result<usi
     Err(last_err)
 }
 
+/// Downloads the files of a modpack. Ones that fail don't stop the installation (unless all
+/// do: no connection), but are recorded in the instance so the launcher says which and can
+/// retry them.
 fn download_modpack_tasks(
     tasks: Vec<ModpackFileTask>,
     app: &Option<tauri::AppHandle>,
     inst_name: &str,
+    mc_dir: &Path,
 ) -> Result<(), String> {
     use rayon::prelude::*;
     let mut seen = HashSet::new();
@@ -2405,6 +2508,7 @@ fn download_modpack_tasks(
     let start_time = std::time::Instant::now();
     let last_emit = Mutex::new(std::time::Instant::now());
     let first_err = Mutex::new(None::<String>);
+    let failed_tasks = Mutex::new(Vec::<(ModpackFileTask, String)>::new());
 
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(DOWNLOAD_THREADS)
@@ -2419,6 +2523,7 @@ fn download_modpack_tasks(
                 }
                 Err(e) => {
                     failed.fetch_add(1, Ordering::SeqCst);
+                    failed_tasks.lock().unwrap_or_else(|e| e.into_inner()).push((task.clone(), e.clone()));
                     let mut fe = first_err.lock().unwrap_or_else(|e| e.into_inner());
                     if fe.is_none() {
                         *fe = Some(e);
@@ -2450,6 +2555,7 @@ fn download_modpack_tasks(
     });
 
     let fail_count = failed.load(Ordering::SeqCst);
+    write_missing(mc_dir, &failed_tasks.into_inner().unwrap_or_default());
     // Only fail the whole installation if nearly everything failed (e.g. offline).
     if fail_count == total {
         let msg = first_err
@@ -2763,7 +2869,7 @@ pub fn install_modpack(
                 }
             }
 
-            download_modpack_tasks(tasks, &app, inst_name)?;
+            download_modpack_tasks(tasks, &app, inst_name, mc_dir)?;
         }
 
         let loader_version = resolve_loader_uid_version(
@@ -2782,6 +2888,8 @@ pub fn install_modpack(
             pack_type: "curseforge".to_string(),
             pack_id: mod_id.to_string(),
             pack_name: pack_title,
+            pack_version_id: pack_file_id.to_string(),
+            pack_version_name: file_obj.get("displayName").and_then(|v| v.as_str()).unwrap_or(pack_file_name).to_string(),
         });
     }
 
@@ -2977,7 +3085,7 @@ pub fn install_modpack(
         }
     }
 
-    download_modpack_tasks(tasks, &app, inst_name)?;
+    download_modpack_tasks(tasks, &app, inst_name, mc_dir)?;
 
     let loader_version = resolve_loader_uid_version(
         &ag,
@@ -2995,6 +3103,8 @@ pub fn install_modpack(
         pack_type: "modrinth".to_string(),
         pack_id,
         pack_name: pack_title,
+        pack_version_id: version_obj.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        pack_version_name: version_obj.get("version_number").and_then(|v| v.as_str()).unwrap_or("").to_string(),
     })
 }
 

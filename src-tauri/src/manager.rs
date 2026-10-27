@@ -89,7 +89,8 @@ pub struct InstancePacks {
 }
 
 fn shader_loader(root: &Path) -> Option<&'static str> {
-    let mods = game_dir(root).join("mods");
+    let game = game_dir(root);
+    let mods = game.join("mods");
     let names: Vec<String> = std::fs::read_dir(mods)
         .map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().to_lowercase()).filter(|n| n.ends_with(".jar")).collect())
         .unwrap_or_default();
@@ -98,6 +99,12 @@ fn shader_loader(root: &Path) -> Option<&'static str> {
     } else if names.iter().any(|n| n.contains("iris")) {
         Some("Iris")
     } else if names.iter().any(|n| n.contains("optifine")) {
+        Some("OptiFine")
+    } else if game.join("config").join("oculus.properties").exists() {
+        Some("Oculus")
+    } else if game.join("config").join("iris.properties").exists() {
+        Some("Iris")
+    } else if game.join("optionsshaders.txt").exists() {
         Some("OptiFine")
     } else {
         None
@@ -227,6 +234,10 @@ struct CachedPack {
 }
 
 static PACK_CACHE: crate::disk_cache::DiskCache<CachedPack> = crate::disk_cache::DiskCache::new("pack_cache");
+
+pub fn warm_cache() {
+    PACK_CACHE.warm();
+}
 
 fn hash_file_sha1(path: &Path) -> Option<String> {
     use sha1::Digest;
@@ -461,7 +472,7 @@ pub fn write_instance_config(instance_path: String, path: String, text: String, 
 pub fn set_instance_shader(instance_path: String, shader: Option<String>) -> Result<(), String> {
     let root = instance_root_dir(&instance_path)?;
     let game = game_dir(&root);
-    let loader = shader_loader(&root).ok_or("Esta instancia no tiene Iris, Oculus ni OptiFine")?;
+    let loader = shader_loader(&root).unwrap_or("Iris");
     let cfg = shader_config(&game, loader);
     if loader == "OptiFine" {
         write_kv(&cfg, '=', &[("shaderPack", shader.unwrap_or_else(|| "OFF".to_string()))])
@@ -515,6 +526,13 @@ pub fn instance_meta(instance_path: String) -> Result<InstanceMeta, String> {
         pack_name: get("ManagedPackName"),
         notes: get("notes").map(|n| n.replace("\\n", "\n")).unwrap_or_default(),
     })
+}
+
+/// `instance_meta` for many instances in one call (the Gestor asks for all of them at once:
+/// ~70 separate calls queued behind each other and took ~80 ms each).
+#[tauri::command(async)]
+pub fn instance_metas(instance_paths: Vec<String>) -> Vec<Option<InstanceMeta>> {
+    instance_paths.into_iter().map(|p| instance_meta(p).ok()).collect()
 }
 
 fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {

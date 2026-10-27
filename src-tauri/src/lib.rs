@@ -5,16 +5,18 @@ mod device_key;
 mod skinrestorer_setup;
 mod console_tools;
 mod disk_cache;
+mod asset_protocol;
 mod scanner;
 mod manager;
 mod share;
+mod wallpaper_glass;
+#[cfg(target_os = "windows")]
+mod wallpaper_capture;
 
 use scanner::{ComparisonOutput, ModInfo, ScanOutput};
 use std::io::{BufRead, BufReader};
 use std::sync::Mutex;
 use tauri::Emitter;
-
-static STEAM_DOWNLOAD_LOCK: Mutex<()> = Mutex::new(());
 
 #[tauri::command]
 fn pick_folder() -> Option<String> {
@@ -427,6 +429,15 @@ fn file_mtime_ms(p: &std::path::Path) -> u64 {
 
 /// Computes the timestamp (in milliseconds since UNIX_EPOCH) of the most recent activity
 /// or modification of an instance (checking launch time, configs, mods, options, logs, saves).
+fn entry_mtime_ms(e: &std::fs::DirEntry) -> u64 {
+    e.metadata()
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 fn instance_last_activity_ms(inst_dir: &std::path::Path) -> u64 {
     let mut best: u64 = 0;
 
@@ -465,14 +476,15 @@ fn instance_last_activity_ms(inst_dir: &std::path::Path) -> u64 {
         let mdir = g.join("mods");
         if mdir.is_dir() {
             best = best.max(file_mtime_ms(&mdir));
+            // The directory listing already carries each file's time and type (on Windows, no
+            // extra disk access per file, unlike fs::metadata on its path).
             if let Ok(entries) = std::fs::read_dir(&mdir) {
                 for e in entries.flatten() {
-                    let ep = e.path();
-                    best = best.max(file_mtime_ms(&ep));
-                    if ep.is_dir() {
-                        if let Ok(sub_entries) = std::fs::read_dir(&ep) {
+                    best = best.max(entry_mtime_ms(&e));
+                    if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        if let Ok(sub_entries) = std::fs::read_dir(e.path()) {
                             for se in sub_entries.flatten() {
-                                best = best.max(file_mtime_ms(&se.path()));
+                                best = best.max(entry_mtime_ms(&se));
                             }
                         }
                     }
@@ -555,18 +567,39 @@ fn get_all_instances() -> Vec<LauncherInstance> {
 
     let re_ver = regex::Regex::new(r"\b(?:1\.\d+(?:\.\d+)?|2[4-9]\.\d+(?:\.\d+)?)\b").ok();
 
+    // The folders first (cheap), then every instance is read in parallel: config, modpack zip,
+    // mod/pack counts, world statistics... One after another this took ~1.5 s at startup with ~70
+    // instances. The results are merged in the original order, so the outcome is the same.
+    let mut dirs: Vec<(std::path::PathBuf, String, String)> = Vec::new();
     for base in &base_dirs {
         let base_path = base.as_path();
-        if base_path.exists() {
-            if let Ok(entries) = std::fs::read_dir(base_path) {
-                for entry in entries.flatten() {
-                    if entry.path().is_dir() {
-                        let inst_dir = entry.path();
-                        let folder_name = entry.file_name().to_string_lossy().to_string();
-                        if folder_name.starts_with('.') || folder_name.starts_with('_') {
-                            continue;
-                        }
+        if let Ok(entries) = std::fs::read_dir(base_path) {
+            for entry in entries.flatten() {
+                let inst_dir = entry.path();
+                if !inst_dir.is_dir() {
+                    continue;
+                }
+                let folder_name = entry.file_name().to_string_lossy().to_string();
+                if folder_name.starts_with('.') || folder_name.starts_with('_') {
+                    continue;
+                }
+                let norm_path_key = inst_dir
+                    .to_string_lossy()
+                    .replace('/', "\\")
+                    .trim_end_matches('\\')
+                    .to_lowercase();
+                if seen_paths.insert(norm_path_key.clone()) {
+                    dirs.push((inst_dir, folder_name, norm_path_key));
+                }
+            }
+        }
+    }
 
+    use rayon::prelude::*;
+    let read = |(inst_dir, folder_name, norm_path_key): &(std::path::PathBuf, String, String)| -> Option<(LauncherInstance, (u64, u32, usize, usize, u64))> {
+        let inst_dir = inst_dir.clone();
+        let folder_name = folder_name.clone();
+        let norm_path_key = norm_path_key.clone();
                         let cfg_file = inst_dir.join("instance.cfg");
                         let mmc_pack = inst_dir.join("mmc-pack.json");
                         let battly_json = inst_dir.join("instance.json");
@@ -590,7 +623,7 @@ fn get_all_instances() -> Vec<LauncherInstance> {
                                 false
                             };
                             if !is_materialized && !has_jars {
-                                continue;
+                                return None;
                             }
                         }
 
@@ -608,16 +641,7 @@ fn get_all_instances() -> Vec<LauncherInstance> {
                             || inst_dir.join(".minecraft").is_dir()
                             || inst_dir.join("mods").is_dir();
                         if !is_valid_instance {
-                            continue;
-                        }
-
-                        let norm_path_key = inst_dir
-                            .to_string_lossy()
-                            .replace('/', "\\")
-                            .trim_end_matches('\\')
-                            .to_lowercase();
-                        if !seen_paths.insert(norm_path_key.clone()) {
-                            continue;
+                            return None;
                         }
 
                         // Read name, iconKey, IntendedLoader, and JavaVersion from instance.cfg if available
@@ -1146,12 +1170,9 @@ fn get_all_instances() -> Vec<LauncherInstance> {
                             total_time_played,
                             shader_count,
                             resourcepack_count,
-                            max_mem_mb,
+                            max_mem_mb: Some(max_mem_mb.unwrap_or(8192)),
                         };
 
-                        let norm_key = |s: &str| -> String {
-                            s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
-                        };
 
                         // Deduplication scoring:
                         // 1. inst_mtime: Most recently modified, configured, or played instance ALWAYS wins
@@ -1179,21 +1200,25 @@ fn get_all_instances() -> Vec<LauncherInstance> {
                             candidate.total_time_played.unwrap_or(0),
                         );
 
-                        let name_key = norm_key(&candidate.name);
-                        if let Some(dup_idx) = list.iter().position(|x| norm_key(&x.name) == name_key) {
-                            if score > list_scores[dup_idx] {
-                                list[dup_idx] = candidate;
-                                list_scores[dup_idx] = score;
-                            }
-                            continue;
-                        }
+        Some((candidate, score))
+    };
+    let read_all: Vec<_> = dirs.par_iter().map(read).collect();
 
-                        list.push(candidate);
-                        list_scores.push(score);
-                    }
-                }
+    let norm_key = |s: &str| -> String {
+        s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+    };
+    for (candidate, score) in read_all.into_iter().flatten() {
+        let name_key = norm_key(&candidate.name);
+        if let Some(dup_idx) = list.iter().position(|x| norm_key(&x.name) == name_key) {
+            if score > list_scores[dup_idx] {
+                list[dup_idx] = candidate;
+                list_scores[dup_idx] = score;
             }
+            continue;
         }
+
+        list.push(candidate);
+        list_scores.push(score);
     }
 
     list.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -1324,6 +1349,40 @@ fn create_silent_command(program: &str) -> std::process::Command {
     cmd
 }
 
+/// Whether Ika opens when Windows starts (this user's Run key points to this executable).
+const AUTOSTART_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+const AUTOSTART_NAME: &str = "IkaLauncher";
+
+#[tauri::command(async)]
+fn autostart_enabled() -> bool {
+    create_silent_command("reg")
+        .args(["query", AUTOSTART_KEY, "/v", AUTOSTART_NAME])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[tauri::command(async)]
+fn set_autostart(enabled: bool) -> Result<(), String> {
+    let output = if enabled {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        create_silent_command("reg")
+            .args(["add", AUTOSTART_KEY, "/v", AUTOSTART_NAME, "/t", "REG_SZ", "/d", &format!("\"{}\"", exe.display()), "/f"])
+            .output()
+    } else {
+        if !autostart_enabled() {
+            return Ok(());
+        }
+        create_silent_command("reg").args(["delete", AUTOSTART_KEY, "/v", AUTOSTART_NAME, "/f"]).output()
+    }
+    .map_err(|e| e.to_string())?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err("No se pudo cambiar el inicio automático de Windows".to_string())
+    }
+}
+
 /// One page of a MotionBGs catalogue.
 #[derive(serde::Serialize, Clone, Debug)]
 pub struct MotionBgPage {
@@ -1335,7 +1394,7 @@ pub struct MotionBgPage {
     pub tag: String,
 }
 
-const MOTIONBGS_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)";
+const MOTIONBGS_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
 
 /// Only what a tag of the site is made of (it goes into a URL and into a file name).
 fn motionbgs_tag(tag: &str) -> String {
@@ -1362,6 +1421,13 @@ fn motionbgs_cache_is_fresh(file: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether `html` is a page of the catalogue: it lists wallpapers. (Cloudflare's challenge page
+/// lists none. Pages that are fine also carry Cloudflare's bot-detection script, under
+/// /cdn-cgi/challenge-platform/, so that name says nothing about the page.)
+fn motionbgs_page_ok(html: &str) -> bool {
+    html.contains("<span class=ttl>")
+}
+
 /// The HTML of a page of the site, from the cache in the temp dir (valid for 12 hours, which
 /// makes opening the catalogue instantaneous) or downloaded with curl.
 fn motionbgs_html(url: &str, cache_file: &std::path::Path) -> Result<String, String> {
@@ -1369,26 +1435,45 @@ fn motionbgs_html(url: &str, cache_file: &std::path::Path) -> Result<String, Str
 
     if motionbgs_cache_is_fresh(cache_file) {
         if let Ok(cached_content) = std::fs::read_to_string(cache_file) {
-            if !cached_content.trim().is_empty() {
+            if motionbgs_page_ok(&cached_content) {
                 html = cached_content;
+            } else {
+                let _ = std::fs::remove_file(cache_file);
             }
         }
     }
 
     if html.is_empty() {
         let output = create_silent_command("curl.exe")
-            .args(["-s", "-L", "--compressed", "--max-time", "10", "-A", MOTIONBGS_AGENT, url])
+            .args([
+                "-s",
+                "-L",
+                "--compressed",
+                "--max-time",
+                "12",
+                "-A",
+                MOTIONBGS_AGENT,
+                "-H",
+                "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "-H",
+                "Accept-Language: es-ES,es;q=0.9,en;q=0.8",
+                url,
+            ])
             .output()
             .map_err(|e| format!("Error al ejecutar curl: {}", e))?;
 
         if output.status.success() {
-            html = String::from_utf8_lossy(&output.stdout).to_string();
-            // Write to cache
-            let _ = std::fs::write(cache_file, &html);
+            let res_html = String::from_utf8_lossy(&output.stdout).to_string();
+            if motionbgs_page_ok(&res_html) {
+                html = res_html;
+                let _ = std::fs::write(cache_file, &html);
+            }
         } else if cache_file.exists() {
             // Fallback to expired cache if network failed
             if let Ok(cached) = std::fs::read_to_string(cache_file) {
-                html = cached;
+                if motionbgs_page_ok(&cached) {
+                    html = cached;
+                }
             }
         }
     }
@@ -1520,7 +1605,24 @@ fn count_motionbgs_pages(tag: String) -> Result<u32, String> {
     let exists = |page: u32| -> Result<bool, String> {
         let url = format!("https://motionbgs.com/tag:{}/{}/", clean_tag, page);
         let output = create_silent_command("curl.exe")
-            .args(["-s", "-I", "-L", "--max-time", "8", "-o", "NUL", "-w", "%{http_code}", "-A", MOTIONBGS_AGENT, &url])
+            .args([
+                "-s",
+                "-I",
+                "-L",
+                "--max-time",
+                "8",
+                "-o",
+                "NUL",
+                "-w",
+                "%{http_code}",
+                "-A",
+                MOTIONBGS_AGENT,
+                "-H",
+                "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "-H",
+                "Accept-Language: es-ES,es;q=0.9,en;q=0.8",
+                &url,
+            ])
             .output()
             .map_err(|e| format!("Error al ejecutar curl: {}", e))?;
         match String::from_utf8_lossy(&output.stdout).trim() {
@@ -1674,51 +1776,12 @@ pub struct SteamWallpaperInfo {
     pub properties: Option<serde_json::Value>,
 }
 
-fn generate_animated_preview_for_folder(folder: &std::path::Path) -> Option<std::path::PathBuf> {
-    let mp4_path = folder.join("preview.mp4");
-    if mp4_path.exists() {
-        return Some(mp4_path);
-    }
-    let gif_path = folder.join("preview.gif");
-    if gif_path.exists() {
-        let _ = create_silent_command("ffmpeg")
-            .args([
-                "-y",
-                "-i",
-                gif_path.to_str().unwrap_or("preview.gif"),
-                "-movflags",
-                "faststart",
-                "-pix_fmt",
-                "yuv420p",
-                mp4_path.to_str().unwrap_or("preview.mp4"),
-            ])
-            .output();
-        if mp4_path.exists() {
-            return Some(mp4_path);
-        }
-    }
-
-    // Check if any native mp4 or webm is in the folder
-    if let Ok(entries) = std::fs::read_dir(folder) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
-                if ext.eq_ignore_ascii_case("mp4") || ext.eq_ignore_ascii_case("webm") {
-                    return Some(p);
-                }
-            }
-        }
-    }
-
-    None
-}
-
 fn parse_steam_wallpaper_folder(folder: &std::path::Path) -> Option<SteamWallpaperInfo> {
     if !folder.is_dir() {
         return None;
     }
     let project_json = folder.join("project.json");
-    let (title, video_rel, preview_rel, tags, is_scene_meta, properties) = if let Ok(content) = std::fs::read_to_string(&project_json) {
+    let (title, video_rel, preview_rel, tags, is_scene_meta, properties, dependency_id) = if let Ok(content) = std::fs::read_to_string(&project_json) {
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
             let t = val.get("title")
                 .and_then(|v| v.as_str())
@@ -1733,21 +1796,44 @@ fn parse_steam_wallpaper_folder(folder: &std::path::Path) -> Option<SteamWallpap
                 .and_then(|v| v.as_str())
                 .unwrap_or("preview.jpg")
                 .to_string();
-            let tg = val.get("tags")
+            let mut tg: Vec<String> = val.get("tags")
                 .and_then(|t| t.as_array())
                 .map(|arr| {
                     arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect()
                 })
                 .unwrap_or_default();
             let typ = val.get("type").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
-            let scn = typ == "scene" || typ == "web" || vf.to_lowercase().ends_with(".json") || vf.to_lowercase().ends_with(".pkg") || vf.to_lowercase().ends_with(".html");
-            let props = val.get("general").and_then(|g| g.get("properties")).cloned();
-            (t, vf, pf, tg, scn, props)
+            let dep = val.get("dependency")
+                .and_then(|d| d.as_str().map(|s| s.to_string()).or_else(|| d.as_i64().map(|n| n.to_string())));
+            let is_preset = dep.is_some() || val.get("preset").is_some();
+            if is_preset && !tg.iter().any(|x| x.eq_ignore_ascii_case("preset")) {
+                tg.push("Preset".to_string());
+            }
+            let scn = typ == "scene" || typ == "web" || is_preset || vf.to_lowercase().ends_with(".json") || vf.to_lowercase().ends_with(".pkg") || vf.to_lowercase().ends_with(".html");
+            let props = if is_preset {
+                val.get("preset").and_then(|p| p.as_object()).map(|obj| {
+                    let mut resolved = serde_json::Map::new();
+                    for (k, v) in obj {
+                        if let Some(s) = v.as_str() {
+                            if s.starts_with("files/") || s.starts_with("files\\") {
+                                let abs = folder.join(s).to_string_lossy().replace('\\', "/");
+                                resolved.insert(k.clone(), serde_json::Value::String(abs));
+                                continue;
+                            }
+                        }
+                        resolved.insert(k.clone(), v.clone());
+                    }
+                    serde_json::Value::Object(resolved)
+                })
+            } else {
+                val.get("general").and_then(|g| g.get("properties")).cloned()
+            };
+            (t, vf, pf, tg, scn, props, dep)
         } else {
-            (folder.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), String::new(), "preview.jpg".to_string(), vec![], false, None)
+            (folder.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), String::new(), "preview.jpg".to_string(), vec![], false, None, None)
         }
     } else {
-        (folder.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), String::new(), "preview.jpg".to_string(), vec![], false, None)
+        (folder.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), String::new(), "preview.jpg".to_string(), vec![], false, None, None)
     };
 
     let is_scene = is_scene_meta
@@ -1924,15 +2010,15 @@ fn get_steam_candidate_dirs() -> Vec<std::path::PathBuf> {
         std::path::PathBuf::from(r"C:\Program Files\Steam\steamapps\workshop\content\431960"),
         std::path::PathBuf::from(r"D:\SteamLibrary\steamapps\workshop\content\431960"),
         std::path::PathBuf::from(r"E:\SteamLibrary\steamapps\workshop\content\431960"),
-        std::path::PathBuf::from(r"C:\dev\Comparer\tools\steamcmd\steamapps\workshop\content\431960"),
-        std::path::PathBuf::from(r"C:\dev\Comparer\tools\depotdownloader\downloads\431960"),
-        std::path::PathBuf::from(r"C:\dev\Comparer-RAM\tools\steamcmd\steamapps\workshop\content\431960"),
-        std::path::PathBuf::from(r"C:\dev\Comparer-RAM\tools\depotdownloader\downloads\431960"),
     ];
 
+    // wallpapers downloaded on the developer's PC before subscribing through Steam (a tools/
+    // folder next to the project); only read, nothing downloads there any more
     if let Ok(cur) = std::env::current_dir() {
-        dirs.push(cur.join("tools").join("steamcmd").join("steamapps").join("workshop").join("content").join("431960"));
-        dirs.push(cur.join("tools").join("depotdownloader").join("downloads").join("431960"));
+        for base in [Some(cur.as_path()), cur.parent()].into_iter().flatten() {
+            dirs.push(base.join("tools").join("steamcmd").join("steamapps").join("workshop").join("content").join("431960"));
+            dirs.push(base.join("tools").join("depotdownloader").join("downloads").join("431960"));
+        }
     }
 
     // Check Steam's libraryfolders.vdf to find workshop content on any configured Steam library
@@ -1967,26 +2053,29 @@ fn get_steam_candidate_dirs() -> Vec<std::path::PathBuf> {
 }
 
 fn scan_steam_workshop_wallpapers_inner() -> Vec<SteamWallpaperInfo> {
+    use rayon::prelude::*;
     let mut results: Vec<SteamWallpaperInfo> = Vec::new();
 
-    for base in get_steam_candidate_dirs() {
-        if base.exists() {
-            if let Ok(entries) = std::fs::read_dir(&base) {
-                for entry in entries.flatten() {
-                    let folder = entry.path();
-                    if folder.is_dir() {
-                        if let Some(info) = parse_steam_wallpaper_folder(&folder) {
-                            if let Some(existing) = results.iter_mut().find(|r| r.id == info.id) {
-                                if existing.preview_path.is_empty() && !info.preview_path.is_empty() {
-                                    *existing = info;
-                                }
-                            } else {
-                                results.push(info);
-                            }
-                        }
-                    }
-                }
+    // Every folder is read in parallel (project.json, and the size of web/scene folders, which
+    // walks all their files): one after another this took ~0.6 s at startup. The merge below
+    // keeps the original order.
+    let folders: Vec<std::path::PathBuf> = get_steam_candidate_dirs()
+        .into_iter()
+        .filter(|base| base.exists())
+        .filter_map(|base| std::fs::read_dir(&base).ok())
+        .flat_map(|entries| entries.flatten().map(|e| e.path()).collect::<Vec<_>>())
+        .collect();
+    let parsed: Vec<Option<SteamWallpaperInfo>> = folders
+        .par_iter()
+        .map(|folder| if folder.is_dir() { parse_steam_wallpaper_folder(folder) } else { None })
+        .collect();
+    for info in parsed.into_iter().flatten() {
+        if let Some(existing) = results.iter_mut().find(|r| r.id == info.id) {
+            if existing.preview_path.is_empty() && !info.preview_path.is_empty() {
+                *existing = info;
             }
+        } else {
+            results.push(info);
         }
     }
 
@@ -2097,364 +2186,6 @@ fn fetch_steam_item_details(id: String) -> Result<SteamOnlineItem, String> {
     })
 }
 
-#[tauri::command]
-async fn download_steam_workshop_item(app: tauri::AppHandle, id: String) -> Result<SteamWallpaperInfo, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let clean_id = id.chars().filter(|c| c.is_ascii_digit()).collect::<String>();
-        if clean_id.is_empty() {
-            return Err("ID de Steam Workshop no válido.".to_string());
-        }
-
-        let _guard = STEAM_DOWNLOAD_LOCK.lock().unwrap();
-
-        let _ = app.emit("steam-download-progress", serde_json::json!({
-            "id": &clean_id,
-            "percent": 5,
-            "status": "Comprobando archivos..."
-        }));
-
-        // 1. Check if already installed
-        for base in get_steam_candidate_dirs() {
-            let item_folder = base.join(&clean_id);
-            if item_folder.exists() {
-                if let Some(info) = parse_steam_wallpaper_folder(&item_folder) {
-                    let _ = app.emit("steam-download-progress", serde_json::json!({
-                        "id": &clean_id,
-                        "percent": 100,
-                        "status": "✓ Ya instalado"
-                    }));
-                    return Ok(info);
-                }
-            }
-        }
-
-        // 2. Target folder for DepotDownloaderMod
-        let current_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let target_base = current_dir.join("tools").join("depotdownloader").join("downloads").join("431960");
-        let target_folder = target_base.join(&clean_id);
-        let _ = std::fs::create_dir_all(&target_folder);
-
-        // 3. Find DepotDownloaderMod.exe
-        let depot_paths = [
-            current_dir.join("tools").join("depotdownloader").join("DepotDownloaderMod.exe"),
-            std::path::PathBuf::from(r"tools\depotdownloader\DepotDownloaderMod.exe"),
-            std::path::PathBuf::from(r"C:\dev\Comparer\tools\depotdownloader\DepotDownloaderMod.exe"),
-        ];
-
-        let depot_exe = depot_paths.iter().find(|p| p.exists())
-            .ok_or_else(|| "No se encontró DepotDownloaderMod.exe".to_string())?;
-
-        let work_dir = depot_exe.parent().unwrap_or_else(|| std::path::Path::new("."));
-
-        // Clean up any stale/orphaned DepotDownloader processes
-        let _ = create_silent_command("taskkill")
-            .args(["/F", "/IM", "DepotDownloaderMod.exe"])
-            .output();
-
-        let mut last_err = String::new();
-        let pct_re = regex::Regex::new(r"^\s*(\d{1,3}(?:\.\d{1,2})?)%\s+(.*)$").unwrap();
-
-        fn get_steam_download_accounts(work_dir: &std::path::Path) -> Vec<(String, String)> {
-            let local_cfg = work_dir.join("accounts.json");
-            if local_cfg.exists() {
-                if let Ok(content) = std::fs::read_to_string(&local_cfg) {
-                    if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
-                        let mut list = Vec::new();
-                        for item in parsed {
-                            if let (Some(u), Some(p)) = (item.get("username").and_then(|v| v.as_str()), item.get("password").and_then(|v| v.as_str())) {
-                                let u_str = u.trim().to_string();
-                                let p_str = p.trim().to_string();
-                                if !u_str.is_empty() && !p_str.is_empty() {
-                                    list.push((u_str, p_str));
-                                }
-                            }
-                        }
-                        if !list.is_empty() {
-                            return list;
-                        }
-                    }
-                }
-            }
-            vec![
-                ("adgjl1182".to_string(), "QETUO99999".to_string()),
-                ("premexilmenledgconis".to_string(), "3pXbHZjlDb".to_string()),
-            ]
-        }
-
-        let accounts = get_steam_download_accounts(work_dir);
-        let total_accs = accounts.len();
-        let mut downloaded_ok = false;
-
-        for (idx, (username, password)) in accounts.into_iter().enumerate() {
-            let _ = app.emit("steam-download-progress", serde_json::json!({
-                "id": &clean_id,
-                "percent": 10 + (idx as u32 * 5),
-                "status": if total_accs > 1 {
-                    format!("Conectando a Steam ({}/{})...", idx + 1, total_accs)
-                } else {
-                    "Conectando a Steam...".to_string()
-                }
-            }));
-
-            let mut cmd = create_silent_command(depot_exe.to_str().unwrap_or("DepotDownloaderMod.exe"));
-            cmd.current_dir(work_dir);
-
-            let cmd_args: Vec<String> = vec![
-                "-app".to_string(), "431960".to_string(),
-                "-pubfile".to_string(), clean_id.clone(),
-                "-dir".to_string(), target_folder.to_str().unwrap_or("").to_string(),
-                "-verify-all".to_string(),
-                "-username".to_string(), username.clone(),
-                "-password".to_string(), password,
-            ];
-
-            cmd.args(&cmd_args)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
-
-            if let Ok(mut child) = cmd.spawn() {
-                let stderr_thread = {
-                    let stderr = child.stderr.take();
-                    std::thread::spawn(move || {
-                        let mut s = String::new();
-                        if let Some(pipe) = stderr {
-                            let reader = BufReader::new(pipe);
-                            for l in reader.lines().flatten() {
-                                s.push_str(&l);
-                                s.push('\n');
-                            }
-                        }
-                        s
-                    })
-                };
-
-                if let Some(stdout) = child.stdout.take() {
-                    let reader = BufReader::new(stdout);
-                    for line in reader.lines().flatten() {
-                        let trim = line.trim();
-                        if trim.is_empty() { continue; }
-
-                        if trim.contains("Connecting to Steam") {
-                            let _ = app.emit("steam-download-progress", serde_json::json!({
-                                "id": &clean_id,
-                                "percent": 15,
-                                "status": "Conectando a Steam..."
-                            }));
-                        } else if trim.contains("Logging '") {
-                            let _ = app.emit("steam-download-progress", serde_json::json!({
-                                "id": &clean_id,
-                                "percent": 25,
-                                "status": "Autenticando..."
-                            }));
-                        } else if trim.contains("STEAM GUARD") || trim.contains("Steam Guard") || trim.contains("auth code sent to") {
-                            last_err = format!("La cuenta '{}' requiere verificación Steam Guard.", username);
-                            let _ = child.kill();
-                            break;
-                        } else if trim.contains("Failed to authenticate") || trim.contains("InvalidPassword") || trim.contains("AccountDisabled") {
-                            last_err = format!("La cuenta '{}' no pudo autenticar ({})", username, trim);
-                            let _ = child.kill();
-                            break;
-                        } else if trim.contains("Got depot key") {
-                            let _ = app.emit("steam-download-progress", serde_json::json!({
-                                "id": &clean_id,
-                                "percent": 35,
-                                "status": "Licencia obtenida..."
-                            }));
-                        } else if trim.contains("Downloading depot") || trim.contains("Pre-allocating") {
-                            let _ = app.emit("steam-download-progress", serde_json::json!({
-                                "id": &clean_id,
-                                "percent": 40,
-                                "status": "Descargando archivos..."
-                            }));
-                        } else if let Some(caps) = pct_re.captures(trim) {
-                            let file_pct: f32 = caps.get(1).and_then(|m| m.as_str().parse().ok()).unwrap_or(0.0);
-                            let file_name = caps.get(2).map(|m| m.as_str()).unwrap_or("");
-                            let short_name = std::path::Path::new(file_name)
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or(file_name);
-                            let overall = (40.0 + (file_pct * 0.55)).min(95.0) as u32;
-                            let _ = app.emit("steam-download-progress", serde_json::json!({
-                                "id": &clean_id,
-                                "percent": overall,
-                                "status": format!("{:.0}% {}", file_pct, short_name)
-                            }));
-                        }
-                    }
-                }
-
-                let _ = child.wait();
-                let err_str = stderr_thread.join().unwrap_or_default();
-                if !err_str.is_empty() {
-                    last_err = err_str;
-                }
-            }
-
-            // Check if files downloaded into target_folder
-            if target_folder.exists() {
-                if let Ok(entries) = std::fs::read_dir(&target_folder) {
-                    if entries.flatten().any(|e| e.file_name() != ".DepotDownloader") {
-                        downloaded_ok = true;
-                        break;
-                    }
-                }
-            }
-        }
-
-        if !downloaded_ok {
-            if target_folder.exists() {
-                let _ = std::fs::remove_dir_all(&target_folder);
-            }
-            return Err(format!(
-                "No se pudo descargar automáticamente: Las cuentas de servicio requieren actualización en tools/depotdownloader/accounts.json ({})",
-                if last_err.is_empty() { "Steam Guard activado".to_string() } else { last_err }
-            ));
-        }
-
-        // Post-process downloaded files in target_folder or check candidate dirs
-        for base in get_steam_candidate_dirs() {
-            let item_folder = base.join(&clean_id);
-            if item_folder.exists() {
-                let mp4_path = item_folder.join("preview.mp4");
-
-                let mut has_video = false;
-                if let Ok(entries) = std::fs::read_dir(&item_folder) {
-                    for entry in entries.flatten() {
-                        if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
-                            if ext.eq_ignore_ascii_case("mp4") || ext.eq_ignore_ascii_case("webm") {
-                                has_video = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                if !has_video && !mp4_path.exists() {
-                    let _ = app.emit("steam-download-progress", serde_json::json!({
-                        "id": &clean_id,
-                        "percent": 96,
-                        "status": "Generando animación y optimizando fondo..."
-                    }));
-                    let _ = generate_animated_preview_for_folder(&item_folder);
-                }
-
-                let proj_path = item_folder.join("project.json");
-                if !proj_path.exists() {
-                    let title = fetch_steam_item_details(clean_id.clone())
-                        .map(|d| d.title)
-                        .unwrap_or_else(|_| format!("Steam Wallpaper {}", clean_id));
-                    let minimal = serde_json::json!({
-                        "title": title,
-                        "file": "preview.mp4",
-                        "preview": "preview.jpg"
-                    });
-                    let _ = std::fs::write(&proj_path, minimal.to_string());
-                }
-
-                if let Some(info) = parse_steam_wallpaper_folder(&item_folder) {
-                    let _ = app.emit("steam-download-progress", serde_json::json!({
-                        "id": &clean_id,
-                        "percent": 100,
-                        "status": "✓ Descarga completa"
-                    }));
-                    return Ok(info);
-                }
-            }
-        }
-
-        let err_message = if !last_err.is_empty() {
-            format!("Error al descargar: {}", last_err.lines().next().unwrap_or("Fallo de conexión con Steam"))
-        } else {
-            format!("No se pudo descargar automáticamente el item {}. La cuenta de descarga requiere actualización en accounts.json.", clean_id)
-        };
-
-        let _ = app.emit("steam-download-progress", serde_json::json!({
-            "id": &clean_id,
-            "percent": 0,
-            "status": "Error en descarga"
-        }));
-
-        Err(err_message)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command(async)]
-fn sync_wallpaper_engine_desktop(_video_path: String) -> Result<(), String> {
-    // Desactivado: El usuario no desea sincronizar ni cambiar el fondo de Wallpaper Engine
-    Ok(())
-}
-
-#[tauri::command(async)]
-fn launch_steamcmd_login() -> Result<String, String> {
-    let cur = std::env::current_dir().unwrap_or_default();
-    let steamcmd_paths = [
-        cur.join("tools").join("steamcmd"),
-        std::path::PathBuf::from(r"tools\steamcmd"),
-        std::path::PathBuf::from(r"C:\dev\Comparer\tools\steamcmd"),
-    ];
-    let steamcmd_dir = steamcmd_paths.iter().find(|p| p.join("steamcmd.exe").exists())
-        .cloned()
-        .ok_or_else(|| "No se encontró tools/steamcmd/steamcmd.exe".to_string())?;
-
-    let helper_bat = steamcmd_dir.join("login_helper.bat");
-    let exe_path = steamcmd_dir.join("steamcmd.exe");
-
-    let username = "REMOVED_STEAM_USER";
-    let cmd = if helper_bat.exists() {
-        format!("start \"SteamCMD Login - ModComparer\" cmd /c \"\"{}\" {}\"", helper_bat.display(), username)
-    } else {
-        format!("start \"SteamCMD Login - ModComparer\" \"{}\" +login {}", exe_path.display(), username)
-    };
-
-    let _ = std::process::Command::new("cmd.exe")
-        .args(["/c", &cmd])
-        .spawn()
-        .map_err(|e| format!("Error al abrir consola de SteamCMD: {}", e))?;
-
-    Ok("Consola de SteamCMD abierta.".to_string())
-}
-
-#[tauri::command(async)]
-fn launch_steam_qr_login() -> Result<String, String> {
-    let cur = std::env::current_dir().unwrap_or_default();
-    let depot_paths = [
-        cur.join("tools").join("depotdownloader").join("DepotDownloaderMod.exe"),
-        std::path::PathBuf::from(r"tools\depotdownloader\DepotDownloaderMod.exe"),
-        std::path::PathBuf::from(r"C:\dev\Comparer\tools\depotdownloader\DepotDownloaderMod.exe"),
-    ];
-    let depot_exe = depot_paths.iter().find(|p| p.exists())
-        .cloned()
-        .ok_or_else(|| "No se encontró DepotDownloaderMod.exe".to_string())?;
-    let work_dir = depot_exe.parent().unwrap_or_else(|| std::path::Path::new("."));
-
-    let cmd = format!("start \"Inicio de sesión QR de Steam - ModComparer\" cmd /k \"\"{}\" -app 431960 -qr -remember-password\"", depot_exe.display());
-
-    let _ = std::process::Command::new("cmd.exe")
-        .current_dir(work_dir)
-        .args(["/c", &cmd])
-        .spawn()
-        .map_err(|e| format!("Error al abrir consola de código QR: {}", e))?;
-
-    Ok("Ventana de código QR abierta. Escanéalo con la app de Steam en tu móvil para vincular.".to_string())
-}
-
-#[tauri::command(async)]
-fn open_steam_workshop_item(id: String) -> Result<(), String> {
-    let clean_id = id.chars().filter(|c| c.is_ascii_digit()).collect::<String>();
-    if clean_id.is_empty() {
-        return Err("ID de Steam Workshop no válido".to_string());
-    }
-    let url = format!("steam://url/CommunityFilePage/{}", clean_id);
-    let _ = std::process::Command::new("cmd.exe")
-        .args(["/c", "start", &url])
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
 #[tauri::command(async)]
 fn check_steam_item_installed(id: String) -> Option<SteamWallpaperInfo> {
     let clean_id = id.chars().filter(|c| c.is_ascii_digit()).collect::<String>();
@@ -2533,7 +2264,9 @@ fn fetch_steam_workshop_online_inner(
                 "--max-time",
                 "15",
                 "-A",
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+                "-H",
+                "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "-H",
                 "Accept-Language: en-US,en;q=0.9,es;q=0.8",
                 "-b",
@@ -2544,11 +2277,16 @@ fn fetch_steam_workshop_online_inner(
             .map_err(|e| format!("Error al consultar Steam Workshop: {}", e))?;
 
         if output.status.success() {
-            html = String::from_utf8_lossy(&output.stdout).to_string();
-            let _ = std::fs::write(&cache_file, &html);
+            let res_html = String::from_utf8_lossy(&output.stdout).to_string();
+            if res_html.contains("filedetails/?id=") {
+                html = res_html;
+                let _ = std::fs::write(&cache_file, &html);
+            }
         } else if cache_file.exists() {
             if let Ok(cached) = std::fs::read_to_string(&cache_file) {
-                html = cached;
+                if cached.contains("filedetails/?id=") {
+                    html = cached;
+                }
             }
         }
     }
@@ -2886,6 +2624,141 @@ fn import_wallpaper_file(file_path: String) -> Result<DownloadedWallpaperItem, S
 }
 
 #[tauri::command(async)]
+fn import_wallpaper_from_youtube(url: String) -> Result<DownloadedWallpaperItem, String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err("Por favor ingresa un enlace válido.".to_string());
+    }
+
+    let userprofile = std::env::var("USERPROFILE").unwrap_or_else(|_| r"C:\Users\Default".to_string());
+    let imported_dir = std::path::PathBuf::from(&userprofile)
+        .join("Downloads")
+        .join("ModComparer_Wallpapers")
+        .join("imported");
+
+    let _ = std::fs::create_dir_all(&imported_dir);
+
+    let yt_dlp_candidates = [
+        r"C:\Python313\Scripts\yt-dlp.exe".to_string(),
+        "yt-dlp.exe".to_string(),
+        "yt-dlp".to_string(),
+    ];
+
+    let mut found_exe: Option<String> = None;
+    for cand in &yt_dlp_candidates {
+        if std::path::Path::new(cand).exists() {
+            found_exe = Some(cand.clone());
+            break;
+        }
+        if let Ok(out) = create_silent_command(cand).arg("--version").output() {
+            if out.status.success() {
+                found_exe = Some(cand.clone());
+                break;
+            }
+        }
+    }
+
+    let exe = found_exe.ok_or_else(|| "No se encontró yt-dlp en el sistema para descargar de YouTube.".to_string())?;
+
+    let out_template = imported_dir.join("%(title).100B [%(id)s].%(ext)s");
+    let out_str = out_template.to_string_lossy().to_string();
+
+    let output = create_silent_command(&exe)
+        .args([
+            "--no-playlist",
+            "--no-update",
+            "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/best",
+            "--merge-output-format", "mp4",
+            "--write-thumbnail",
+            "--convert-thumbnails", "jpg",
+            "-o", &out_str,
+            "--print", "after_move:filepath",
+            "--print", "title",
+            trimmed,
+        ])
+        .output()
+        .map_err(|e| format!("Error al ejecutar yt-dlp: {}", e))?;
+
+    if !output.status.success() {
+        let err_msg = String::from_utf8_lossy(&output.stderr);
+        let first_err = err_msg.lines()
+            .find(|l| l.contains("ERROR:") || l.contains("Error:"))
+            .unwrap_or(err_msg.trim());
+        return Err(if first_err.is_empty() {
+            "Error al descargar el video con yt-dlp.".to_string()
+        } else {
+            first_err.to_string()
+        });
+    }
+
+    let stdout_str = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout_str.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+
+    let mut downloaded_path: Option<std::path::PathBuf> = None;
+    let mut video_title: Option<String> = None;
+
+    for line in &lines {
+        let p = std::path::PathBuf::from(line);
+        if p.exists() && p.is_file() {
+            downloaded_path = Some(p);
+        } else if video_title.is_none() && !line.starts_with("WARNING:") {
+            video_title = Some(line.to_string());
+        }
+    }
+
+    let final_path = if let Some(p) = downloaded_path {
+        p
+    } else {
+        let mut newest_file: Option<(std::path::PathBuf, std::time::SystemTime)> = None;
+        if let Ok(entries) = std::fs::read_dir(&imported_dir) {
+            for entry in entries.flatten() {
+                let ep = entry.path();
+                if ep.extension().and_then(|x| x.to_str()).map(|x| x.eq_ignore_ascii_case("mp4")).unwrap_or(false) {
+                    if let Ok(meta) = ep.metadata() {
+                        if let Ok(mtime) = meta.modified() {
+                            if newest_file.as_ref().map(|(_, t)| mtime > *t).unwrap_or(true) {
+                                newest_file = Some((ep, mtime));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        newest_file.map(|(p, _)| p).ok_or_else(|| "No se encontró el archivo de video descargado.".to_string())?
+    };
+
+    let stem = final_path.file_stem().and_then(|s| s.to_str()).unwrap_or("Video").to_string();
+    let title = video_title.unwrap_or_else(|| stem.clone());
+    let size_mb = std::fs::metadata(&final_path)
+        .map(|m| (m.len() as f64) / 1_048_576.0)
+        .unwrap_or(0.0);
+    let mtime = get_file_modified_time(&final_path);
+
+    let possible_thumb = final_path.with_extension("jpg");
+    let preview_path = if possible_thumb.exists() {
+        Some(possible_thumb.to_string_lossy().to_string())
+    } else {
+        None
+    };
+
+    Ok(DownloadedWallpaperItem {
+        id: format!("imp_{}", stem),
+        title,
+        video_path: final_path.to_string_lossy().to_string(),
+        preview_path,
+        preview_data_url: None,
+        source: "imported".to_string(),
+        file_size_mb: (size_mb * 10.0).round() / 10.0,
+        tags: vec!["YouTube".to_string(), "Importado".to_string()],
+        resolution: None,
+        modified_time: mtime,
+        is_scene: false,
+        project_path: None,
+        properties: None,
+    })
+}
+
+#[tauri::command(async)]
 fn open_wallpapers_folder() -> Result<(), String> {
     let userprofile = std::env::var("USERPROFILE").unwrap_or_else(|_| r"C:\Users\Default".to_string());
     let folder = std::path::PathBuf::from(userprofile)
@@ -3170,7 +3043,7 @@ fn app_window_minimize(window: tauri::Window) {
         }
         unsafe {
             if let Some(hwnd_val) = get_we_window_hwnd() {
-                we_win32::ShowWindow(hwnd_val as we_win32::HWND, we_win32::SW_HIDE);
+                we_win32::ShowWindowAsync(hwnd_val as we_win32::HWND, we_win32::SW_HIDE);
             }
             if let Some(u_val) = get_underlay_hwnd() {
                 we_win32::ShowWindow(u_val as we_win32::HWND, we_win32::SW_HIDE);
@@ -3406,7 +3279,9 @@ mod we_win32 {
     pub const SWP_NOACTIVATE: u32 = 0x0010;
     pub const SWP_FRAMECHANGED: u32 = 0x0020;
     pub const SWP_SHOWWINDOW: u32 = 0x0040;
+    pub const SWP_HIDEWINDOW: u32 = 0x0080;
     pub const SWP_NOCOPYBITS: u32 = 0x0100;
+    pub const SWP_ASYNCWINDOWPOS: u32 = 0x4000;
     pub const SW_HIDE: i32 = 0;
     pub const SW_SHOW: i32 = 5;
     pub const SW_SHOWNA: i32 = 8;
@@ -3474,6 +3349,10 @@ mod we_win32 {
             uFlags: u32,
         ) -> BOOL;
         pub fn ShowWindow(hWnd: HWND, nCmdShow: i32) -> BOOL;
+        // For Wallpaper Engine's window (another process): posts the change instead of
+        // waiting for WE to handle it. WE can stop answering while it builds a scene, and a
+        // synchronous ShowWindow then froze the launcher's UI thread for good.
+        pub fn ShowWindowAsync(hWnd: HWND, nCmdShow: i32) -> BOOL;
         pub fn IsIconic(hWnd: HWND) -> BOOL;
         pub fn IsZoomed(hWnd: HWND) -> BOOL;
         pub fn SetWindowDisplayAffinity(hWnd: HWND, dwAffinity: u32) -> BOOL;
@@ -3482,6 +3361,7 @@ mod we_win32 {
         pub fn GetForegroundWindow() -> HWND;
         pub fn SetActiveWindow(hWnd: HWND) -> HWND;
         pub fn BringWindowToTop(hWnd: HWND) -> BOOL;
+        pub fn GetAncestor(hwnd: HWND, gaFlags: u32) -> HWND;
 
         pub fn CoInitialize(pvReserved: *mut std::ffi::c_void) -> i32;
         pub fn CoCreateInstance(
@@ -3515,6 +3395,11 @@ mod we_win32 {
         pub fn DefWindowProcW(hWnd: HWND, Msg: u32, wParam: usize, lParam: isize) -> isize;
         pub fn CallWindowProcW(lpPrevWndFunc: WNDPROC, hWnd: HWND, Msg: u32, wParam: usize, lParam: isize) -> isize;
         pub fn PostMessageW(hWnd: HWND, Msg: u32, wParam: usize, lParam: isize) -> BOOL;
+        pub fn SendMessageW(hWnd: HWND, Msg: u32, wParam: usize, lParam: isize) -> isize;
+        pub fn ReleaseCapture() -> BOOL;
+        pub fn SetCapture(hWnd: HWND) -> HWND;
+        pub fn GetCursorPos(lpPoint: *mut POINT) -> BOOL;
+        pub fn LoadCursorW(hInstance: HINSTANCE, lpCursorName: *const u16) -> HCURSOR;
         pub fn IsWindow(hWnd: HWND) -> BOOL;
         pub fn IsWindowVisible(hWnd: HWND) -> BOOL;
         pub fn GetModuleHandleW(lpModuleName: *const u16) -> HMODULE;
@@ -3522,6 +3407,24 @@ mod we_win32 {
         pub fn GetDC(hWnd: HWND) -> HDC;
         pub fn ReleaseDC(hWnd: HWND, hDC: HDC) -> i32;
         pub fn PrintWindow(hwnd: HWND, hdcBlt: HDC, nFlags: u32) -> BOOL;
+        pub fn InvalidateRect(hWnd: HWND, lpRect: *const RECT, bErase: BOOL) -> BOOL;
+        pub fn BeginPaint(hWnd: HWND, lpPaint: *mut std::ffi::c_void) -> HDC;
+        pub fn EndPaint(hWnd: HWND, lpPaint: *const std::ffi::c_void) -> BOOL;
+        pub fn GetProcAddress(hModule: HMODULE, lpProcName: *const std::os::raw::c_char) -> *mut c_void;
+        pub fn SetTimer(hWnd: HWND, nIDEvent: usize, uElapse: u32, lpTimerFunc: *mut std::ffi::c_void) -> usize;
+        pub fn KillTimer(hWnd: HWND, uIDEvent: usize) -> BOOL;
+        pub fn SetFocus(hWnd: HWND) -> HWND;
+        pub fn RedrawWindow(hWnd: HWND, lprcUpdate: *const RECT, hrgnUpdate: *mut c_void, flags: u32) -> BOOL;
+        pub fn UpdateWindow(hWnd: HWND) -> BOOL;
+    }
+
+    pub const RDW_INVALIDATE: u32 = 0x0001;
+    pub const RDW_UPDATENOW: u32 = 0x0100;
+
+    #[link(name = "winmm")]
+    extern "system" {
+        pub fn timeBeginPeriod(uPeriod: u32) -> u32;
+        pub fn timeEndPeriod(uPeriod: u32) -> u32;
     }
 
     pub type HMODULE = *mut c_void;
@@ -3605,6 +3508,7 @@ mod we_win32 {
             h: i32,
         ) -> HRGN;
         pub fn CreateRectRgn(x1: i32, y1: i32, x2: i32, y2: i32) -> HRGN;
+        pub fn CreateSolidBrush(color: u32) -> HBRUSH;
         pub fn DeleteObject(ho: HGDIOBJ) -> BOOL;
         pub fn GetStockObject(i: i32) -> HGDIOBJ;
         pub fn CreateCompatibleDC(hdc: HDC) -> HDC;
@@ -3656,6 +3560,25 @@ mod we_win32 {
             lpbmi: *mut std::ffi::c_void,
             usage: u32,
         ) -> i32;
+        pub fn SetBkMode(hdc: HDC, mode: i32) -> i32;
+        pub fn SetTextColor(hdc: HDC, color: u32) -> u32;
+        pub fn TextOutW(hdc: HDC, x: i32, y: i32, lpString: *const u16, c: i32) -> BOOL;
+        pub fn CreateFontW(
+            cHeight: i32,
+            cWidth: i32,
+            cEscapement: i32,
+            cOrientation: i32,
+            cWeight: i32,
+            bItalic: u32,
+            bUnderline: u32,
+            bStrikeOut: u32,
+            iCharSet: u32,
+            iOutPrecision: u32,
+            iClipPrecision: u32,
+            iQuality: u32,
+            iPitchAndFamily: u32,
+            pszFaceName: *const u16,
+        ) -> HGDIOBJ;
     }
 
     #[link(name = "dwmapi")]
@@ -3697,11 +3620,13 @@ mod we_win32 {
         ) -> i32;
     }
 
+    pub const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
     pub const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
     pub const DWMWCP_DONOTROUND: u32 = 1;
     pub const DWMWCP_ROUND: u32 = 2;
     pub const DWMWA_BORDER_COLOR: u32 = 34;
     pub const DWMWA_COLOR_NONE: u32 = 0xFFFFFFFE;
+    pub const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
     pub const DWMWA_NCRENDERING_POLICY: u32 = 2;
     pub const DWMWA_FORCE_ICONIC_REPRESENTATION: u32 = 7;
     pub const DWMWA_HAS_ICONIC_BITMAP: u32 = 10;
@@ -3749,10 +3674,85 @@ mod we_win32 {
     pub fn to_wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct AccentPolicy {
+        pub accent_state: u32,
+        pub accent_flags: u32,
+        pub gradient_color: u32,
+        pub animation_id: u32,
+    }
+
+    #[repr(C)]
+    pub struct WindowCompositionAttributeData {
+        pub attribute: u32,
+        pub data: *mut c_void,
+        pub size_of_data: usize,
+    }
+
+    pub unsafe fn enable_blur_behind(hwnd: HWND) {
+        // 1. Enforce dark mode on window frames
+        let dark_mode: u32 = 1;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            &dark_mode as *const _ as *const std::ffi::c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+
+        // 2. Round corners and eliminate harsh borders
+        let corner_pref: u32 = DWMWCP_ROUND;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &corner_pref as *const _ as *const std::ffi::c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+        let border_color: u32 = DWMWA_COLOR_NONE;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR,
+            &border_color as *const _ as *const std::ffi::c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+
+        // 3. SetWindowCompositionAttribute (Aero Glass Blur Behind - softer blur and natural tint)
+        let user32 = GetModuleHandleW(to_wide("user32.dll").as_ptr());
+        if !user32.is_null() {
+            let set_composition_attr = GetProcAddress(
+                user32,
+                b"SetWindowCompositionAttribute\0".as_ptr() as *const std::os::raw::c_char,
+            );
+            if !set_composition_attr.is_null() {
+                let func: unsafe extern "system" fn(HWND, *mut WindowCompositionAttributeData) -> BOOL =
+                    std::mem::transmute(set_composition_attr);
+                let mut policy = AccentPolicy {
+                    accent_state: 3, // ACCENT_ENABLE_BLURBEHIND (softer, lighter blur)
+                    accent_flags: 0,
+                    gradient_color: 0x01000000, // Natural transparent tint as before
+                    animation_id: 0,
+                };
+                let mut data = WindowCompositionAttributeData {
+                    attribute: 19, // WCA_ACCENT_POLICY
+                    data: &mut policy as *mut _ as *mut c_void,
+                    size_of_data: std::mem::size_of::<AccentPolicy>(),
+                };
+                func(hwnd, &mut data);
+            }
+        }
+    }
 }
 
 static WE_WINDOW_HWND: Mutex<Option<isize>> = Mutex::new(None);
 static UNDERLAY_HWND: Mutex<Option<isize>> = Mutex::new(None);
+static CONSOLE_BLUR_HWND: Mutex<Option<isize>> = Mutex::new(None);
+static CONSOLE_BLUR_PARENT_HWND: Mutex<Option<isize>> = Mutex::new(None);
+static CONSOLE_BLUR_CLASS_REGISTERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static CONSOLE_BLUR_BEHIND_APP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static BLUR_DRAG_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static BLUR_DRAG_START: Mutex<(i32, i32, i32, i32, i32, i32, i32, i32)> = Mutex::new((0, 0, 0, 0, 0, 0, 0, 0));
+static LAST_DRAGGED_POS: Mutex<(i32, i32)> = Mutex::new((-9999, -9999));
 static WE_THUMBNAIL_ID: Mutex<Option<isize>> = Mutex::new(None);
 static UNDERLAY_CLASS_REGISTERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static WE_TRANSFORM: Mutex<(f32, f32, f32)> = Mutex::new((1.0, 0.0, 0.0));
@@ -3837,6 +3837,17 @@ unsafe extern "system" fn underlay_wnd_proc(
     lparam: isize,
 ) -> isize {
     const WM_ERASEBKGND: u32 = 0x0014;
+    const WM_NCHITTEST: u32 = 0x0084;
+    const WM_MOUSEACTIVATE: u32 = 0x0021;
+    const HTTRANSPARENT: isize = -1;
+    const MA_NOACTIVATEANDEAT: isize = 4;
+
+    if msg == WM_NCHITTEST {
+        return HTTRANSPARENT;
+    }
+    if msg == WM_MOUSEACTIVATE {
+        return MA_NOACTIVATEANDEAT;
+    }
     if msg == WM_ERASEBKGND {
         let mut rc = we_win32::RECT::default();
         we_win32::GetClientRect(hwnd, &mut rc);
@@ -4026,7 +4037,2436 @@ fn get_or_create_underlay_window(_app_hwnd: we_win32::HWND, x: i32, y: i32, w: u
     }
 }
 
+
+
 #[cfg(target_os = "windows")]
+fn get_console_blur_hwnd() -> Option<isize> {
+    CONSOLE_BLUR_HWND.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+#[cfg(target_os = "windows")]
+#[allow(dead_code)]
+fn take_console_blur_hwnd() -> Option<isize> {
+    let mut lock = CONSOLE_BLUR_HWND.lock().unwrap_or_else(|e| e.into_inner());
+    lock.take()
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ObstacleKind {
+    CactusSmall,
+    CactusDouble,
+    CactusLarge,
+    CactusLargeDouble,
+    PteroLow,
+    PteroMid,
+    PteroHigh,
+}
+
+#[derive(Clone, Copy)]
+struct ObstacleItem {
+    x: f32,
+    kind: ObstacleKind,
+}
+
+struct DinoGame {
+    dino_y: f32,
+    dino_vy: f32,
+    is_jumping: bool,
+    is_ducking: bool,
+    is_jump_held: bool,
+    frame: u64,
+    distance: f32,
+    score: u32,
+    high_score: u32,
+    game_over: bool,
+    is_playing: bool,
+    obstacles: Vec<ObstacleItem>,
+    next_spawn_dist: f32,
+    cloud_x1: f32,
+    cloud_x2: f32,
+    cloud_x3: f32,
+    ground_offset: f32,
+    step_timer: f32,
+    step_frame: u32,
+    last_update: Option<std::time::Instant>,
+}
+
+impl DinoGame {
+    const fn new() -> Self {
+        Self {
+            dino_y: 0.0,
+            dino_vy: 0.0,
+            is_jumping: false,
+            is_ducking: false,
+            is_jump_held: false,
+            frame: 0,
+            distance: 0.0,
+            score: 0,
+            high_score: 180,
+            game_over: false,
+            is_playing: false,
+            obstacles: Vec::new(),
+            next_spawn_dist: 280.0,
+            cloud_x1: 220.0,
+            cloud_x2: 480.0,
+            cloud_x3: 650.0,
+            ground_offset: 0.0,
+            step_timer: 0.0,
+            step_frame: 0,
+            last_update: None,
+        }
+    }
+
+    fn jump(&mut self) {
+        self.is_jump_held = true;
+        if !self.is_playing || self.game_over {
+            self.is_playing = true;
+            self.game_over = false;
+            self.score = 0;
+            self.distance = 0.0;
+            self.dino_y = 0.0;
+            self.dino_vy = 0.0;
+            self.is_jumping = true;
+            self.dino_vy = -8.2;
+            self.is_ducking = false;
+            self.obstacles.clear();
+            self.obstacles.push(ObstacleItem { x: 520.0, kind: ObstacleKind::CactusSmall });
+            self.next_spawn_dist = 280.0;
+            self.step_timer = 0.0;
+            self.step_frame = 0;
+            self.last_update = Some(std::time::Instant::now());
+            return;
+        }
+        if !self.is_jumping && !self.is_ducking {
+            self.is_jumping = true;
+            let current_speed = 2.65 + (self.score as f32 * 0.0015).min(1.8);
+            self.dino_vy = -8.2 - ((current_speed - 2.65) * 0.25).min(0.6);
+        }
+    }
+
+    fn release_jump(&mut self) {
+        self.is_jump_held = false;
+        if self.is_jumping && self.dino_vy < -2.2 {
+            self.dino_vy = -2.2;
+        }
+    }
+
+    fn set_ducking(&mut self, duck: bool) {
+        if !self.is_playing || self.game_over { return; }
+        self.is_ducking = duck;
+        if duck && self.is_jumping {
+            if self.dino_vy < 5.5 {
+                self.dino_vy = 5.5;
+            }
+        }
+    }
+
+    fn update(&mut self) {
+        let now = std::time::Instant::now();
+        let dt = if let Some(last) = self.last_update {
+            let elapsed = now.duration_since(last).as_secs_f32();
+            (elapsed / 0.0166667).clamp(0.05, 2.5)
+        } else {
+            1.0
+        };
+        self.last_update = Some(now);
+        self.frame += 1;
+        if !self.is_playing {
+            self.cloud_x1 -= 0.25 * dt;
+            if self.cloud_x1 < -90.0 { self.cloud_x1 = 580.0; }
+            self.cloud_x2 -= 0.35 * dt;
+            if self.cloud_x2 < -90.0 { self.cloud_x2 = 640.0; }
+            self.cloud_x3 -= 0.18 * dt;
+            if self.cloud_x3 < -90.0 { self.cloud_x3 = 690.0; }
+            return;
+        }
+        if self.game_over {
+            return;
+        }
+
+        if self.obstacles.is_empty() {
+            self.obstacles.push(ObstacleItem { x: 500.0, kind: ObstacleKind::CactusSmall });
+        }
+
+        let speed = 2.65 + (self.score as f32 * 0.0015).min(1.8);
+        self.distance += speed * dt;
+        self.score = (self.distance / 10.0) as u32;
+
+        if self.score > self.high_score {
+            self.high_score = self.score;
+        }
+
+        self.ground_offset += speed * dt;
+        self.step_timer += speed * dt;
+        if self.step_timer >= 16.0 {
+            self.step_timer = 0.0;
+            self.step_frame = if self.step_frame == 0 { 1 } else { 0 };
+        }
+
+        self.cloud_x1 -= speed * 0.08 * dt;
+        if self.cloud_x1 < -80.0 { self.cloud_x1 = 580.0; }
+        self.cloud_x2 -= speed * 0.14 * dt;
+        if self.cloud_x2 < -80.0 { self.cloud_x2 = 640.0; }
+        self.cloud_x3 -= speed * 0.06 * dt;
+        if self.cloud_x3 < -80.0 { self.cloud_x3 = 690.0; }
+
+        if self.is_jumping {
+            let gravity = if self.is_jump_held && self.dino_vy < 0.0 { 0.22 } else { 0.38 };
+            self.dino_y += self.dino_vy * dt;
+            self.dino_vy += gravity * dt;
+            if self.dino_y >= 0.0 {
+                self.dino_y = 0.0;
+                self.dino_vy = 0.0;
+                self.is_jumping = false;
+            }
+        }
+
+        for obs in &mut self.obstacles {
+            obs.x -= speed * dt;
+        }
+        self.obstacles.retain(|o| o.x > -80.0);
+
+        let last_x = self.obstacles.last().map(|o| o.x).unwrap_or(0.0);
+        if last_x < 520.0 - self.next_spawn_dist {
+            let rnd = (self.frame * 7 + self.score as u64 * 13) % 100;
+            let kind = if self.score < 120 {
+                if rnd < 50 { ObstacleKind::CactusSmall } else { ObstacleKind::CactusDouble }
+            } else if self.score < 280 {
+                if rnd < 35 {
+                    ObstacleKind::CactusSmall
+                } else if rnd < 58 {
+                    ObstacleKind::CactusDouble
+                } else {
+                    if rnd < 76 { ObstacleKind::CactusLarge } else { ObstacleKind::PteroMid }
+                }
+            } else {
+                if rnd < 25 {
+                    ObstacleKind::CactusSmall
+                } else if rnd < 50 {
+                    if rnd < 60 { ObstacleKind::CactusLarge } else { ObstacleKind::CactusLargeDouble }
+                } else if rnd < 72 {
+                    ObstacleKind::PteroLow
+                } else {
+                    if rnd < 90 { ObstacleKind::PteroMid } else { ObstacleKind::PteroHigh }
+                }
+            };
+
+            self.obstacles.push(ObstacleItem { x: 540.0, kind });
+            self.next_spawn_dist = 260.0 + ((rnd * 3) % 180) as f32;
+        }
+
+        let (dino_left, dino_right, dino_top, dino_bottom) = if self.is_ducking {
+            (28.0 + 4.0, 28.0 + 54.0, self.dino_y - 25.0, self.dino_y)
+        } else {
+            (28.0 + 8.0, 28.0 + 36.0, self.dino_y - 43.0, self.dino_y)
+        };
+
+        for obs in &self.obstacles {
+            let (ox1, ox2, oy1, oy2) = match obs.kind {
+                ObstacleKind::CactusSmall => (obs.x + 3.0, obs.x + 14.0, -31.0, 0.0),
+                ObstacleKind::CactusDouble => (obs.x + 4.0, obs.x + 30.0, -31.0, 0.0),
+                ObstacleKind::CactusLarge => (obs.x + 4.0, obs.x + 21.0, -46.0, 0.0),
+                ObstacleKind::CactusLargeDouble => (obs.x + 4.0, obs.x + 46.0, -46.0, 0.0),
+                ObstacleKind::PteroLow => (obs.x + 8.0, obs.x + 38.0, -28.0, -6.0),
+                ObstacleKind::PteroMid => (obs.x + 8.0, obs.x + 38.0, -52.0, -26.0),
+                ObstacleKind::PteroHigh => (obs.x + 8.0, obs.x + 38.0, -76.0, -50.0),
+            };
+
+            if dino_right > ox1 && dino_left < ox2 {
+                if dino_bottom > oy1 && dino_top < oy2 {
+                    self.game_over = true;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+static DINO_GAME: Mutex<DinoGame> = Mutex::new(DinoGame::new());
+
+const CHROME_DINO_STAND: [&str; 47] = [
+    "............................................",
+    "............................................",
+    "........................################....",
+    "........................################....",
+    "......................####################..",
+    "......................####..##############..",
+    "......................####..##############..",
+    "......................####################..",
+    "......................####################..",
+    "......................####################..",
+    "......................####################..",
+    "......................####################..",
+    "......................####################..",
+    "......................##########............",
+    "......................##########............",
+    "......................################......",
+    "......................################......",
+    "..##................##########..............",
+    "..##................##########..............",
+    "..##.............#############..............",
+    "..##.............#############..............",
+    "..####........####################..........",
+    "..####........####################..........",
+    "..######....##################..##..........",
+    "..######....##################..##..........",
+    "..############################..............",
+    "..############################..............",
+    "..############################..............",
+    "..############################..............",
+    "....##########################..............",
+    "....########################................",
+    "......######################................",
+    "......######################................",
+    "........##################..................",
+    "........##################..................",
+    "..........##############....................",
+    "..........##############....................",
+    "............######..####....................",
+    "............######..####....................",
+    "............####......##....................",
+    "............####......##....................",
+    "............##........##....................",
+    "............##........##....................",
+    "............####......####..................",
+    "............####......####..................",
+    "............................................",
+    "............................................",
+];
+
+const CHROME_DINO_BLINK: [&str; 47] = [
+    "............................................",
+    "............................................",
+    "........................################....",
+    "........................################....",
+    "......................####################..",
+    "......................####################..",
+    "......................####################..",
+    "......................####################..",
+    "......................####################..",
+    "......................####################..",
+    "......................####################..",
+    "......................####################..",
+    "......................####################..",
+    "......................##########............",
+    "......................##########............",
+    "......................################......",
+    "......................################......",
+    "..##................##########..............",
+    "..##................##########..............",
+    "..##.............#############..............",
+    "..##.............#############..............",
+    "..####........####################..........",
+    "..####........####################..........",
+    "..######....##################..##..........",
+    "..######....##################..##..........",
+    "..############################..............",
+    "..############################..............",
+    "..############################..............",
+    "..############################..............",
+    "....##########################..............",
+    "....########################................",
+    "......######################................",
+    "......######################................",
+    "........##################..................",
+    "........##################..................",
+    "..........##############....................",
+    "..........##############....................",
+    "............######..####....................",
+    "............######..####....................",
+    "............####......##....................",
+    "............####......##....................",
+    "............##........##....................",
+    "............##........##....................",
+    "............####......####..................",
+    "............####......####..................",
+    "............................................",
+    "............................................",
+];
+
+const CHROME_DINO_RUN1: [&str; 47] = [
+    "............................................",
+    "............................................",
+    "........................################....",
+    "........................################....",
+    "......................####################..",
+    "......................####..##############..",
+    "......................####..##############..",
+    "......................####################..",
+    "......................####################..",
+    "......................####################..",
+    "......................####################..",
+    "......................####################..",
+    "......................####################..",
+    "......................##########............",
+    "......................##########............",
+    "......................################......",
+    "......................################......",
+    "..##................##########..............",
+    "..##................##########..............",
+    "..##.............#############..............",
+    "..##.............#############..............",
+    "..####........####################..........",
+    "..####........####################..........",
+    "..######....##################..##..........",
+    "..######....##################..##..........",
+    "..############################..............",
+    "..############################..............",
+    "..############################..............",
+    "..############################..............",
+    "....##########################..............",
+    "....########################................",
+    "......######################................",
+    "......######################................",
+    "........##################..................",
+    "........##################..................",
+    "..........##############....................",
+    "..........##############....................",
+    "............######....#####.................",
+    "............######....#####.................",
+    "............####............................",
+    "............####............................",
+    "............##..............................",
+    "............##..............................",
+    "............####............................",
+    "............####............................",
+    "............................................",
+    "............................................",
+];
+
+const CHROME_DINO_RUN2: [&str; 47] = [
+    "............................................",
+    "............................................",
+    "........................################....",
+    "........................################....",
+    "......................####################..",
+    "......................####..##############..",
+    "......................####..##############..",
+    "......................####################..",
+    "......................####################..",
+    "......................####################..",
+    "......................####################..",
+    "......................####################..",
+    "......................####################..",
+    "......................##########............",
+    "......................##########............",
+    "......................################......",
+    "......................################......",
+    "..##................##########..............",
+    "..##................##########..............",
+    "..##.............#############..............",
+    "..##.............#############..............",
+    "..####........####################..........",
+    "..####........####################..........",
+    "..######....##################..##..........",
+    "..######....##################..##..........",
+    "..############################..............",
+    "..############################..............",
+    "..############################..............",
+    "..############################..............",
+    "....##########################..............",
+    "....########################................",
+    "......######################................",
+    "......######################................",
+    "........##################..................",
+    "........##################..................",
+    "..........##############....................",
+    "..........##############....................",
+    "............####....####....................",
+    "............####....####....................",
+    "..............####....##....................",
+    "..............####....##....................",
+    "......................##....................",
+    "......................##....................",
+    "......................####..................",
+    "......................####..................",
+    "............................................",
+    "............................................",
+];
+
+const CHROME_DINO_CRASH: [&str; 47] = [
+    "............................................",
+    "............................................",
+    "........................################....",
+    "........................################....",
+    "......................####################..",
+    "......................####....############..",
+    "......................####.##.############..",
+    "......................####.##.############..",
+    "......................####....############..",
+    "......................####################..",
+    "......................####################..",
+    "......................####################..",
+    "......................####################..",
+    "......................####################..",
+    "......................####################..",
+    "......................################......",
+    "......................################......",
+    "..##................##########..............",
+    "..##................##########..............",
+    "..##.............#############..............",
+    "..##.............#############..............",
+    "..####........####################..........",
+    "..####........####################..........",
+    "..######....##################..##..........",
+    "..######....##################..##..........",
+    "..############################..............",
+    "..############################..............",
+    "..############################..............",
+    "..############################..............",
+    "....##########################..............",
+    "....########################................",
+    "......######################................",
+    "......######################................",
+    "........##################..................",
+    "........##################..................",
+    "..........##############....................",
+    "..........##############....................",
+    "............######..####....................",
+    "............######..####....................",
+    "............####......##....................",
+    "............####......##....................",
+    "............##........##....................",
+    "............##........##....................",
+    "............####......####..................",
+    "............####......####..................",
+    "............................................",
+    "............................................",
+];
+
+const CHROME_DINO_DUCK1: [&str; 47] = [
+    "...........................................................",
+    "...........................................................",
+    "...........................................................",
+    "...........................................................",
+    "...........................................................",
+    "...........................................................",
+    "...........................................................",
+    "...........................................................",
+    "...........................................................",
+    "...........................................................",
+    "...........................................................",
+    "...........................................................",
+    "...........................................................",
+    "...........................................................",
+    "...........................................................",
+    "...........................................................",
+    "...........................................................",
+    "...........................................................",
+    "...........................................................",
+    "..##.......................................................",
+    "..##...................................################....",
+    "..######........#################......################....",
+    "..######........#################....####################..",
+    "..#######################################..##############..",
+    "..#######################################..##############..",
+    "....#####################################################..",
+    "....#####################################################..",
+    "......###################################################..",
+    "......###################################################..",
+    "........#################################################..",
+    "........#################################################..",
+    "..........#####################################............",
+    "..........#####################################............",
+    "............#######################....##############......",
+    "............#######################....##############......",
+    "..............#####################........................",
+    "..............############.....##..........................",
+    ".............##....######......##..........................",
+    ".............##....######......####........................",
+    ".............####..####........####........................",
+    ".............####..####....................................",
+    "...................##......................................",
+    "...................##......................................",
+    "...................####....................................",
+    "...................####....................................",
+    "...........................................................",
+    "...........................................................",
+];
+
+const CHROME_DINO_DUCK2: [&str; 47] = [
+    "...........................................................",
+    "...........................................................",
+    "...........................................................",
+    "...........................................................",
+    "...........................................................",
+    "...........................................................",
+    "...........................................................",
+    "...........................................................",
+    "...........................................................",
+    "...........................................................",
+    "...........................................................",
+    "...........................................................",
+    "...........................................................",
+    "...........................................................",
+    "...........................................................",
+    "...........................................................",
+    "...........................................................",
+    "...........................................................",
+    "...........................................................",
+    "..##.......................................................",
+    "..##...................................################....",
+    "..######........#################......################....",
+    "..######........#################....####################..",
+    "..#######################################..##############..",
+    "..#######################################..##############..",
+    "....#####################################################..",
+    "....#####################################################..",
+    "......###################################################..",
+    "......###################################################..",
+    "........#################################################..",
+    "........#################################################..",
+    "..........#####################################............",
+    "..........#####################################............",
+    "............#######################....##############......",
+    "............#######################....##############......",
+    "..............#####################........................",
+    "..............############.....##..........................",
+    ".............######....#####...##..........................",
+    ".............######....#####...####........................",
+    ".............####..............####........................",
+    ".............####..........................................",
+    ".............##............................................",
+    ".............##............................................",
+    ".............####..........................................",
+    ".............####..........................................",
+    "...........................................................",
+    "...........................................................",
+];
+
+const CHROME_CACTUS_S1: [&str; 35] = [
+    ".................",
+    ".......###.......",
+    "......#####......",
+    "......#####......",
+    "......#####......",
+    "......#####...#..",
+    "......#####..###.",
+    "......#####..###.",
+    "......#####..###.",
+    "..#...#####..###.",
+    ".###..#####..###.",
+    ".###..#####..###.",
+    ".###..#####..###.",
+    ".###..#####..###.",
+    ".###..#####..###.",
+    ".###..#####..###.",
+    ".###..##########.",
+    ".###..#########..",
+    ".###..########...",
+    ".###..#####......",
+    ".##########......",
+    "..#########......",
+    "...########......",
+    "......#####......",
+    "......#####......",
+    "......#####......",
+    "......#####......",
+    "......#####......",
+    "......#####......",
+    "......#####......",
+    "......#####......",
+    "......#####......",
+    "......#####......",
+    "......#####......",
+    ".................",
+];
+
+const CHROME_CACTUS_S2: [&str; 35] = [
+    "..................................",
+    ".......###..............###.......",
+    "......#####............#####......",
+    "......#####............#####......",
+    "......#####............#####......",
+    "......#####...#....##..#####...#..",
+    "......#####..###..####.#####..###.",
+    "......#####..###..####.#####..###.",
+    "......#####..###..####.#####..###.",
+    "..#...#####..###..####.#####..###.",
+    ".###..#####..###..####.#####..###.",
+    ".###..#####..###..####.#####..###.",
+    ".###..#####..###..####.#####..###.",
+    ".###..#####..###..##########..###.",
+    ".###..#####..###..##########..###.",
+    ".###..#####..###...#########..###.",
+    ".###..##########....########..###.",
+    ".###..#########........#####..###.",
+    ".###..########.........##########.",
+    ".###..#####............#########..",
+    ".##########............########...",
+    "..#########............#####......",
+    "...########............#####......",
+    "......#####............#####......",
+    "......#####............#####......",
+    "......#####............#####......",
+    "......#####............#####......",
+    "......#####............#####......",
+    "......#####............#####......",
+    "......#####............#####......",
+    "......#####............#####......",
+    "......#####............#####......",
+    "......#####............#####......",
+    "......#####............#####......",
+    "..................................",
+];
+
+const CHROME_CACTUS_L1: [&str; 50] = [
+    ".........................",
+    "..........#####..........",
+    ".........#######.........",
+    ".........#######.........",
+    ".........#######.........",
+    ".........#######.........",
+    ".........#######.........",
+    ".........#######.........",
+    ".........#######.........",
+    ".........#######.........",
+    ".........#######.........",
+    ".........#######....###..",
+    ".........#######...#####.",
+    "..###....#######...#####.",
+    ".#####...#######...#####.",
+    ".#####...#######...#####.",
+    ".#####...#######...#####.",
+    ".#####...#######...#####.",
+    ".#####...#######...#####.",
+    ".#####...#######...#####.",
+    ".#####...#######...#####.",
+    ".#####...#######...#####.",
+    ".#####...#######...#####.",
+    ".#####...#######...#####.",
+    ".#####...#######...#####.",
+    ".#####...#######...#####.",
+    ".#####...#######...#####.",
+    ".######################..",
+    ".#####################...",
+    "..###################....",
+    "...#################.....",
+    "....############.........",
+    ".........#######.........",
+    ".........#######.........",
+    ".........#######.........",
+    ".........#######.........",
+    ".........#######.........",
+    ".........#######.........",
+    ".........#######.........",
+    ".........#######.........",
+    ".........#######.........",
+    ".........#######.........",
+    ".........#######.........",
+    ".........#######.........",
+    ".........#######.........",
+    ".........#######...#.....",
+    ".....#.#########.........",
+    ".........................",
+    "................#........",
+    ".........................",
+];
+
+const CHROME_CACTUS_L2: [&str; 50] = [
+    "..................................................",
+    "..........#####....................#####..........",
+    ".........#######..................#######.........",
+    ".........#######..................#######.........",
+    ".........#######..................#######.........",
+    ".........#######..................#######.........",
+    ".........#######...........###....#######.........",
+    ".........#######..........#####...#######.........",
+    ".........#######..........#####...#######.........",
+    ".........#######..........#####...#######.........",
+    ".........#######..........#####...#######.........",
+    ".........#######....##....#####...#######....###..",
+    ".........#######...####...#####...#######...#####.",
+    "..###....#######...####...#####...#######...#####.",
+    ".#####...#######...####...#####...#######...#####.",
+    ".#####...#######...####...#####...#######...#####.",
+    ".#####...#######...####...#####...#######...#####.",
+    ".#####...#######...####...#####...#######...#####.",
+    ".#####...#######...####...#####...#######...#####.",
+    ".#####...#######...####...#####...#######...#####.",
+    ".#####...#######...####...#####...#######...#####.",
+    ".#####...#######...####...###############...#####.",
+    ".#####...#######...####....##############...#####.",
+    ".#####...#######...####.....#############...#####.",
+    ".#####...#######...####......############...#####.",
+    ".#####...#######...####.......###########...#####.",
+    ".#####...#######...####...........#######...#####.",
+    ".#####################............##############..",
+    ".####################.............#############...",
+    "..##################..............############....",
+    "...#############..................###########.....",
+    "....############..................#######.........",
+    ".........#######..................#######.........",
+    ".........#######..................#######.........",
+    ".........#######..................#######.........",
+    ".........#######..................#######.........",
+    ".........#######..................#######.........",
+    ".........#######..................#######.........",
+    ".........#######..................#######.........",
+    ".........#######..................#######.........",
+    ".........#######..................#######.........",
+    ".........#######..................#######.........",
+    ".........#######..................#######.........",
+    ".........#######..................#######.........",
+    ".........#######..................#######.........",
+    ".........#######...#..............#######...#.....",
+    ".....#.#########..............#.#########.........",
+    "..................................................",
+    "................#........................#........",
+    "..................................................",
+];
+
+const CHROME_PTERO_1: [&str; 40] = [
+    "..............................................",
+    "..............................................",
+    "..............................................",
+    "..............................................",
+    "..............................................",
+    "..............................................",
+    "..............................................",
+    "..............................................",
+    "..........####................................",
+    "..........####................................",
+    "........######................................",
+    "........######................................",
+    "......##########..............................",
+    "......##########..............................",
+    "....############..............................",
+    "....############..............................",
+    "..############################................",
+    "..############################................",
+    "..............##################..............",
+    "..............##################..............",
+    "................############################..",
+    "................############################..",
+    "..................####################........",
+    "..................####################........",
+    "..................########################....",
+    "..................########################....",
+    "..................##################..........",
+    "..................##################..........",
+    "..................########....................",
+    "..................########....................",
+    "..................######......................",
+    "..................######......................",
+    "..................####........................",
+    "..................####........................",
+    "..................####........................",
+    "..................####........................",
+    "..................##..........................",
+    "..................##..........................",
+    "..............................................",
+    "..............................................",
+];
+
+const CHROME_PTERO_2: [&str; 40] = [
+    "..............................................",
+    "..............................................",
+    "................##............................",
+    "................##............................",
+    "................####..........................",
+    "................####..........................",
+    "................######........................",
+    "................######........................",
+    "..........####....######......................",
+    "..........####....######......................",
+    "........######....########....................",
+    "........######....########....................",
+    "......##########..##########..................",
+    "......##########..##########..................",
+    "....############..############................",
+    "....############..############................",
+    "..############################................",
+    "..############################................",
+    "..............##################..............",
+    "..............##################..............",
+    "................############################..",
+    "................############################..",
+    "..................####################........",
+    "..................####################........",
+    "....................######################....",
+    "....................######################....",
+    "......................##############..........",
+    "......................##############..........",
+    "..............................................",
+    "..............................................",
+    "..............................................",
+    "..............................................",
+    "..............................................",
+    "..............................................",
+    "..............................................",
+    "..............................................",
+    "..............................................",
+    "..............................................",
+    "..............................................",
+    "..............................................",
+];
+
+
+// Authentic Chrome Puffy Cloud (24x7 at 2x)
+const CHROME_CLOUD: [&str; 7] = [
+    "..........######........",
+    ".......############.....",
+    "...####################.",
+    "..######################",
+    ".#######################",
+    "########################",
+    "........................",
+];
+
+const CHROME_CLOUD_2: [&str; 8] = [
+    "................#####...............",
+    "....#####.....#########.............",
+    "..#########.#############....#####..",
+    ".##################################.",
+    "####################################",
+    "####################################",
+    "####################################",
+    "....................................",
+];
+
+const CHROME_CLOUD_3: [&str; 6] = [
+    "......####..........",
+    "...##########..###..",
+    "..#################.",
+    ".###################",
+    "####################",
+    "....................",
+];
+
+const CHROME_HORIZON_SPANS: [(i32, i32, i32); 45] = [
+    (0, 4, 600),
+    (55, 7, 3),
+    (151, 7, 4),
+    (226, 7, 3),
+    (353, 7, 4),
+    (575, 7, 4),
+    (6, 8, 4),
+    (85, 8, 1),
+    (102, 8, 2),
+    (182, 8, 2),
+    (215, 8, 1),
+    (246, 8, 1),
+    (321, 8, 2),
+    (362, 8, 1),
+    (381, 8, 3),
+    (438, 8, 3),
+    (497, 8, 3),
+    (545, 8, 1),
+    (549, 8, 2),
+    (563, 8, 3),
+    (231, 9, 1),
+    (299, 9, 1),
+    (410, 9, 2),
+    (491, 9, 1),
+    (515, 9, 3),
+    (41, 10, 1),
+    (70, 10, 2),
+    (90, 10, 4),
+    (137, 10, 2),
+    (178, 10, 1),
+    (188, 10, 3),
+    (262, 10, 1),
+    (266, 10, 2),
+    (282, 10, 3),
+    (464, 10, 2),
+    (572, 10, 1),
+    (0, 11, 4),
+    (14, 11, 2),
+    (48, 11, 4),
+    (122, 11, 1),
+    (335, 11, 3),
+    (416, 11, 4),
+    (428, 11, 1),
+    (524, 11, 2),
+    (588, 11, 1),
+];
+
+const CONSOLE_TERMINAL_ICON: [&str; 16] = [
+    "................",
+    "##..............",
+    ".##.............",
+    "..##............",
+    "...##...........",
+    "....##..........",
+    ".....##.........",
+    "......##........",
+    ".....##.........",
+    "....##..........",
+    "...##...........",
+    "..##............",
+    ".##.............",
+    "##..............",
+    "........########",
+    "........########",
+];
+
+const CHROME_GAME_OVER: [&str; 9] = [
+    ".######.....####....##.....##..########.......######...##.....##..########..#######.",
+    "##....##...##..##...###...###..##............##....##..##.....##..##........##....##",
+    "##........##....##..####.####..##............##....##..##.....##..##........##....##",
+    "##........##....##..##.###.##..##............##....##..##.....##..##........##....##",
+    "##..####..########..##..#..##..#######.......##....##..##.....##..#######...#######.",
+    "##....##..##....##..##.....##..##............##....##...##...##...##........##...##.",
+    "##....##..##....##..##.....##..##............##....##....##.##....##........##....##",
+    "##....##..##....##..##.....##..##............##....##.....###.....##........##....##",
+    ".######...##....##..##.....##..########.......######.......#......########..##....##",
+];
+
+unsafe fn draw_pixel_sprite_scaled(hdc: we_win32::HDC, x0: i32, y0: i32, rows: &[&str], brush: we_win32::HBRUSH, scale: i32) {
+    for (r, row) in rows.iter().enumerate() {
+        let mut in_run = false;
+        let mut run_start = 0;
+        let y = y0 + r as i32 * scale;
+        for (c, ch) in row.chars().enumerate() {
+            if ch == '#' {
+                if !in_run {
+                    in_run = true;
+                    run_start = c;
+                }
+            } else if in_run {
+                in_run = false;
+                let rc = we_win32::RECT {
+                    left: x0 + run_start as i32 * scale,
+                    top: y,
+                    right: x0 + c as i32 * scale,
+                    bottom: y + scale,
+                };
+                we_win32::FillRect(hdc, &rc, brush);
+            }
+        }
+        if in_run {
+            let rc = we_win32::RECT {
+                left: x0 + run_start as i32 * scale,
+                top: y,
+                right: x0 + row.len() as i32 * scale,
+                bottom: y + scale,
+            };
+            we_win32::FillRect(hdc, &rc, brush);
+        }
+    }
+}
+
+unsafe fn draw_pixel_sprite_2x(hdc: we_win32::HDC, x0: i32, y0: i32, rows: &[&str], brush: we_win32::HBRUSH) {
+    for (r, row) in rows.iter().enumerate() {
+        for (c, ch) in row.chars().enumerate() {
+            if ch == '#' {
+                let rc = we_win32::RECT {
+                    left: x0 + (c as i32 * 2),
+                    top: y0 + (r as i32 * 2),
+                    right: x0 + (c as i32 * 2) + 2,
+                    bottom: y0 + (r as i32 * 2) + 2,
+                };
+                we_win32::FillRect(hdc, &rc, brush);
+            }
+        }
+    }
+}
+
+unsafe fn draw_pixel_sprite_1x(hdc: we_win32::HDC, x0: i32, y0: i32, rows: &[&str], brush: we_win32::HBRUSH) {
+    for (r, row) in rows.iter().enumerate() {
+        let mut in_run = false;
+        let mut run_start = 0;
+        let y = y0 + r as i32;
+        for (c, ch) in row.chars().enumerate() {
+            if ch == '#' {
+                if !in_run {
+                    in_run = true;
+                    run_start = c;
+                }
+            } else if in_run {
+                in_run = false;
+                let rc = we_win32::RECT {
+                    left: x0 + run_start as i32,
+                    top: y,
+                    right: x0 + c as i32,
+                    bottom: y + 1,
+                };
+                we_win32::FillRect(hdc, &rc, brush);
+            }
+        }
+        if in_run {
+            let rc = we_win32::RECT {
+                left: x0 + run_start as i32,
+                top: y,
+                right: x0 + row.len() as i32,
+                bottom: y + 1,
+            };
+            we_win32::FillRect(hdc, &rc, brush);
+        }
+    }
+}
+
+// Parallax screen offset helper (wraps smoothly within 2400px loop)
+fn get_screen_x(world_x: f32, scroll: f32, obj_w: f32) -> f32 {
+    let mut offset = (world_x - (scroll % 1600.0)) % 1600.0;
+    if offset < 0.0 {
+        offset += 1600.0;
+    }
+    if offset > 1600.0 - obj_w - 40.0 {
+        offset -= 1600.0;
+    }
+    offset
+}
+
+const WM_DINO_TICK: u32 = 0x0400 + 101;
+static DINO_LOOP_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static DINO_TICK_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(target_os = "windows")]
+fn ensure_dino_tick_loop() {
+    if DINO_LOOP_ACTIVE.compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).is_ok() {
+        std::thread::spawn(move || {
+            unsafe {
+                we_win32::timeBeginPeriod(1);
+            }
+            while DINO_LOOP_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+                // Synchronize to monitor VSync via DwmFlush
+                let flush_res = unsafe { we_win32::DwmFlush() };
+                if flush_res != 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(16));
+                }
+
+                if let Some(blur_val) = get_console_blur_hwnd() {
+                    let blur_hwnd = blur_val as we_win32::HWND;
+                    unsafe {
+                        if we_win32::IsWindow(blur_hwnd) != 0 && we_win32::IsWindowVisible(blur_hwnd) != 0 && !BLUR_DRAG_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+                            if !DINO_TICK_PENDING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                                we_win32::PostMessageW(blur_hwnd, WM_DINO_TICK, 0, 0);
+                            }
+                        } else {
+                            std::thread::sleep(std::time::Duration::from_millis(16));
+                        }
+                    }
+                } else {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
+            unsafe {
+                we_win32::timeEndPeriod(1);
+            }
+        });
+    }
+}
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn console_blur_wnd_proc(
+    hwnd: we_win32::HWND,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+) -> isize {
+    const WM_ERASEBKGND: u32 = 0x0014;
+    const WM_PAINT: u32 = 0x000F;
+    const WM_SIZE: u32 = 0x0005;
+    const WM_NCHITTEST: u32 = 0x0084;
+    const WM_LBUTTONDOWN: u32 = 0x0201;
+    const WM_KEYDOWN: u32 = 0x0100;
+    const WM_KEYUP: u32 = 0x0101;
+    const WM_TIMER: u32 = 0x0113;
+    const WM_SHOWWINDOW: u32 = 0x0018;
+    const WM_MOVING: u32 = 0x0216;
+    const WM_SIZING: u32 = 0x0214;
+
+    const HTCLIENT: isize = 1;
+    const HTCAPTION: isize = 2;
+    const HTLEFT: isize = 10;
+    const HTRIGHT: isize = 11;
+    const HTTOP: isize = 12;
+    const HTTOPLEFT: isize = 13;
+    const HTTOPRIGHT: isize = 14;
+    const HTBOTTOM: isize = 15;
+    const HTBOTTOMLEFT: isize = 16;
+    const HTBOTTOMRIGHT: isize = 17;
+
+    if msg == WM_NCHITTEST {
+        let x = (lparam as i32 & 0xFFFF) as i16 as i32;
+        let y = ((lparam as i32 >> 16) & 0xFFFF) as i16 as i32;
+        let mut rc = we_win32::RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        we_win32::GetWindowRect(hwnd, &mut rc);
+
+        const BORDER: i32 = 10;
+        let on_left = x >= rc.left && x < rc.left + BORDER;
+        let on_right = x <= rc.right && x > rc.right - BORDER;
+        let on_top = y >= rc.top && y < rc.top + BORDER;
+        let on_bottom = y <= rc.bottom && y > rc.bottom - BORDER;
+
+        if on_top && on_left {
+            return HTTOPLEFT;
+        } else if on_top && on_right {
+            return HTTOPRIGHT;
+        } else if on_bottom && on_left {
+            return HTBOTTOMLEFT;
+        } else if on_bottom && on_right {
+            return HTBOTTOMRIGHT;
+        } else if on_left {
+            return HTLEFT;
+        } else if on_right {
+            return HTRIGHT;
+        } else if on_top {
+            return HTTOP;
+        } else if on_bottom {
+            return HTBOTTOM;
+        }
+        return HTCLIENT;
+    }
+    const WM_MOUSEMOVE: u32 = 0x0200;
+    const WM_LBUTTONUP: u32 = 0x0202;
+    const WM_CAPTURECHANGED: u32 = 0x0215;
+
+    if msg == WM_LBUTTONDOWN {
+        let client_y = ((lparam as i32 >> 16) & 0xFFFF) as i16 as i32;
+        if client_y < 45 {
+            we_win32::SetFocus(hwnd);
+            we_win32::SetCapture(hwnd);
+            let mut pt = we_win32::POINT { x: 0, y: 0 };
+            we_win32::GetCursorPos(&mut pt);
+            let mut win_rc = we_win32::RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            we_win32::GetWindowRect(hwnd, &mut win_rc);
+            let w = win_rc.right - win_rc.left;
+            let h = win_rc.bottom - win_rc.top;
+
+            let (min_x, min_y, max_x, max_y) = match CONSOLE_BLUR_PARENT_HWND.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+                Some(parent_val) => {
+                    let parent = parent_val as we_win32::HWND;
+                    if we_win32::IsWindow(parent) != 0 {
+                        let mut client_rc = we_win32::RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                        we_win32::GetClientRect(parent, &mut client_rc);
+                        let mut origin = we_win32::POINT { x: 0, y: 0 };
+                        we_win32::ClientToScreen(parent, &mut origin);
+                        (origin.x, origin.y, origin.x + client_rc.right, origin.y + client_rc.bottom)
+                    } else {
+                        (0, 0, 10000, 10000)
+                    }
+                }
+                None => (0, 0, 10000, 10000),
+            };
+
+            let max_x_bound = (max_x - w).max(min_x);
+            let max_y_bound = (max_y - h).max(min_y);
+
+            *BLUR_DRAG_START.lock().unwrap_or_else(|e| e.into_inner()) =
+                (pt.x, pt.y, win_rc.left, win_rc.top, min_x, min_y, max_x_bound, max_y_bound);
+            *LAST_DRAGGED_POS.lock().unwrap_or_else(|e| e.into_inner()) = (win_rc.left, win_rc.top);
+            BLUR_DRAG_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
+            return 0;
+        }
+        we_win32::SetFocus(hwnd);
+        let mut game = DINO_GAME.lock().unwrap_or_else(|e| e.into_inner());
+        game.jump();
+        drop(game);
+        we_win32::InvalidateRect(hwnd, std::ptr::null(), 0);
+        return 0;
+    }
+    if msg == WM_MOUSEMOVE {
+        if BLUR_DRAG_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+            let mut pt = we_win32::POINT { x: 0, y: 0 };
+            we_win32::GetCursorPos(&mut pt);
+            let (start_mx, start_my, start_wx, start_wy, min_x, min_y, max_x_bound, max_y_bound) =
+                *BLUR_DRAG_START.lock().unwrap_or_else(|e| e.into_inner());
+
+            let new_x = (start_wx + (pt.x - start_mx)).clamp(min_x, max_x_bound);
+            let new_y = (start_wy + (pt.y - start_my)).clamp(min_y, max_y_bound);
+
+            let mut last_pos = LAST_DRAGGED_POS.lock().unwrap_or_else(|e| e.into_inner());
+            if last_pos.0 != new_x || last_pos.1 != new_y {
+                *last_pos = (new_x, new_y);
+                drop(last_pos);
+                we_win32::SetWindowPos(
+                    hwnd,
+                    0 as we_win32::HWND,
+                    new_x,
+                    new_y,
+                    0,
+                    0,
+                    we_win32::SWP_NOSIZE | we_win32::SWP_NOZORDER | we_win32::SWP_NOACTIVATE,
+                );
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if msg == WM_LBUTTONUP {
+        if BLUR_DRAG_ACTIVE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            we_win32::ReleaseCapture();
+            if let Some(parent_val) = CONSOLE_BLUR_PARENT_HWND.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+                let parent = parent_val as we_win32::HWND;
+                if we_win32::IsWindow(parent) != 0 {
+                    let mut origin = we_win32::POINT { x: 0, y: 0 };
+                    we_win32::ClientToScreen(parent, &mut origin);
+                    let mut cur_rc = we_win32::RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                    we_win32::GetWindowRect(hwnd, &mut cur_rc);
+                    let w = cur_rc.right - cur_rc.left;
+                    let h = cur_rc.bottom - cur_rc.top;
+                    if w > 0 && h > 0 {
+                        let rel_x = cur_rc.left - origin.x;
+                        let rel_y = cur_rc.top - origin.y;
+                        *SAVED_CONSOLE_BLUR_POS.lock().unwrap_or_else(|e| e.into_inner()) = Some((rel_x, rel_y, w, h));
+                    }
+                }
+            }
+            we_win32::InvalidateRect(hwnd, std::ptr::null(), 0);
+            return 0;
+        }
+        let mut game = DINO_GAME.lock().unwrap_or_else(|e| e.into_inner());
+        game.release_jump();
+        drop(game);
+        we_win32::InvalidateRect(hwnd, std::ptr::null(), 0);
+        return 0;
+    }
+    if msg == WM_CAPTURECHANGED {
+        if BLUR_DRAG_ACTIVE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            we_win32::InvalidateRect(hwnd, std::ptr::null(), 0);
+        }
+    }
+    if msg == WM_KEYDOWN {
+        if wparam == 0x20 /* SPACE */ || wparam == 0x26 /* UP */ || wparam == 0x57 /* W */ {
+            let mut game = DINO_GAME.lock().unwrap_or_else(|e| e.into_inner());
+            game.jump();
+            drop(game);
+            we_win32::InvalidateRect(hwnd, std::ptr::null(), 0);
+            return 0;
+        } else if wparam == 0x28 /* DOWN */ || wparam == 0x53 /* S */ {
+            let mut game = DINO_GAME.lock().unwrap_or_else(|e| e.into_inner());
+            if game.game_over {
+                game.jump();
+            } else {
+                game.set_ducking(true);
+            }
+            drop(game);
+            we_win32::InvalidateRect(hwnd, std::ptr::null(), 0);
+            return 0;
+        } else if wparam == 0x25 /* LEFT */ || wparam == 0x27 /* RIGHT */ || wparam == 0x41 /* A */ || wparam == 0x44 /* D */ {
+            let mut game = DINO_GAME.lock().unwrap_or_else(|e| e.into_inner());
+            if game.game_over {
+                game.jump();
+                drop(game);
+                we_win32::InvalidateRect(hwnd, std::ptr::null(), 0);
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if msg == WM_KEYUP {
+        if wparam == 0x20 /* SPACE */ || wparam == 0x26 /* UP */ || wparam == 0x57 /* W */ {
+            let mut game = DINO_GAME.lock().unwrap_or_else(|e| e.into_inner());
+            game.release_jump();
+            drop(game);
+            we_win32::InvalidateRect(hwnd, std::ptr::null(), 0);
+            return 0;
+        } else if wparam == 0x28 /* DOWN */ || wparam == 0x53 /* S */ {
+            let mut game = DINO_GAME.lock().unwrap_or_else(|e| e.into_inner());
+            game.set_ducking(false);
+            drop(game);
+            we_win32::InvalidateRect(hwnd, std::ptr::null(), 0);
+            return 0;
+        }
+        return 0;
+    }
+    if msg == WM_DINO_TICK {
+        DINO_TICK_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+        let mut game = DINO_GAME.lock().unwrap_or_else(|e| e.into_inner());
+        game.update();
+        drop(game);
+        we_win32::InvalidateRect(hwnd, std::ptr::null(), 0);
+        return 0;
+    }
+
+    if msg == WM_SIZING && lparam != 0 {
+        if let Some(parent_val) = CONSOLE_BLUR_PARENT_HWND.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            let parent = parent_val as we_win32::HWND;
+            if we_win32::IsWindow(parent) != 0 {
+                let mut client_rc = we_win32::RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                we_win32::GetClientRect(parent, &mut client_rc);
+                let mut origin = we_win32::POINT { x: 0, y: 0 };
+                we_win32::ClientToScreen(parent, &mut origin);
+
+                let min_x = origin.x;
+                let min_y = origin.y;
+                let max_x = origin.x + client_rc.right;
+                let max_y = origin.y + client_rc.bottom;
+
+                let rect = &mut *(lparam as *mut we_win32::RECT);
+                const MIN_W: i32 = 280;
+                const MIN_H: i32 = 180;
+
+                if rect.right - rect.left < MIN_W {
+                    if wparam == 1 || wparam == 4 || wparam == 7 {
+                        rect.left = rect.right - MIN_W;
+                    } else {
+                        rect.right = rect.left + MIN_W;
+                    }
+                }
+                if rect.bottom - rect.top < MIN_H {
+                    if wparam == 3 || wparam == 4 || wparam == 5 {
+                        rect.top = rect.bottom - MIN_H;
+                    } else {
+                        rect.bottom = rect.top + MIN_H;
+                    }
+                }
+
+                if rect.left < min_x { rect.left = min_x; }
+                if rect.right > max_x { rect.right = max_x; }
+                if rect.top < min_y { rect.top = min_y; }
+                if rect.bottom > max_y { rect.bottom = max_y; }
+
+                return 1;
+            }
+        }
+    }
+    if msg == WM_SIZE {
+        we_win32::InvalidateRect(hwnd, std::ptr::null(), 0);
+        return 0;
+    }
+    if msg == WM_MOVING && lparam != 0 {
+        if let Some(parent_val) = CONSOLE_BLUR_PARENT_HWND.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            let parent = parent_val as we_win32::HWND;
+            if we_win32::IsWindow(parent) != 0 {
+                let mut client_rc = we_win32::RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                we_win32::GetClientRect(parent, &mut client_rc);
+                let mut origin = we_win32::POINT { x: 0, y: 0 };
+                we_win32::ClientToScreen(parent, &mut origin);
+
+                let min_x = origin.x;
+                let min_y = origin.y;
+                let max_x = origin.x + client_rc.right;
+                let max_y = origin.y + client_rc.bottom;
+
+                let rect = &mut *(lparam as *mut we_win32::RECT);
+                let w = rect.right - rect.left;
+                let h = rect.bottom - rect.top;
+
+                if rect.left < min_x {
+                    rect.left = min_x;
+                    rect.right = min_x + w;
+                } else if rect.right > max_x {
+                    rect.right = max_x;
+                    rect.left = max_x - w;
+                }
+
+                if rect.top < min_y {
+                    rect.top = min_y;
+                    rect.bottom = min_y + h;
+                } else if rect.bottom > max_y {
+                    rect.bottom = max_y;
+                    rect.top = max_y - h;
+                }
+                return 1;
+            }
+        }
+    }
+    const WM_EXITSIZEMOVE: u32 = 0x0232;
+    const WM_MOVE: u32 = 0x0003;
+    if msg == WM_EXITSIZEMOVE || (msg == WM_MOVE && !BLUR_DRAG_ACTIVE.load(std::sync::atomic::Ordering::Relaxed)) {
+        if let Some(parent_val) = CONSOLE_BLUR_PARENT_HWND.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            let parent = parent_val as we_win32::HWND;
+            if we_win32::IsWindow(parent) != 0 {
+                let mut origin = we_win32::POINT { x: 0, y: 0 };
+                we_win32::ClientToScreen(parent, &mut origin);
+                let mut cur_rc = we_win32::RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                we_win32::GetWindowRect(hwnd, &mut cur_rc);
+                let w = cur_rc.right - cur_rc.left;
+                let h = cur_rc.bottom - cur_rc.top;
+                if w > 0 && h > 0 {
+                    let rel_x = cur_rc.left - origin.x;
+                    let rel_y = cur_rc.top - origin.y;
+                    *SAVED_CONSOLE_BLUR_POS.lock().unwrap_or_else(|e| e.into_inner()) = Some((rel_x, rel_y, w, h));
+                }
+            }
+        }
+    }
+    if msg == WM_ERASEBKGND {
+        return 1;
+    }
+    if msg == WM_PAINT {
+        let mut ps = [0u8; 72];
+        let hdc = we_win32::BeginPaint(hwnd, ps.as_mut_ptr() as *mut _);
+        if !hdc.is_null() {
+            let mut client_rc = we_win32::RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            we_win32::GetClientRect(hwnd, &mut client_rc);
+            let w = client_rc.right - client_rc.left;
+            let h = client_rc.bottom - client_rc.top;
+
+            if w > 0 && h > 0 {
+                let mem_dc = we_win32::CreateCompatibleDC(hdc);
+                let mem_bmp = we_win32::CreateCompatibleBitmap(hdc, w, h);
+                let old_bmp = we_win32::SelectObject(mem_dc, mem_bmp);
+
+                let black_brush = we_win32::GetStockObject(we_win32::BLACK_BRUSH);
+                we_win32::FillRect(mem_dc, &client_rc, black_brush as we_win32::HBRUSH);
+
+                we_win32::SetBkMode(mem_dc, 1 /* TRANSPARENT */);
+
+                let (score, high_score, dino_y, is_jumping, is_ducking, frame, step_frame, game_over, is_playing, obstacles, cloud_x1, cloud_x2, cloud_x3, ground_offset, distance) = {
+                    let g = DINO_GAME.lock().unwrap_or_else(|e| e.into_inner());
+                    (
+                        g.score,
+                        g.high_score,
+                        g.dino_y,
+                        g.is_jumping,
+                        g.is_ducking,
+                        g.frame,
+                        g.step_frame,
+                        g.game_over,
+                        g.is_playing,
+                        g.obstacles.clone(),
+                        g.cloud_x1,
+                        g.cloud_x2,
+                        g.cloud_x3,
+                        g.ground_offset,
+                        g.distance,
+                    )
+                };
+
+                let ground_y = (h - 75).max(115);
+                let _far_scroll = ground_offset * 0.16;
+                let mid_scroll = ground_offset * 0.38;
+
+                // ==========================================
+                // 1. PROCEDURAL PARALLAX LANDSCAPES & BIOMES
+                // ==========================================
+
+                /* // 1.0 Starfield in upper sky
+                let star_white = we_win32::CreateSolidBrush(0x00FFFFFF);
+                let star_purple = we_win32::CreateSolidBrush(0x00A855F7);
+                for s in 0..26 {
+                    let sx = ((s * 103 + 23) % (w.max(50) - 40) + 20) as i32;
+                    let sy = 34 + (((s * 31) % 46) as i32);
+                    let twinkle = ((frame / 15) + s as u64) % 3 != 0;
+                    let src = we_win32::RECT { left: sx, top: sy, right: sx + 2, bottom: sy + 2 };
+                    we_win32::FillRect(mem_dc, &src, if twinkle { star_white } else { star_purple });
+                }
+                we_win32::DeleteObject(star_white);
+                we_win32::DeleteObject(star_purple); */
+
+                // Background mountains removed per user request - pure console acrylic glass sky
+
+                // 1.2 Layer 2: Midground City Skyline with High-Rises & 1-2 Story Buildings (mid_scroll, 1600px loop)
+                let b_brick = we_win32::CreateSolidBrush(0x002D1645);
+                let b_cornice = we_win32::CreateSolidBrush(0x004C1D95);
+                let b_empire = we_win32::CreateSolidBrush(0x00170E30);
+                let b_glass = we_win32::CreateSolidBrush(0x000C1B33);
+                let b_spire = we_win32::CreateSolidBrush(0x00C084FC);
+                let b_windows = we_win32::CreateSolidBrush(0x00FEF08A);
+                let b_win_cyan = we_win32::CreateSolidBrush(0x0067E8F9);
+                // Slow subtle aviation beacon (only flashes red once every ~0.8s on tower tips)
+                let b_beacon = we_win32::CreateSolidBrush(if (frame / 50) % 2 == 0 { 0x002222EE } else { 0x00101050 });
+                let b_heli_green = we_win32::CreateSolidBrush(0x0010B981);
+                let b_heli_red = we_win32::CreateSolidBrush(0x002020DC); // Static helipad perimeter red
+                let b_heli_yellow = we_win32::CreateSolidBrush(0x00FACC15);
+                let b_wood = we_win32::CreateSolidBrush(0x0078350F);
+                let b_stilt = we_win32::CreateSolidBrush(0x0064748B);
+                let b_clock_face = we_win32::CreateSolidBrush(0x00FEF3C7);
+                let b_clock_hands = we_win32::CreateSolidBrush(0x001E1B4B);
+                let b_neon_pink = we_win32::CreateSolidBrush(0x00FF2A85); // Static cyber pink neon
+                let b_awning_red = we_win32::CreateSolidBrush(0x002828D9); // Static classic red awning
+                let b_garage_lamp = we_win32::CreateSolidBrush(0x0020B0EE); // Static warm amber lamp
+
+                // City Buildings (world_x, width, height, kind)
+                // 0: Water Tower on Stilts
+                // 1: Art Deco Spire with Beacon
+                // 2: Helipad Tower with [H] & Nav Lights
+                // 3: Clock Tower with Glowing Face
+                // 4: Modern Sloped Glass
+                // 5: Cyber Neon Billboard
+                // 6: Industrial Comm Hub & Microwave Dish
+                // 10: 1-Story Retro 24h Diner with Awning
+                // 11: 2-Story Victorian Townhouse with Chimney
+                // 12: 1-Story Auto Garage with Corrugated Shutter
+                // 13: 2-Story Corner Cafe & Bakery with Flower Boxes
+                // 14: 1-Story Cyber Vending Kiosk
+                // 15: 2-Story Brick Warehouse with Hoist Crane
+                let city_buildings: [(f32, i32, i32, usize); 30] = [
+                    (25.0, 48, 66, 0),
+                    (80.0, 36, 24, 10),
+                    (125.0, 56, 96, 1),
+                    (188.0, 32, 38, 11),
+                    (226.0, 52, 72, 2),
+                    (286.0, 38, 22, 12),
+                    (330.0, 46, 60, 4),
+                    (384.0, 34, 36, 13),
+                    (424.0, 58, 82, 3),
+                    (490.0, 28, 20, 14),
+                    (524.0, 52, 68, 5),
+                    (584.0, 36, 40, 15),
+                    (626.0, 56, 92, 1),
+                    (690.0, 36, 24, 10),
+                    (734.0, 44, 58, 6),
+                    (786.0, 32, 38, 11),
+                    (826.0, 54, 88, 2),
+                    (888.0, 34, 36, 13),
+                    (930.0, 60, 98, 1),
+                    (998.0, 38, 22, 12),
+                    (1044.0, 54, 80, 3),
+                    (1106.0, 28, 20, 14),
+                    (1142.0, 52, 70, 5),
+                    (1202.0, 36, 40, 15),
+                    (1246.0, 50, 72, 6),
+                    (1304.0, 32, 38, 11),
+                    (1344.0, 58, 94, 1),
+                    (1410.0, 36, 24, 10),
+                    (1454.0, 48, 66, 0),
+                    (1510.0, 34, 36, 13),
+                ];
+
+                for &(bx_world, bw, bh, bkind) in &city_buildings {
+                    let bx = get_screen_x(bx_world, mid_scroll, bw as f32) as i32;
+                    if bx >= -bw && bx <= w + bw {
+                        let b_top = ground_y - bh;
+                        match bkind {
+                            0 => {
+                                // 0: Water Tower on Stilts + Brick Lofts
+                                let rc_body = we_win32::RECT { left: bx, top: b_top, right: bx + bw, bottom: ground_y };
+                                we_win32::FillRect(mem_dc, &rc_body, b_brick);
+                                let rc_cornice = we_win32::RECT { left: bx - 1, top: b_top, right: bx + bw + 1, bottom: b_top + 3 };
+                                we_win32::FillRect(mem_dc, &rc_cornice, b_cornice);
+                                for wy in (b_top + 9..ground_y - 8).step_by(10) {
+                                    let w1 = we_win32::RECT { left: bx + 6, top: wy, right: bx + 11, bottom: wy + 5 };
+                                    let w2 = we_win32::RECT { left: bx + bw - 11, top: wy, right: bx + bw - 6, bottom: wy + 5 };
+                                    we_win32::FillRect(mem_dc, &w1, b_windows);
+                                    we_win32::FillRect(mem_dc, &w2, b_windows);
+                                }
+                                let tank_cx = bx + (bw / 2);
+                                let s1 = we_win32::RECT { left: tank_cx - 9, top: b_top - 12, right: tank_cx - 7, bottom: b_top };
+                                let s2 = we_win32::RECT { left: tank_cx + 7, top: b_top - 12, right: tank_cx + 9, bottom: b_top };
+                                let cross = we_win32::RECT { left: tank_cx - 8, top: b_top - 6, right: tank_cx + 8, bottom: b_top - 5 };
+                                we_win32::FillRect(mem_dc, &s1, b_stilt);
+                                we_win32::FillRect(mem_dc, &s2, b_stilt);
+                                we_win32::FillRect(mem_dc, &cross, b_stilt);
+                                let tank_body = we_win32::RECT { left: tank_cx - 10, top: b_top - 22, right: tank_cx + 10, bottom: b_top - 12 };
+                                we_win32::FillRect(mem_dc, &tank_body, b_wood);
+                                let tank_roof1 = we_win32::RECT { left: tank_cx - 8, top: b_top - 25, right: tank_cx + 8, bottom: b_top - 22 };
+                                let tank_roof2 = we_win32::RECT { left: tank_cx - 4, top: b_top - 28, right: tank_cx + 4, bottom: b_top - 25 };
+                                we_win32::FillRect(mem_dc, &tank_roof1, b_cornice);
+                                we_win32::FillRect(mem_dc, &tank_roof2, b_cornice);
+                            }
+                            1 => {
+                                // 1: Art Deco Stepped Spire with Blinking Beacon
+                                let rc_body = we_win32::RECT { left: bx, top: b_top + 16, right: bx + bw, bottom: ground_y };
+                                we_win32::FillRect(mem_dc, &rc_body, b_empire);
+                                let rc_step1 = we_win32::RECT { left: bx + 6, top: b_top + 6, right: bx + bw - 6, bottom: b_top + 16 };
+                                we_win32::FillRect(mem_dc, &rc_step1, b_empire);
+                                let rc_spire = we_win32::RECT { left: bx + (bw / 2) - 1, top: b_top - 14, right: bx + (bw / 2) + 2, bottom: b_top + 6 };
+                                we_win32::FillRect(mem_dc, &rc_spire, b_spire);
+                                let rc_beacon = we_win32::RECT { left: bx + (bw / 2) - 2, top: b_top - 17, right: bx + (bw / 2) + 3, bottom: b_top - 14 };
+                                we_win32::FillRect(mem_dc, &rc_beacon, b_beacon);
+                                for wy in (b_top + 22..ground_y - 8).step_by(8) {
+                                    let w_mid1 = we_win32::RECT { left: bx + (bw / 2) - 5, top: wy, right: bx + (bw / 2) - 2, bottom: wy + 4 };
+                                    let w_mid2 = we_win32::RECT { left: bx + (bw / 2) + 2, top: wy, right: bx + (bw / 2) + 5, bottom: wy + 4 };
+                                    we_win32::FillRect(mem_dc, &w_mid1, b_windows);
+                                    we_win32::FillRect(mem_dc, &w_mid2, b_windows);
+                                }
+                            }
+                            2 => {
+                                // 2: Helipad Skyscraper with [H] & Nav Lights
+                                let rc_body = we_win32::RECT { left: bx, top: b_top, right: bx + bw, bottom: ground_y };
+                                we_win32::FillRect(mem_dc, &rc_body, b_glass);
+                                for wy in (b_top + 12..ground_y - 6).step_by(8) {
+                                    let rc_win = we_win32::RECT { left: bx + 5, top: wy, right: bx + bw - 5, bottom: wy + 2 };
+                                    we_win32::FillRect(mem_dc, &rc_win, b_win_cyan);
+                                }
+                                let rc_deck = we_win32::RECT { left: bx - 2, top: b_top - 4, right: bx + bw + 2, bottom: b_top };
+                                we_win32::FillRect(mem_dc, &rc_deck, b_stilt);
+                                let rc_nav_l = we_win32::RECT { left: bx - 2, top: b_top - 6, right: bx, bottom: b_top - 4 };
+                                let rc_nav_r = we_win32::RECT { left: bx + bw, top: b_top - 6, right: bx + bw + 2, bottom: b_top - 4 };
+                                we_win32::FillRect(mem_dc, &rc_nav_l, b_heli_green);
+                                we_win32::FillRect(mem_dc, &rc_nav_r, b_heli_red);
+                                let hcx = bx + (bw / 2);
+                                let h_l = we_win32::RECT { left: hcx - 5, top: b_top - 3, right: hcx - 3, bottom: b_top - 1 };
+                                let h_r = we_win32::RECT { left: hcx + 3, top: b_top - 3, right: hcx + 5, bottom: b_top - 1 };
+                                let h_mid = we_win32::RECT { left: hcx - 3, top: b_top - 2, right: hcx + 3, bottom: b_top - 1 };
+                                we_win32::FillRect(mem_dc, &h_l, b_heli_yellow);
+                                we_win32::FillRect(mem_dc, &h_r, b_heli_yellow);
+                                we_win32::FillRect(mem_dc, &h_mid, b_heli_yellow);
+                            }
+                            3 => {
+                                // 3: Clock Tower / Town Hall
+                                let rc_body = we_win32::RECT { left: bx, top: b_top + 18, right: bx + bw, bottom: ground_y };
+                                we_win32::FillRect(mem_dc, &rc_body, b_brick);
+                                for px in (bx..bx + bw).step_by(8) {
+                                    let rc_notch = we_win32::RECT { left: px, top: b_top + 14, right: (px + 4).min(bx + bw), bottom: b_top + 18 };
+                                    we_win32::FillRect(mem_dc, &rc_notch, b_cornice);
+                                }
+                                let t_w = 22;
+                                let t_x = bx + (bw - t_w) / 2;
+                                let rc_tower = we_win32::RECT { left: t_x, top: b_top, right: t_x + t_w, bottom: b_top + 18 };
+                                we_win32::FillRect(mem_dc, &rc_tower, b_empire);
+                                let cf_rc = we_win32::RECT { left: t_x + 5, top: b_top + 4, right: t_x + t_w - 5, bottom: b_top + 15 };
+                                we_win32::FillRect(mem_dc, &cf_rc, b_clock_face);
+                                let ch1 = we_win32::RECT { left: t_x + 10, top: b_top + 6, right: t_x + 12, bottom: b_top + 10 };
+                                let ch2 = we_win32::RECT { left: t_x + 8, top: b_top + 8, right: t_x + 11, bottom: b_top + 10 };
+                                we_win32::FillRect(mem_dc, &ch1, b_clock_hands);
+                                we_win32::FillRect(mem_dc, &ch2, b_clock_hands);
+                                let rc_peak = we_win32::RECT { left: t_x + 9, top: b_top - 8, right: t_x + 13, bottom: b_top };
+                                we_win32::FillRect(mem_dc, &rc_peak, b_spire);
+                            }
+                            4 => {
+                                // 4: Modern Sloped Glass Tower
+                                for dy in 0..bh {
+                                    let py = b_top + dy;
+                                    let slope_cut = if dy < 16 { (16 - dy) * bw / 20 } else { 0 };
+                                    let rc_strip = we_win32::RECT { left: bx + slope_cut, top: py, right: bx + bw, bottom: py + 1 };
+                                    we_win32::FillRect(mem_dc, &rc_strip, b_glass);
+                                }
+                                for wy in (b_top + 16..ground_y - 6).step_by(9) {
+                                    let rc_win = we_win32::RECT { left: bx + 6, top: wy, right: bx + bw - 6, bottom: wy + 3 };
+                                    we_win32::FillRect(mem_dc, &rc_win, b_win_cyan);
+                                }
+                                let rc_ant = we_win32::RECT { left: bx + bw - 4, top: b_top - 12, right: bx + bw - 2, bottom: b_top };
+                                we_win32::FillRect(mem_dc, &rc_ant, b_stilt);
+                            }
+                            5 => {
+                                // 5: Cyber Neon Billboard Tower
+                                let rc_body = we_win32::RECT { left: bx, top: b_top, right: bx + bw, bottom: ground_y };
+                                we_win32::FillRect(mem_dc, &rc_body, b_brick);
+                                let b_cx = bx + (bw / 2);
+                                let rc_truss1 = we_win32::RECT { left: b_cx - 14, top: b_top - 6, right: b_cx - 12, bottom: b_top };
+                                let rc_truss2 = we_win32::RECT { left: b_cx + 12, top: b_top - 6, right: b_cx + 14, bottom: b_top };
+                                we_win32::FillRect(mem_dc, &rc_truss1, b_stilt);
+                                we_win32::FillRect(mem_dc, &rc_truss2, b_stilt);
+                                let rc_board = we_win32::RECT { left: b_cx - 18, top: b_top - 20, right: b_cx + 18, bottom: b_top - 6 };
+                                we_win32::FillRect(mem_dc, &rc_board, b_neon_pink);
+                                let rc_ac = we_win32::RECT { left: bx + 3, top: b_top - 6, right: bx + 10, bottom: b_top };
+                                we_win32::FillRect(mem_dc, &rc_ac, b_cornice);
+                            }
+                            6 => {
+                                // 6: Industrial Microwave & Comm Antenna Hub
+                                let rc_body = we_win32::RECT { left: bx, top: b_top, right: bx + bw, bottom: ground_y };
+                                we_win32::FillRect(mem_dc, &rc_body, b_glass);
+                                let rc_ant1 = we_win32::RECT { left: bx + 5, top: b_top - 15, right: bx + 7, bottom: b_top };
+                                let rc_ant2 = we_win32::RECT { left: bx + bw - 7, top: b_top - 18, right: bx + bw - 5, bottom: b_top };
+                                we_win32::FillRect(mem_dc, &rc_ant1, b_stilt);
+                                we_win32::FillRect(mem_dc, &rc_ant2, b_stilt);
+                                let rc_b2 = we_win32::RECT { left: bx + bw - 8, top: b_top - 20, right: bx + bw - 4, bottom: b_top - 18 };
+                                we_win32::FillRect(mem_dc, &rc_b2, b_beacon);
+                                let d_cx = bx + (bw / 2);
+                                let rc_dish1 = we_win32::RECT { left: d_cx - 6, top: b_top - 10, right: d_cx + 6, bottom: b_top - 8 };
+                                let rc_dish2 = we_win32::RECT { left: d_cx - 4, top: b_top - 8, right: d_cx + 4, bottom: b_top - 6 };
+                                let rc_dish_base = we_win32::RECT { left: d_cx - 1, top: b_top - 6, right: d_cx + 1, bottom: b_top };
+                                we_win32::FillRect(mem_dc, &rc_dish1, b_win_cyan);
+                                we_win32::FillRect(mem_dc, &rc_dish2, b_win_cyan);
+                                we_win32::FillRect(mem_dc, &rc_dish_base, b_stilt);
+                            }
+                            10 => {
+                                // 10: 1-Story 24h Retro Diner
+                                let rc_body = we_win32::RECT { left: bx, top: b_top, right: bx + bw, bottom: ground_y };
+                                we_win32::FillRect(mem_dc, &rc_body, b_brick);
+                                let rc_sign = we_win32::RECT { left: bx + 8, top: b_top - 6, right: bx + bw - 8, bottom: b_top };
+                                we_win32::FillRect(mem_dc, &rc_sign, b_neon_pink);
+                                for ax in (bx + 2..bx + bw - 2).step_by(6) {
+                                    let rc_str1 = we_win32::RECT { left: ax, top: b_top + 6, right: (ax + 3).min(bx + bw - 2), bottom: b_top + 10 };
+                                    let rc_str2 = we_win32::RECT { left: ax + 3, top: b_top + 6, right: (ax + 6).min(bx + bw - 2), bottom: b_top + 10 };
+                                    we_win32::FillRect(mem_dc, &rc_str1, b_awning_red);
+                                    we_win32::FillRect(mem_dc, &rc_str2, b_windows);
+                                }
+                                let rc_win = we_win32::RECT { left: bx + 4, top: b_top + 11, right: bx + bw - 12, bottom: ground_y - 2 };
+                                we_win32::FillRect(mem_dc, &rc_win, b_windows);
+                                let rc_door = we_win32::RECT { left: bx + bw - 10, top: b_top + 10, right: bx + bw - 3, bottom: ground_y };
+                                we_win32::FillRect(mem_dc, &rc_door, b_stilt);
+                            }
+                            11 => {
+                                // 11: 2-Story Victorian Townhouse with Chimney
+                                let rc_body = we_win32::RECT { left: bx, top: b_top + 10, right: bx + bw, bottom: ground_y };
+                                we_win32::FillRect(mem_dc, &rc_body, b_brick);
+                                for ry in 0..10 {
+                                    let rx_hw = (ry * bw) / 20;
+                                    let rc_roof = we_win32::RECT { left: bx + (bw / 2) - rx_hw, top: b_top + ry, right: bx + (bw / 2) + rx_hw, bottom: b_top + ry + 1 };
+                                    we_win32::FillRect(mem_dc, &rc_roof, b_cornice);
+                                }
+                                let rc_chimney = we_win32::RECT { left: bx + bw - 8, top: b_top - 6, right: bx + bw - 4, bottom: b_top + 8 };
+                                we_win32::FillRect(mem_dc, &rc_chimney, b_brick);
+                                let w1 = we_win32::RECT { left: bx + 5, top: b_top + 14, right: bx + 11, bottom: b_top + 22 };
+                                let w2 = we_win32::RECT { left: bx + bw - 11, top: b_top + 14, right: bx + bw - 5, bottom: b_top + 22 };
+                                we_win32::FillRect(mem_dc, &w1, b_windows);
+                                we_win32::FillRect(mem_dc, &w2, b_windows);
+                                let rc_door = we_win32::RECT { left: bx + 5, top: b_top + 26, right: bx + 13, bottom: ground_y };
+                                we_win32::FillRect(mem_dc, &rc_door, b_wood);
+                                let rc_win_down = we_win32::RECT { left: bx + 16, top: b_top + 26, right: bx + bw - 5, bottom: b_top + 33 };
+                                we_win32::FillRect(mem_dc, &rc_win_down, b_windows);
+                            }
+                            12 => {
+                                // 12: 1-Story Auto Garage with Corrugated Shutter
+                                let rc_body = we_win32::RECT { left: bx, top: b_top, right: bx + bw, bottom: ground_y };
+                                we_win32::FillRect(mem_dc, &rc_body, b_empire);
+                                let rc_top = we_win32::RECT { left: bx - 1, top: b_top, right: bx + bw + 1, bottom: b_top + 3 };
+                                we_win32::FillRect(mem_dc, &rc_top, b_cornice);
+                                let rc_vent = we_win32::RECT { left: bx + 8, top: b_top - 5, right: bx + 12, bottom: b_top };
+                                we_win32::FillRect(mem_dc, &rc_vent, b_stilt);
+                                let rc_door = we_win32::RECT { left: bx + 5, top: b_top + 6, right: bx + bw - 10, bottom: ground_y };
+                                we_win32::FillRect(mem_dc, &rc_door, b_stilt);
+                                for sy in (b_top + 8..ground_y).step_by(3) {
+                                    let slat = we_win32::RECT { left: bx + 5, top: sy, right: bx + bw - 10, bottom: sy + 1 };
+                                    we_win32::FillRect(mem_dc, &slat, b_empire);
+                                }
+                                let rc_light = we_win32::RECT { left: bx + bw - 7, top: b_top + 6, right: bx + bw - 4, bottom: b_top + 9 };
+                                we_win32::FillRect(mem_dc, &rc_light, b_garage_lamp);
+                            }
+                            13 => {
+                                // 13: 2-Story Corner Cafe & Bakery with Flower Boxes
+                                let rc_body = we_win32::RECT { left: bx, top: b_top, right: bx + bw, bottom: ground_y };
+                                we_win32::FillRect(mem_dc, &rc_body, b_brick);
+                                let rc_cornice = we_win32::RECT { left: bx - 1, top: b_top, right: bx + bw + 1, bottom: b_top + 3 };
+                                we_win32::FillRect(mem_dc, &rc_cornice, b_cornice);
+                                let w1 = we_win32::RECT { left: bx + 5, top: b_top + 6, right: bx + 12, bottom: b_top + 14 };
+                                let w2 = we_win32::RECT { left: bx + bw - 12, top: b_top + 6, right: bx + bw - 5, bottom: b_top + 14 };
+                                we_win32::FillRect(mem_dc, &w1, b_windows);
+                                we_win32::FillRect(mem_dc, &w2, b_windows);
+                                let fb1 = we_win32::RECT { left: bx + 4, top: b_top + 14, right: bx + 13, bottom: b_top + 17 };
+                                let fb2 = we_win32::RECT { left: bx + bw - 13, top: b_top + 14, right: bx + bw - 4, bottom: b_top + 17 };
+                                we_win32::FillRect(mem_dc, &fb1, b_heli_green);
+                                we_win32::FillRect(mem_dc, &fb2, b_heli_green);
+                                let rc_awn = we_win32::RECT { left: bx + 2, top: b_top + 20, right: bx + bw - 2, bottom: b_top + 24 };
+                                we_win32::FillRect(mem_dc, &rc_awn, b_awning_red);
+                                let rc_cafe_win = we_win32::RECT { left: bx + 4, top: b_top + 25, right: bx + bw - 12, bottom: ground_y - 1 };
+                                we_win32::FillRect(mem_dc, &rc_cafe_win, b_windows);
+                            }
+                            14 => {
+                                // 14: 1-Story Cyber Vending Kiosk
+                                let rc_body = we_win32::RECT { left: bx, top: b_top, right: bx + bw, bottom: ground_y };
+                                we_win32::FillRect(mem_dc, &rc_body, b_glass);
+                                let rc_roof = we_win32::RECT { left: bx - 2, top: b_top - 2, right: bx + bw + 2, bottom: b_top + 2 };
+                                we_win32::FillRect(mem_dc, &rc_roof, b_stilt);
+                                let rc_vm1 = we_win32::RECT { left: bx + 4, top: b_top + 4, right: bx + 12, bottom: ground_y - 1 };
+                                let rc_vm2 = we_win32::RECT { left: bx + 15, top: b_top + 4, right: bx + 23, bottom: ground_y - 1 };
+                                we_win32::FillRect(mem_dc, &rc_vm1, b_win_cyan);
+                                we_win32::FillRect(mem_dc, &rc_vm2, b_neon_pink);
+                            }
+                            _ => {
+                                // 15: 2-Story Brick Warehouse with Hoist Crane
+                                let rc_body = we_win32::RECT { left: bx, top: b_top, right: bx + bw, bottom: ground_y };
+                                we_win32::FillRect(mem_dc, &rc_body, b_brick);
+                                let rc_crane = we_win32::RECT { left: bx + (bw / 2) - 1, top: b_top - 6, right: bx + (bw / 2) + 8, bottom: b_top - 4 };
+                                we_win32::FillRect(mem_dc, &rc_crane, b_stilt);
+                                for wy in (b_top + 6..b_top + 22).step_by(9) {
+                                    let w1 = we_win32::RECT { left: bx + 5, top: wy, right: bx + 13, bottom: wy + 6 };
+                                    let w2 = we_win32::RECT { left: bx + bw - 13, top: wy, right: bx + bw - 5, bottom: wy + 6 };
+                                    we_win32::FillRect(mem_dc, &w1, b_windows);
+                                    we_win32::FillRect(mem_dc, &w2, b_windows);
+                                }
+                                let rc_fdoor = we_win32::RECT { left: bx + 8, top: b_top + 24, right: bx + bw - 8, bottom: ground_y };
+                                we_win32::FillRect(mem_dc, &rc_fdoor, b_wood);
+                            }
+                        }
+                    }
+                }
+
+                we_win32::DeleteObject(b_brick);
+                we_win32::DeleteObject(b_cornice);
+                we_win32::DeleteObject(b_empire);
+                we_win32::DeleteObject(b_glass);
+                we_win32::DeleteObject(b_spire);
+                we_win32::DeleteObject(b_windows);
+                we_win32::DeleteObject(b_win_cyan);
+                we_win32::DeleteObject(b_beacon);
+                we_win32::DeleteObject(b_heli_green);
+                we_win32::DeleteObject(b_heli_red);
+                we_win32::DeleteObject(b_heli_yellow);
+                we_win32::DeleteObject(b_wood);
+                we_win32::DeleteObject(b_stilt);
+                we_win32::DeleteObject(b_clock_face);
+                we_win32::DeleteObject(b_clock_hands);
+                we_win32::DeleteObject(b_neon_pink);
+                we_win32::DeleteObject(b_awning_red);
+                we_win32::DeleteObject(b_garage_lamp);
+
+                // ==========================================
+                // 2. AUTHENTIC CHROME HORIZON & PUFFY CLOUDS
+                // ==========================================
+
+                // 2.1 Puffy Chrome Clouds (3 parallax clouds)
+                let cloud_brush = we_win32::CreateSolidBrush(0x0064748B);
+                let cy1 = (ground_y - 165).clamp(65, 95);
+                let cy2 = (ground_y - 150).clamp(78, 110);
+                let cy3 = (ground_y - 178).clamp(58, 85);
+                draw_pixel_sprite_2x(mem_dc, cloud_x1 as i32, cy1, &CHROME_CLOUD, cloud_brush);
+                draw_pixel_sprite_2x(mem_dc, cloud_x2 as i32, cy2, &CHROME_CLOUD_2, cloud_brush);
+                draw_pixel_sprite_2x(mem_dc, cloud_x3 as i32, cy3, &CHROME_CLOUD_3, cloud_brush);
+                we_win32::DeleteObject(cloud_brush);
+
+                // 2.2 Authentic Chrome Horizon Floor (Tile 600px repeating from original atlas)
+                let ground_brush = we_win32::CreateSolidBrush(0x0052525B);
+
+                let margin_left = 24;
+                let margin_right = w - 24;
+                let _play_width = (margin_right - margin_left).max(10);
+
+                let wrap_h = ((ground_offset as i32) % 600 + 600) % 600;
+                let mut tile_start = margin_left - wrap_h;
+                while tile_start < margin_right {
+                    for &(sx, sy, slen) in &CHROME_HORIZON_SPANS {
+                        let span_x1 = tile_start + sx;
+                        let span_x2 = span_x1 + slen;
+                        let draw_x1 = span_x1.max(margin_left);
+                        let draw_x2 = span_x2.min(margin_right);
+                        if draw_x2 > draw_x1 {
+                            let rc = we_win32::RECT {
+                                left: draw_x1,
+                                top: ground_y - 4 + sy,
+                                right: draw_x2,
+                                bottom: ground_y - 4 + sy + 1,
+                            };
+                            we_win32::FillRect(mem_dc, &rc, ground_brush);
+                        }
+                    }
+                    tile_start += 600;
+                }
+                // Baseline subtle accent matching original web canvas
+                let _accent_rc = we_win32::RECT {
+                    left: margin_left,
+                    top: ground_y + 7,
+                    right: margin_right,
+                    bottom: ground_y + 8,
+                };
+
+
+                we_win32::DeleteObject(ground_brush);
+
+
+                // ==========================================
+                // 3. OBSTACLES (Cacti Variants & Pterodactyls)
+                // ==========================================
+                let cactus_brush = we_win32::CreateSolidBrush(0x00FFFFFF);
+                let ptero_brush = we_win32::CreateSolidBrush(0x00FFFFFF);
+
+                let ptero_flap_frame = ((distance * 0.035) as u32) % 2;
+                let ptero_sprite = if ptero_flap_frame == 0 { &CHROME_PTERO_1 } else { &CHROME_PTERO_2 };
+
+                if is_playing { for obs in &obstacles {
+                    let ox = obs.x as i32;
+                    if ox >= 24 - 55 && ox <= w - 24 + 10 {
+                        match obs.kind {
+                            ObstacleKind::CactusSmall => {
+                                draw_pixel_sprite_1x(mem_dc, ox, ground_y - 35, &CHROME_CACTUS_S1, cactus_brush);
+                            }
+                            ObstacleKind::CactusDouble => {
+                                draw_pixel_sprite_1x(mem_dc, ox, ground_y - 35, &CHROME_CACTUS_S2, cactus_brush);
+                            }
+                            ObstacleKind::CactusLarge => {
+                                draw_pixel_sprite_1x(mem_dc, ox, ground_y - 50, &CHROME_CACTUS_L1, cactus_brush);
+                            }
+                            ObstacleKind::CactusLargeDouble => {
+                                draw_pixel_sprite_1x(mem_dc, ox, ground_y - 50, &CHROME_CACTUS_L2, cactus_brush);
+                            }
+                            ObstacleKind::PteroLow => {
+
+                                draw_pixel_sprite_1x(mem_dc, ox, ground_y - 30, ptero_sprite, ptero_brush);
+                            }
+                            ObstacleKind::PteroMid => {
+
+                                draw_pixel_sprite_1x(mem_dc, ox, ground_y - 54, ptero_sprite, ptero_brush);
+                            }
+                            ObstacleKind::PteroHigh => {
+                                draw_pixel_sprite_1x(mem_dc, ox, ground_y - 78, ptero_sprite, ptero_brush);
+                            }
+                        }
+                    }
+                }
+                } we_win32::DeleteObject(cactus_brush);
+                we_win32::DeleteObject(ptero_brush);
+
+                // ==========================================
+                // 4. AUTHENTIC CHROME T-REX SPRITE
+                // ==========================================
+                let dino_brush = we_win32::CreateSolidBrush(0x00FFFFFF);
+                let dino_draw_y = ground_y - 47 + dino_y as i32;
+
+                if game_over {
+                    draw_pixel_sprite_1x(mem_dc, 28, dino_draw_y, &CHROME_DINO_CRASH, dino_brush);
+                } else if !is_playing {
+                    let stand_sprite = if frame % 120 < 8 { &CHROME_DINO_BLINK } else { &CHROME_DINO_STAND };
+                    draw_pixel_sprite_1x(mem_dc, 28, dino_draw_y, stand_sprite, dino_brush);
+                } else if is_ducking {
+                    let duck_sprite = if is_jumping {
+                        &CHROME_DINO_DUCK1
+                    } else if step_frame == 0 {
+                        &CHROME_DINO_DUCK1
+                    } else {
+                        &CHROME_DINO_DUCK2
+                    };
+                    draw_pixel_sprite_1x(mem_dc, 28, dino_draw_y, duck_sprite, dino_brush);
+                } else if is_jumping {
+                    let stand_sprite = if frame % 120 < 8 { &CHROME_DINO_BLINK } else { &CHROME_DINO_STAND };
+                    draw_pixel_sprite_1x(mem_dc, 28, dino_draw_y, stand_sprite, dino_brush);
+                } else {
+                    let run_sprite = if step_frame == 0 { &CHROME_DINO_RUN1 } else { &CHROME_DINO_RUN2 };
+                    draw_pixel_sprite_1x(mem_dc, 28, dino_draw_y, run_sprite, dino_brush);
+                }
+                we_win32::DeleteObject(dino_brush);
+
+                // ==========================================
+                // 5. HEADERS, FOOTER & OVERLAYS
+                // ==========================================
+
+                // 5.1 Top Title: "Consola Blur" + Retro Score
+                let icon_brush = we_win32::CreateSolidBrush(0x00F9F5F1);
+                draw_pixel_sprite_1x(mem_dc, 24, 16, &CONSOLE_TERMINAL_ICON, icon_brush);
+                we_win32::DeleteObject(icon_brush);
+
+                let title_font = we_win32::CreateFontW(
+                    20, 0, 0, 0, 700, 0, 0, 0, 1, 0, 0, 5, 0,
+                    we_win32::to_wide("Segoe UI").as_ptr(),
+                );
+                let old_font = we_win32::SelectObject(mem_dc, title_font);
+                we_win32::SetTextColor(mem_dc, 0x00FFFFFF);
+                let title = we_win32::to_wide("Consola Blur");
+                we_win32::TextOutW(mem_dc, 48, 14, title.as_ptr(), (title.len() - 1) as i32);
+
+                let score_font = we_win32::CreateFontW(
+                    19, 0, 0, 0, 800, 0, 0, 0, 1, 0, 0, 5, 0,
+                    we_win32::to_wide("Consolas").as_ptr(),
+                );
+                we_win32::SelectObject(mem_dc, score_font);
+                let is_flashing = (score >= 100) && ((score % 100) < 30) && ((frame / 6) % 2 == 0);
+                if is_flashing {
+                    we_win32::SetTextColor(mem_dc, 0x00FBBF24); // Gold milestone flash
+                } else {
+                    we_win32::SetTextColor(mem_dc, 0x0094A3B8);
+                }
+                let score_text = we_win32::to_wide(&format!("HI {:05}   {:05}", high_score, score));
+                let score_x = (w - 225).max(160);
+                we_win32::TextOutW(mem_dc, score_x, 66, score_text.as_ptr(), (score_text.len() - 1) as i32);
+
+                // 5.2 Game Over Banner (Solid arcade plaque - immune to blur color shifts)
+                if game_over {
+                    let scale = if w >= 560 { 4 } else { 3 };
+                    let go_w = 84 * scale;
+                    let go_h = 9 * scale;
+                    let go_x = ((w - go_w) / 2).max(10);
+                    let go_y = (ground_y - 85 - go_h).max(50);
+
+                    // Solid opaque backing box so desktop blur NEVER bleeds through or shifts colors
+                    let pad_x = 14;
+                    let pad_y = 10;
+                    let bg_rc = we_win32::RECT {
+                        left: go_x - pad_x,
+                        top: go_y - pad_y,
+                        right: go_x + go_w + pad_x,
+                        bottom: go_y + go_h + pad_y,
+                    };
+                    let go_bg_brush = we_win32::CreateSolidBrush(0x00160F22);
+                    let go_border_brush = we_win32::CreateSolidBrush(0x006D28D9);
+                    we_win32::FillRect(mem_dc, &bg_rc, go_bg_brush);
+
+                    let b_top = we_win32::RECT { left: bg_rc.left, top: bg_rc.top, right: bg_rc.right, bottom: bg_rc.top + 2 };
+                    let b_bot = we_win32::RECT { left: bg_rc.left, top: bg_rc.bottom - 2, right: bg_rc.right, bottom: bg_rc.bottom };
+                    let b_left = we_win32::RECT { left: bg_rc.left, top: bg_rc.top, right: bg_rc.left + 2, bottom: bg_rc.bottom };
+                    let b_right = we_win32::RECT { left: bg_rc.right - 2, top: bg_rc.top, right: bg_rc.right, bottom: bg_rc.bottom };
+                    we_win32::FillRect(mem_dc, &b_top, go_border_brush);
+                    we_win32::FillRect(mem_dc, &b_bot, go_border_brush);
+                    we_win32::FillRect(mem_dc, &b_left, go_border_brush);
+                    we_win32::FillRect(mem_dc, &b_right, go_border_brush);
+
+                    let go_brush = we_win32::CreateSolidBrush(0x003333FF);
+                    draw_pixel_sprite_scaled(mem_dc, go_x, go_y, &CHROME_GAME_OVER, go_brush, scale);
+                    we_win32::DeleteObject(go_brush);
+                    we_win32::DeleteObject(go_bg_brush);
+                    we_win32::DeleteObject(go_border_brush);
+                    /*
+                    let go_font = we_win32::CreateFontW(
+                        18, 0, 0, 0, 700, 0, 0, 0, 1, 0, 0, 5, 0,
+                        we_win32::to_wide("Segoe UI").as_ptr(),
+                    );
+                    we_win32::SelectObject(mem_dc, go_font);
+                    we_win32::SetTextColor(mem_dc, 0x005252FF);
+                    let go_text = we_win32::to_wide("G A M E   O V E R");
+                    let go_x = (w / 2) - 80;
+                    we_win32::TextOutW(mem_dc, go_x, ground_y - 75, go_text.as_ptr(), (go_text.len() - 1) as i32);
+
+                    let retry_font = we_win32::CreateFontW(
+                        13, 0, 0, 0, 600, 0, 0, 0, 1, 0, 0, 5, 0,
+                        we_win32::to_wide("Segoe UI").as_ptr(),
+                    );
+                    we_win32::SelectObject(mem_dc, retry_font);
+                    we_win32::SetTextColor(mem_dc, 0x00CBD5E1);
+                    let retry_text = we_win32::to_wide("Haz clic o pulsa ESPACIO para reiniciar");
+                    let retry_x = (w / 2) - 120;
+                    we_win32::TextOutW(mem_dc, retry_x, ground_y - 50, retry_text.as_ptr(), (retry_text.len() - 1) as i32);
+
+                    we_win32::DeleteObject(go_font);
+                    we_win32::DeleteObject(retry_font);
+                    */
+                }
+
+                // 5.3 Bottom Footer: "listo para jugar"
+                let bottom_font = we_win32::CreateFontW(
+                    15, 0, 0, 0, 700, 0, 0, 0, 1, 0, 0, 5, 0,
+                    we_win32::to_wide("Segoe UI").as_ptr(),
+                );
+                we_win32::SelectObject(mem_dc, bottom_font);
+                we_win32::SetTextColor(mem_dc, 0x00F87171);
+                let bottom_text = we_win32::to_wide("🎮 listo para jugar");
+                we_win32::TextOutW(mem_dc, 24, ground_y + 16, bottom_text.as_ptr(), (bottom_text.len() - 1) as i32);
+
+                /* let hint_font = we_win32::CreateFontW(
+                    13, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0,
+                    we_win32::to_wide("Segoe UI").as_ptr(),
+                );
+                we_win32::SelectObject(mem_dc, hint_font);
+                we_win32::SetTextColor(mem_dc, 0x0094A3B8);
+                let hint_text = we_win32::to_wide("• [ESPACIO/CLIC] Saltar  •  [↓] Agacharse");
+                we_win32::TextOutW(mem_dc, 180, ground_y + 18, hint_text.as_ptr(), (hint_text.len() - 1) as i32); */
+
+                we_win32::SelectObject(mem_dc, old_font);
+                we_win32::DeleteObject(title_font);
+                we_win32::DeleteObject(score_font);
+                we_win32::DeleteObject(bottom_font);
+                // we_win32::DeleteObject(hint_font);
+
+                we_win32::BitBlt(hdc, 0, 0, w, h, mem_dc, 0, 0, 0x00CC0020 /* SRCCOPY */);
+
+                we_win32::SelectObject(mem_dc, old_bmp);
+                we_win32::DeleteObject(mem_bmp);
+                we_win32::DeleteDC(mem_dc);
+            }
+
+            we_win32::EndPaint(hwnd, ps.as_ptr() as *const _);
+        }
+        return 0;
+    }
+    we_win32::DefWindowProcW(hwnd, msg, wparam, lparam)
+}
+
+static LAST_CONSOLE_RECT: Mutex<(f64, f64, f64, f64, bool)> = Mutex::new((0.0, 0.0, 0.0, 0.0, false));
+static SAVED_CONSOLE_BLUR_POS: Mutex<Option<(i32, i32, i32, i32)>> = Mutex::new(None);
+
+#[cfg(target_os = "windows")]
+fn get_or_create_console_blur_window(app_hwnd: we_win32::HWND, x: i32, y: i32, w: i32, h: i32) -> we_win32::HWND {
+    if !app_hwnd.is_null() {
+        *CONSOLE_BLUR_PARENT_HWND.lock().unwrap_or_else(|e| e.into_inner()) = Some(app_hwnd as isize);
+    }
+    let mut lock = CONSOLE_BLUR_HWND.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(hwnd_val) = *lock {
+        let hwnd = hwnd_val as we_win32::HWND;
+        unsafe {
+            if we_win32::IsWindow(hwnd) != 0 {
+                let is_behind = CONSOLE_BLUR_BEHIND_APP.load(std::sync::atomic::Ordering::SeqCst);
+                let target_owner = if is_behind { 0 } else { app_hwnd as isize };
+                we_win32::SetWindowLongPtrW(hwnd, we_win32::GWLP_HWNDPARENT, target_owner);
+                return hwnd;
+            }
+        }
+    }
+
+    unsafe {
+        let class_name = we_win32::to_wide("ModComparerConsoleBlurClass");
+        if !CONSOLE_BLUR_CLASS_REGISTERED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            let wc = we_win32::WNDCLASSEXW {
+                cbSize: std::mem::size_of::<we_win32::WNDCLASSEXW>() as u32,
+                style: 0,
+                lpfnWndProc: Some(console_blur_wnd_proc),
+                cbClsExtra: 0,
+                cbWndExtra: 0,
+                hInstance: we_win32::GetModuleHandleW(std::ptr::null()),
+                hIcon: std::ptr::null_mut(),
+                hCursor: we_win32::LoadCursorW(std::ptr::null_mut(), 32512 as *const u16),
+                hbrBackground: we_win32::GetStockObject(we_win32::BLACK_BRUSH) as we_win32::HBRUSH,
+                lpszMenuName: std::ptr::null(),
+                lpszClassName: class_name.as_ptr(),
+                hIconSm: std::ptr::null_mut(),
+            };
+            we_win32::RegisterClassExW(&wc);
+        }
+
+        let is_behind = CONSOLE_BLUR_BEHIND_APP.load(std::sync::atomic::Ordering::SeqCst);
+        let title = we_win32::to_wide("ModComparer_ConsoleBlur");
+        let hwnd = we_win32::CreateWindowExW(
+            we_win32::WS_EX_TOOLWINDOW,
+            class_name.as_ptr(),
+            title.as_ptr(),
+            we_win32::WS_POPUP,
+            x, y, w, h,
+            if is_behind { std::ptr::null_mut() } else { app_hwnd },
+            std::ptr::null_mut(),
+            we_win32::GetModuleHandleW(std::ptr::null()),
+            std::ptr::null_mut(),
+        );
+
+        if !hwnd.is_null() {
+            let corner_pref: u32 = we_win32::DWMWCP_ROUND;
+            let _ = we_win32::DwmSetWindowAttribute(
+                hwnd,
+                we_win32::DWMWA_WINDOW_CORNER_PREFERENCE,
+                &corner_pref as *const _ as *const std::ffi::c_void,
+                std::mem::size_of::<u32>() as u32,
+            );
+            let border_color: u32 = we_win32::DWMWA_COLOR_NONE;
+            let _ = we_win32::DwmSetWindowAttribute(
+                hwnd,
+                we_win32::DWMWA_BORDER_COLOR,
+                &border_color as *const _ as *const std::ffi::c_void,
+                std::mem::size_of::<u32>() as u32,
+            );
+            let ncrp_disabled: u32 = we_win32::DWMNCRP_DISABLED;
+            let _ = we_win32::DwmSetWindowAttribute(
+                hwnd,
+                we_win32::DWMWA_NCRENDERING_POLICY,
+                &ncrp_disabled as *const _ as *const std::ffi::c_void,
+                std::mem::size_of::<u32>() as u32,
+            );
+
+            we_win32::enable_blur_behind(hwnd);
+            we_win32::delete_taskbar_tab(hwnd);
+            *lock = Some(hwnd as isize);
+        }
+        hwnd
+    }
+}
+
+#[tauri::command]
+fn sync_console_blur_rect(
+    window: tauri::WebviewWindow,
+    visible: bool,
+    _x: f64,
+    _y: f64,
+    _width: f64,
+    _height: f64,
+) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let (saved_rx, saved_ry, saved_w, saved_h) = SAVED_CONSOLE_BLUR_POS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or((40, 70, 520, 330));
+        *LAST_CONSOLE_RECT.lock().unwrap_or_else(|e| e.into_inner()) = (saved_rx as f64, saved_ry as f64, saved_w as f64, saved_h as f64, visible);
+
+        let app_hwnd = window.hwnd().map(|h| h.0 as we_win32::HWND).unwrap_or(std::ptr::null_mut());
+        if app_hwnd.is_null() {
+            return Ok(());
+        }
+        *CONSOLE_BLUR_PARENT_HWND.lock().unwrap_or_else(|e| e.into_inner()) = Some(app_hwnd as isize);
+
+        let is_we_active = get_we_window_hwnd().is_some();
+        if !visible || is_we_active {
+            if let Some(blur_val) = get_console_blur_hwnd() {
+                unsafe {
+
+                    let b_hwnd = blur_val as we_win32::HWND;
+                    if we_win32::IsWindow(b_hwnd) != 0 && we_win32::IsWindowVisible(b_hwnd) != 0 {
+                        let mut origin = we_win32::POINT { x: 0, y: 0 };
+                        we_win32::ClientToScreen(app_hwnd, &mut origin);
+                        let mut cur_rc = we_win32::RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                        we_win32::GetWindowRect(b_hwnd, &mut cur_rc);
+                        let w = cur_rc.right - cur_rc.left;
+                        let h = cur_rc.bottom - cur_rc.top;
+                        if w > 0 && h > 0 {
+                            *SAVED_CONSOLE_BLUR_POS.lock().unwrap_or_else(|e| e.into_inner()) = Some((cur_rc.left - origin.x, cur_rc.top - origin.y, w, h));
+                        }
+                    }
+                    we_win32::ShowWindow(b_hwnd, we_win32::SW_HIDE);
+                }
+            }
+            return Ok(());
+        }
+
+        unsafe {
+            let mut origin = we_win32::POINT { x: 0, y: 0 };
+            we_win32::ClientToScreen(app_hwnd, &mut origin);
+
+            let sx = origin.x + saved_rx;
+            let sy = origin.y + saved_ry;
+            let sw = saved_w;
+            let sh = saved_h;
+
+            let blur_hwnd = get_or_create_console_blur_window(app_hwnd, sx, sy, sw, sh);
+            if !blur_hwnd.is_null() {
+                ensure_dino_tick_loop();                let is_already_vis = we_win32::IsWindowVisible(blur_hwnd) != 0;
+                let is_behind = CONSOLE_BLUR_BEHIND_APP.load(std::sync::atomic::Ordering::SeqCst);
+                if !is_already_vis {
+                    // Position at initial position and show
+                    we_win32::SetWindowPos(
+                        blur_hwnd,
+                        if is_behind { app_hwnd } else { 0 as we_win32::HWND },
+                        sx,
+                        sy,
+                        sw,
+                        sh,
+                        we_win32::SWP_SHOWWINDOW | we_win32::SWP_NOACTIVATE,
+                    );
+                    we_win32::ShowWindow(blur_hwnd, we_win32::SW_SHOWNOACTIVATE);
+                    we_win32::RedrawWindow(
+                        blur_hwnd,
+                        std::ptr::null(),
+                        std::ptr::null_mut(),
+                        we_win32::RDW_INVALIDATE | we_win32::RDW_UPDATENOW,
+                    );
+                } else {
+                    if is_behind {
+                        we_win32::SetWindowLongPtrW(blur_hwnd, we_win32::GWLP_HWNDPARENT, 0);
+                        we_win32::SetWindowPos(
+                            blur_hwnd,
+                            app_hwnd,
+                            0, 0, 0, 0,
+                            we_win32::SWP_NOMOVE | we_win32::SWP_NOSIZE | we_win32::SWP_NOACTIVATE,
+                        );
+                    } else {
+                        we_win32::SetWindowLongPtrW(blur_hwnd, we_win32::GWLP_HWNDPARENT, app_hwnd as isize);
+                        we_win32::SetWindowPos(
+                            blur_hwnd,
+                            0 as we_win32::HWND,
+                            0, 0, 0, 0,
+                            we_win32::SWP_NOMOVE | we_win32::SWP_NOSIZE | we_win32::SWP_NOACTIVATE,
+                        );
+                        we_win32::ShowWindow(blur_hwnd, we_win32::SW_SHOWNOACTIVATE);
+                    }
+                }
+
+                // Position underlay behind app_hwnd
+                if let Some(u_val) = get_underlay_hwnd() {
+                    let u_hwnd = u_val as we_win32::HWND;
+                    if we_win32::IsWindow(u_hwnd) != 0 && we_win32::IsWindowVisible(u_hwnd) != 0 {
+                        we_win32::SetWindowPos(
+                            u_hwnd,
+                            app_hwnd,
+                            0, 0, 0, 0,
+                            we_win32::SWP_NOMOVE | we_win32::SWP_NOSIZE | we_win32::SWP_NOACTIVATE,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (window, visible, _x, _y, _width, _height);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn set_console_blur_behind_app(window: tauri::WebviewWindow, behind: bool) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        let is_we_active = get_we_window_hwnd().is_some();
+        let target_behind = if is_we_active { true } else { behind };
+        let prev = CONSOLE_BLUR_BEHIND_APP.swap(target_behind, std::sync::atomic::Ordering::SeqCst);
+        if prev == target_behind && !is_we_active {
+            return Ok(());
+        }
+        let app_hwnd = window.hwnd().map(|h| h.0 as we_win32::HWND).unwrap_or(std::ptr::null_mut());
+        if let Some(blur_val) = get_console_blur_hwnd() {
+            let blur_hwnd = blur_val as we_win32::HWND;
+            if we_win32::IsWindow(blur_hwnd) != 0 && we_win32::IsWindowVisible(blur_hwnd) != 0 && !app_hwnd.is_null() {
+                if target_behind {
+                    we_win32::SetWindowLongPtrW(blur_hwnd, we_win32::GWLP_HWNDPARENT, 0);
+                    we_win32::SetWindowPos(
+                        blur_hwnd,
+                        app_hwnd,
+                        0, 0, 0, 0,
+                        we_win32::SWP_NOMOVE | we_win32::SWP_NOSIZE | we_win32::SWP_NOACTIVATE,
+                    );
+                } else {
+                    we_win32::SetWindowLongPtrW(blur_hwnd, we_win32::GWLP_HWNDPARENT, app_hwnd as isize);
+                    we_win32::SetWindowPos(
+                        blur_hwnd,
+                        0 as we_win32::HWND,
+                        0, 0, 0, 0,
+                        we_win32::SWP_NOMOVE | we_win32::SWP_NOSIZE | we_win32::SWP_NOACTIVATE,
+                    );
+                    we_win32::ShowWindow(blur_hwnd, we_win32::SW_SHOWNOACTIVATE);
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (window, behind);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn open_console_window(app: tauri::AppHandle, visible: bool) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("console_dock") {
+        if visible {
+            let _ = win.show();
+            let _ = win.unminimize();
+        } else {
+            let _ = win.hide();
+        }
+        return Ok(());
+    }
+
+    let mut win_builder = tauri::WebviewWindowBuilder::new(
+        &app,
+        "console_dock",
+        tauri::WebviewUrl::App("console.html".into()),
+    )
+    .title("Consola de la instancia")
+    .inner_size(580.0, 350.0)
+    .min_inner_size(360.0, 220.0)
+    .transparent(true)
+    .decorations(false)
+    .shadow(false)
+    .resizable(true)
+    // Same browser arguments as the main window (tauri.conf.json): WebView2 refuses a second
+    // window in the same profile with different ones. Besides Tauri's defaults, video overlays
+    // are off: with a video wallpaper Windows put the video on a hardware plane of its own, and
+    // the frames that only redraw a small animated part (the instance bar's highlight, Crear
+    // Instancia's outline) showed the sharp video through the blurred glass there for a frame.
+    .additional_browser_args("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-direct-composition-video-overlays")
+    .visible(visible);
+
+    if let Some(main_win) = app.get_webview_window("main") {
+        if let (Ok(pos), Ok(size)) = (main_win.outer_position(), main_win.outer_size()) {
+            let scale = main_win.scale_factor().unwrap_or(1.0);
+            let phys_w = 580.0 * scale;
+            let target_x = pos.x as f64 + (size.width as f64) - phys_w - (36.0 * scale);
+            let target_y = pos.y as f64 + (80.0 * scale);
+            win_builder = win_builder.position(target_x / scale, target_y / scale);
+        }
+    }
+
+    let window = win_builder.build().map_err(|e| e.to_string())?;
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(c_hwnd) = window.hwnd() {
+            let child_hwnd = c_hwnd.0 as we_win32::HWND;
+            if let Some(main_win) = app.get_webview_window("main") {
+                if let Ok(m_hwnd) = main_win.hwnd() {
+                    let parent_hwnd = m_hwnd.0 as we_win32::HWND;
+                    unsafe {
+                        // Set owner to main launcher window so it stays on top of launcher and minimizes together
+                        we_win32::SetWindowLongPtrW(child_hwnd, we_win32::GWLP_HWNDPARENT, parent_hwnd as isize);
+                    }
+                }
+            }
+            unsafe {
+                // Apply hardware DWM Acrylic/BlurBehind directly to the window!
+                we_win32::enable_blur_behind(child_hwnd);
+                we_win32::delete_taskbar_tab(child_hwnd);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+fn toggle_console_window(app: tauri::AppHandle, visible: bool) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("console_dock") {
+        if visible {
+            let _ = win.show();
+            let _ = win.unminimize();
+        } else {
+            let _ = win.hide();
+        }
+    } else if visible {
+        let _ = open_console_window(app, true);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn open_main_console_view(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(main_win) = app.get_webview_window("main") {
+        let _ = main_win.show();
+        let _ = main_win.unminimize();
+        let _ = main_win.set_focus();
+        let _ = main_win.emit("navigate-view", "consola");
+    }
+    Ok(())
+}
 fn compute_thumbnail_rects(
     src_w: i32,
     src_h: i32,
@@ -4123,7 +6563,7 @@ fn update_we_geometry_internal(
 
     if is_min {
         unsafe {
-            we_win32::ShowWindow(hwnd, we_win32::SW_HIDE);
+            we_win32::ShowWindowAsync(hwnd, we_win32::SW_HIDE);
             if let Some(u_val) = get_underlay_hwnd() {
                 we_win32::ShowWindow(u_val as we_win32::HWND, we_win32::SW_HIDE);
             }
@@ -4148,23 +6588,22 @@ fn update_we_geometry_internal(
             we_win32::ShowWindow(underlay, we_win32::SW_SHOWNOACTIVATE);
         }
         if we_hidden {
-            we_win32::ShowWindow(hwnd, we_win32::SW_SHOWNOACTIVATE);
+            we_win32::ShowWindowAsync(hwnd, we_win32::SW_SHOWNOACTIVATE);
         }
 
             // 1. Keep app_hwnd at HWND_TOP, but only while the user is actually in the
-            //    launcher: raising it otherwise covers whatever app they are using
-            //    (e.g. on every playlist rotation). Steps 2-3 chain the underlay and
-            //    the WE window right behind app_hwnd either way.
-            if we_win32::GetForegroundWindow() == app_hwnd {
-                we_win32::SetWindowPos(
-                    app_hwnd,
-                    0 as we_win32::HWND, // HWND_TOP
-                    0, 0, 0, 0,
-                    we_win32::SWP_NOMOVE | we_win32::SWP_NOSIZE | we_win32::SWP_NOACTIVATE,
-                );
-            }
+            //    launcher: raising it otherwise covers whatever app they are using.
+            //    We check app_hwnd itself as well as any child/ancestor window (WebView2).
 
-            // 2. Position underlay window right behind app_hwnd matching launcher visible bounds
+
+            we_win32::SetWindowPos(
+                app_hwnd,
+                0 as we_win32::HWND, // HWND_TOP
+                0, 0, 0, 0,
+                we_win32::SWP_NOMOVE | we_win32::SWP_NOSIZE | we_win32::SWP_NOACTIVATE,
+            );
+
+            // 2. Position underlay window ALWAYS directly behind app_hwnd so it never covers the UI
             we_win32::SetWindowPos(
                 underlay,
                 app_hwnd,
@@ -4189,8 +6628,9 @@ fn update_we_geometry_internal(
                 hwnd_y,
                 hwnd_w,
                 hwnd_h,
-                we_win32::SWP_NOACTIVATE | we_show_flag,
+                we_win32::SWP_NOACTIVATE | we_win32::SWP_ASYNCWINDOWPOS | we_show_flag,
             );
+
 
             // 4. Update region only if dimensions changed to avoid stutter during drag
             let mut last_rgn = LAST_WE_RGN.lock().unwrap_or_else(|e| e.into_inner());
@@ -4504,7 +6944,7 @@ fn close_we_window_and_wait(we_exe: &std::path::Path, old_hwnd: Option<isize>) {
 #[cfg(target_os = "windows")]
 unsafe fn prepare_we_window(found_hwnd: we_win32::HWND) {
     // 1. Hide initially while configuring
-    we_win32::ShowWindow(found_hwnd, we_win32::SW_HIDE);
+    we_win32::ShowWindowAsync(found_hwnd, we_win32::SW_HIDE);
 
     // 2. Ensure found_hwnd has NO owner so Windows doesn't force it on top of app_hwnd
     we_win32::SetWindowLongPtrW(found_hwnd, we_win32::GWLP_HWNDPARENT, 0);
@@ -4561,7 +7001,41 @@ fn get_we_preview_path(project_path: String) -> Option<String> {
         p.parent().map(|d| d.to_path_buf()).unwrap_or(p)
     };
 
-    for name in ["preview.gif", "preview.jpg", "preview.png", "preview.mp4"] {
+    // 1. Check project.json for explicit preview / thumbnail file
+    let project_json = folder.join("project.json");
+    if project_json.exists() {
+        if let Ok(content) = std::fs::read_to_string(&project_json) {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(preview_str) = val.get("preview").and_then(|v| v.as_str()) {
+                    let pf = folder.join(preview_str);
+                    if pf.exists() && !preview_str.to_lowercase().ends_with(".mp4") {
+                        return Some(pf.to_string_lossy().to_string());
+                    }
+                }
+                if let Some(thumb_str) = val.get("thumbnail").and_then(|v| v.as_str()) {
+                    let tf = folder.join(thumb_str);
+                    if tf.exists() && !thumb_str.to_lowercase().ends_with(".mp4") {
+                        return Some(tf.to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Check standard preview image names
+    for name in [
+        "preview.jpg",
+        "preview.png",
+        "preview.gif",
+        "preview.jpeg",
+        "preview.webp",
+        "thumbnail.jpg",
+        "thumbnail.png",
+        "thumb.jpg",
+        "thumb.png",
+        "cover.jpg",
+        "cover.png",
+    ] {
         let f = folder.join(name);
         if f.exists() {
             return Some(f.to_string_lossy().to_string());
@@ -4580,11 +7054,185 @@ fn get_we_preview_path(project_path: String) -> Option<String> {
 /// Returned as raw binary (8-byte header: width, height as u32 LE, then top-down BGRA
 /// rows) instead of a base64 BMP data URL: the snapshot must reach the screen within a
 /// frame or two, otherwise it shows a frame older than the one being frozen.
-#[tauri::command]
+// Off the UI thread: these wait on DWM and on Wallpaper Engine (PrintWindow), and the glass
+// asks for a frame 30 times a second.
+#[tauri::command(async)]
+fn capture_we_frame(window: tauri::WebviewWindow) -> Result<tauri::ipc::Response, String> {
+    capture_we_snapshot_raw(window)
+        .map(tauri::ipc::Response::new)
+        .ok_or_else(|| "No se pudo capturar el frame".to_string())
+}
+
+#[tauri::command(async)]
 fn capture_we_snapshot(window: tauri::WebviewWindow) -> Result<tauri::ipc::Response, String> {
     capture_we_snapshot_raw(window)
         .map(tauri::ipc::Response::new)
         .ok_or_else(|| "No se pudo capturar el fondo".to_string())
+}
+
+#[tauri::command(async)]
+fn capture_we_mini_thumb(window: tauri::WebviewWindow) -> Result<tauri::ipc::Response, String> {
+    capture_we_mini_thumb_raw(window)
+        .map(tauri::ipc::Response::new)
+        .ok_or_else(|| "No se pudo capturar el mini thumb".to_string())
+}
+
+static WE_GLASS_FRAMES: Mutex<wallpaper_glass::FrameCache> =
+    Mutex::new(wallpaper_glass::FrameCache::new());
+
+fn capture_we_mini_thumb_raw(_window: tauri::WebviewWindow) -> Option<Vec<u8>> {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        if we_freeze::is_frozen() {
+            wallpaper_capture::pause();
+            return None;
+        }
+        let generation = WE_GENERATION.load(std::sync::atomic::Ordering::SeqCst);
+        let hwnd_val = get_we_window_hwnd()?;
+        let hwnd = hwnd_val as we_win32::HWND;
+        if we_win32::IsWindow(hwnd) == 0 || we_win32::IsWindowVisible(hwnd) == 0 {
+            wallpaper_capture::pause();
+            return None;
+        }
+
+        match wallpaper_capture::frame((generation, hwnd_val)) {
+            wallpaper_capture::FrameStatus::Ready(frame) => {
+                return (is_current_we_generation(generation)
+                    && get_we_window_hwnd() == Some(hwnd_val))
+                    .then_some(frame);
+            }
+            wallpaper_capture::FrameStatus::Pending => return None,
+            // Compatibility for systems without Windows Graphics Capture. Completed
+            // WGC frames always win, including during a temporary device recovery.
+            wallpaper_capture::FrameStatus::Unavailable => {}
+        }
+
+        let mut rc = we_win32::RECT::default();
+        we_win32::GetClientRect(hwnd, &mut rc);
+        let w = rc.right - rc.left;
+        let h = rc.bottom - rc.top;
+        if w < 10 || h < 10 {
+            return None;
+        }
+
+        const THUMB_W: i32 = wallpaper_glass::WIDTH as i32;
+        const THUMB_H: i32 = wallpaper_glass::HEIGHT as i32;
+
+        let hdc_screen = we_win32::GetDC(std::ptr::null_mut());
+        if hdc_screen.is_null() {
+            return None;
+        }
+
+        let hdc_src = we_win32::CreateCompatibleDC(hdc_screen);
+        let hbm_src = we_win32::CreateCompatibleBitmap(hdc_screen, w, h);
+        let hdc_thumb = we_win32::CreateCompatibleDC(hdc_screen);
+        let hbm_thumb = we_win32::CreateCompatibleBitmap(hdc_screen, THUMB_W, THUMB_H);
+
+        if hdc_src.is_null() || hbm_src.is_null() || hdc_thumb.is_null() || hbm_thumb.is_null() {
+            if !hbm_thumb.is_null() { we_win32::DeleteObject(hbm_thumb); }
+            if !hdc_thumb.is_null() { we_win32::DeleteDC(hdc_thumb); }
+            if !hbm_src.is_null() { we_win32::DeleteObject(hbm_src); }
+            if !hdc_src.is_null() { we_win32::DeleteDC(hdc_src); }
+            we_win32::ReleaseDC(std::ptr::null_mut(), hdc_screen);
+            return None;
+        }
+
+        let old_src = we_win32::SelectObject(hdc_src, hbm_src);
+        let old_thumb = we_win32::SelectObject(hdc_thumb, hbm_thumb);
+
+        let mut captured = false;
+        // PW_RENDERFULLCONTENT = 2: Only capture valid D3D surfaces.
+        // Fallback flag 0 (WM_PRINT) is intentionally omitted because DirectX
+        // ignores WM_PRINT and produces blank black frames that cause flickering.
+        if we_win32::PrintWindow(hwnd, hdc_src, 2) != 0 {
+            const SRCCOPY: u32 = 0x00CC0020;
+            const HALFTONE: i32 = 4;
+            we_win32::SetStretchBltMode(hdc_thumb, HALFTONE);
+            we_win32::SetBrushOrgEx(hdc_thumb, 0, 0, std::ptr::null_mut());
+            captured = we_win32::StretchBlt(
+                hdc_thumb,
+                0, 0, THUMB_W, THUMB_H,
+                hdc_src,
+                0, 0, w, h,
+                SRCCOPY,
+            ) != 0;
+        }
+
+        // GetDIBits requires the bitmap to be deselected from every DC.
+        we_win32::SelectObject(hdc_thumb, old_thumb);
+        let mut raw = None;
+        if captured {
+            #[repr(C)]
+            #[allow(non_snake_case)]
+            struct BITMAPINFOHEADER {
+                biSize: u32,
+                biWidth: i32,
+                biHeight: i32,
+                biPlanes: u16,
+                biBitCount: u16,
+                biCompression: u32,
+                biSizeImage: u32,
+                biXPelsPerMeter: i32,
+                biYPelsPerMeter: i32,
+                biClrUsed: u32,
+                biClrImportant: u32,
+            }
+            let pixel_bytes = (THUMB_W * THUMB_H * 4) as usize;
+            let mut bmi = BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: THUMB_W,
+                biHeight: -THUMB_H, // top-down
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: 0,
+                biSizeImage: pixel_bytes as u32,
+                biXPelsPerMeter: 0,
+                biYPelsPerMeter: 0,
+                biClrUsed: 0,
+                biClrImportant: 0,
+            };
+            let mut out = vec![0u8; 8 + pixel_bytes];
+            out[0..4].copy_from_slice(&(THUMB_W as u32).to_le_bytes());
+            out[4..8].copy_from_slice(&(THUMB_H as u32).to_le_bytes());
+            let lines = we_win32::GetDIBits(
+                hdc_screen,
+                hbm_thumb,
+                0,
+                THUMB_H as u32,
+                out[8..].as_mut_ptr() as *mut std::ffi::c_void,
+                &mut bmi as *mut _ as *mut std::ffi::c_void,
+                0, // DIB_RGB_COLORS
+            );
+            if lines == THUMB_H {
+                // Convert BGRA to RGBA in-place and guarantee alpha = 255
+                for chunk in out[8..].chunks_exact_mut(4) {
+                    chunk.swap(0, 2);
+                    chunk[3] = 255;
+                }
+
+                raw = Some(out);
+            }
+        }
+
+        we_win32::DeleteObject(hbm_thumb);
+        we_win32::DeleteDC(hdc_thumb);
+
+        we_win32::SelectObject(hdc_src, old_src);
+        we_win32::DeleteObject(hbm_src);
+        we_win32::DeleteDC(hdc_src);
+
+        we_win32::ReleaseDC(std::ptr::null_mut(), hdc_screen);
+
+        let mut frames = WE_GLASS_FRAMES.lock().unwrap_or_else(|e| e.into_inner());
+        if !is_current_we_generation(generation) || get_we_window_hwnd() != Some(hwnd_val) {
+            return None;
+        }
+        frames.update((generation, hwnd_val), raw)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
 }
 
 fn capture_we_snapshot_raw(window: tauri::WebviewWindow) -> Option<Vec<u8>> {
@@ -5081,7 +7729,7 @@ fn set_taskbar_preview_override(app_hwnd: we_win32::HWND, on: bool) {
 /// freshly created, still black window). Used to fade the freeze-frame out only when
 /// there is something to reveal. Same capture trick as `capture_we_snapshot`: the
 /// launcher is excluded from capture for a moment, which is not visible on screen.
-#[tauri::command]
+#[tauri::command(async)]
 fn is_we_scene_rendering(window: tauri::WebviewWindow) -> bool {
     #[cfg(target_os = "windows")]
     unsafe {
@@ -5468,7 +8116,11 @@ fn freeze_we_scene() -> bool {
     #[cfg(target_os = "windows")]
     {
         let Some(window) = get_we_window_hwnd() else { return false };
-        return we_freeze::freeze(window);
+        let frozen = we_freeze::freeze(window);
+        if frozen {
+            wallpaper_capture::pause();
+        }
+        return frozen;
     }
     #[cfg(not(target_os = "windows"))]
     false
@@ -5547,7 +8199,7 @@ fn play_we_wallpaper_blocking(
         }
         if let Some(h) = old_hwnd {
             unsafe {
-                we_win32::ShowWindow(h as we_win32::HWND, we_win32::SW_HIDE);
+                we_win32::ShowWindowAsync(h as we_win32::HWND, we_win32::SW_HIDE);
             }
         }
         close_we_window_and_wait(&we_exe, old_hwnd);
@@ -5585,6 +8237,9 @@ fn play_we_wallpaper_blocking(
             // The underlay window is created here (update_we_geometry_internal) and a
             // window belongs to the thread that creates it, so this part must run on the
             // UI thread, which pumps its messages. HWNDs travel as integers (not Send).
+            // Restyling WE's window waits for WE to answer, so it happens here, on this
+            // worker thread, and never on the UI thread.
+            unsafe { prepare_we_window(found_hwnd) };
             let fh = found_hwnd as usize;
             let ah = app_hwnd as usize;
             let pf = prev_foreground as usize;
@@ -5650,7 +8305,6 @@ unsafe fn finish_we_window_setup(
     app_hwnd: we_win32::HWND,
     prev_foreground: we_win32::HWND,
 ) {
-    prepare_we_window(found_hwnd);
 
     // Apply current scale & pan transform with hardware DWM thumbnail scaling
     let (scale, pan_x, pan_y) = get_we_transform();
@@ -5691,6 +8345,8 @@ unsafe fn finish_we_window_setup(
 fn stop_we_wallpaper() -> Result<(), String> {
     bump_we_generation();
     #[cfg(target_os = "windows")]
+    wallpaper_capture::pause();
+    #[cfg(target_os = "windows")]
     let _scene_busy = we_freeze::begin_scene_operation();
     #[cfg(target_os = "windows")]
     we_freeze::clear_baseline();
@@ -5705,6 +8361,11 @@ fn stop_we_wallpaper() -> Result<(), String> {
                 let _ = we_win32::DwmUnregisterThumbnail(thumb_val as we_win32::HTHUMBNAIL);
             }
         }
+        if let Some(blur_val) = get_console_blur_hwnd() {
+            unsafe {
+                we_win32::ShowWindow(blur_val as we_win32::HWND, we_win32::SW_HIDE);
+            }
+        }
         if let Some(underlay_val) = take_underlay_hwnd() {
             unsafe {
                 we_win32::ShowWindow(underlay_val as we_win32::HWND, we_win32::SW_HIDE);
@@ -5713,7 +8374,7 @@ fn stop_we_wallpaper() -> Result<(), String> {
         }
         if let Some(hwnd_val) = take_we_window_hwnd() {
             unsafe {
-                we_win32::ShowWindow(hwnd_val as we_win32::HWND, we_win32::SW_HIDE);
+                we_win32::ShowWindowAsync(hwnd_val as we_win32::HWND, we_win32::SW_HIDE);
             }
         }
         *LAST_WE_GEOM.lock().unwrap_or_else(|e| e.into_inner()) = (0, 0, 0, 0);
@@ -5773,7 +8434,10 @@ fn sync_we_window_rect(window: tauri::WebviewWindow, visible: bool) -> Result<()
                     if let Some(u_val) = get_underlay_hwnd() {
                         we_win32::ShowWindow(u_val as we_win32::HWND, we_win32::SW_HIDE);
                     }
-                    we_win32::ShowWindow(hwnd, we_win32::SW_HIDE);
+                    if let Some(b_val) = get_console_blur_hwnd() {
+                        we_win32::ShowWindow(b_val as we_win32::HWND, we_win32::SW_HIDE);
+                    }
+                    we_win32::ShowWindowAsync(hwnd, we_win32::SW_HIDE);
                     *LAST_WE_GEOM.lock().unwrap_or_else(|e| e.into_inner()) = (0, 0, 0, 0);
                 }
             }
@@ -5781,6 +8445,7 @@ fn sync_we_window_rect(window: tauri::WebviewWindow, visible: bool) -> Result<()
     }
     Ok(())
 }
+
 
 #[tauri::command]
 fn update_we_transform(window: tauri::WebviewWindow, scale: f64, pan_x: f64, pan_y: f64) -> Result<(), String> {
@@ -5832,6 +8497,84 @@ fn apply_we_properties(
     Ok(())
 }
 
+/// Translates short texts (a wallpaper's option labels, in any language) into `target` ("es" /
+/// "en"), with Google's public translator, in batches. Translations are kept in
+/// ika_root/cache/translations.json, so a text is only sent once. A text that can't be translated
+/// comes back as it was.
+#[tauri::command(async)]
+fn translate_texts(texts: Vec<String>, target: String) -> Vec<String> {
+    let target = if target == "en" { "en" } else { "es" };
+    let path = mc::ika_root().join("cache").join("translations.json");
+    let mut cache: std::collections::HashMap<String, String> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    let key = |t: &str| format!("{}|{}", target, t);
+    let missing: Vec<String> = {
+        let mut seen = std::collections::HashSet::new();
+        texts
+            .iter()
+            .filter(|t| !t.trim().is_empty() && !cache.contains_key(&key(t)) && seen.insert(t.to_string()))
+            .cloned()
+            .collect()
+    };
+    if !missing.is_empty() {
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(std::time::Duration::from_secs(6))
+            .timeout_read(std::time::Duration::from_secs(12))
+            .build();
+        let ask = |q: &str| -> Option<String> {
+            let resp = agent
+                .get("https://translate.googleapis.com/translate_a/single")
+                .query("client", "gtx")
+                .query("sl", "auto")
+                .query("tl", target)
+                .query("dt", "t")
+                .query("q", q)
+                .call()
+                .ok()?;
+            let v: serde_json::Value = serde_json::from_str(&resp.into_string().ok()?).ok()?;
+            let parts = v.get(0)?.as_array()?;
+            Some(parts.iter().filter_map(|p| p.get(0).and_then(|x| x.as_str())).collect::<String>())
+        };
+        // batches of whole lines, one text per line
+        let mut batch: Vec<&String> = Vec::new();
+        let mut flush = |batch: &mut Vec<&String>, cache: &mut std::collections::HashMap<String, String>| {
+            if batch.is_empty() {
+                return;
+            }
+            let joined = batch.iter().map(|s| s.replace('\n', " ")).collect::<Vec<_>>().join("\n");
+            let lines: Vec<String> = ask(&joined).map(|t| t.split('\n').map(|l| l.trim().to_string()).collect()).unwrap_or_default();
+            if lines.len() == batch.len() {
+                for (src, out) in batch.iter().zip(lines) {
+                    cache.insert(key(src), out);
+                }
+            } else {
+                // the lines didn't come back one for one: each on its own
+                for src in batch.iter() {
+                    if let Some(out) = ask(src) {
+                        cache.insert(key(src), out.trim().to_string());
+                    }
+                }
+            }
+            batch.clear();
+        };
+        let mut size = 0;
+        for t in &missing {
+            if size + t.len() > 1500 {
+                flush(&mut batch, &mut cache);
+                size = 0;
+            }
+            size += t.len() + 1;
+            batch.push(t);
+        }
+        flush(&mut batch, &mut cache);
+        let _ = std::fs::create_dir_all(path.parent().unwrap_or(&mc::ika_root()));
+        let _ = std::fs::write(&path, serde_json::to_string(&cache).unwrap_or_default());
+    }
+    texts.iter().map(|t| cache.get(&key(t)).cloned().unwrap_or_else(|| t.clone())).collect()
+}
+
 #[tauri::command(async)]
 fn get_we_wallpaper_properties(project_path: String) -> Result<Option<serde_json::Value>, String> {
     let path = std::path::Path::new(&project_path);
@@ -5870,7 +8613,7 @@ fn get_block_textures_dir() -> std::path::PathBuf {
             return p;
         }
     }
-    let fallback = std::path::PathBuf::from(r"C:\dev\Comparer\minecraft_block_textures");
+    let fallback = std::path::PathBuf::from(r"E:\Users\Aly\Desktop\Comparer\minecraft_block_textures");
     if fallback.exists() {
         return fallback;
     }
@@ -5977,7 +8720,7 @@ fn get_instance_log_status(instance_path: String) -> InstanceLogStatus {
                 }
             }
 
-            let start_last = if total > 150 { total - 150 } else { 0 };
+            let start_last = if total > 2000 { total - 2000 } else { 0 };
             lines = all_lines[start_last..].to_vec();
         }
     }
@@ -6628,7 +9371,7 @@ fn get_instance_details(instance_path: String) -> Result<InstanceDetails, String
     let get = |k: &str| cfg.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone());
     let override_java = get("OverrideJavaLocation").map_or(false, |v| v == "true");
     let java_path = get("JavaPath").filter(|p| !p.is_empty() && (override_java || get("OverrideJavaLocation").is_none()));
-    let override_mem = get("OverrideMemory").map_or(false, |v| v == "true");
+    let _override_mem = get("OverrideMemory").map_or(false, |v| v == "true");
     let jvm_args = if get("OverrideJavaArgs").map_or(true, |v| v == "true") {
         get("JvmArgs").map(|a| a.replace("\\\\", "\\")).unwrap_or_default()
     } else {
@@ -6650,8 +9393,8 @@ fn get_instance_details(instance_path: String) -> Result<InstanceDetails, String
         java_major: get("IkaJavaMajor").and_then(|m| m.parse().ok()),
         java_runtime: get("IkaJavaRuntime").filter(|v| !v.is_empty()),
         jvm_args,
-        max_mem_mb: if override_mem { get("MaxMemAlloc").and_then(|m| m.parse().ok()) } else { None },
-        min_mem_mb: if override_mem { get("MinMemAlloc").and_then(|m| m.parse().ok()) } else { None },
+        max_mem_mb: Some(get("MaxMemAlloc").and_then(|m| m.parse().ok()).unwrap_or(8192)),
+        min_mem_mb: Some(get("MinMemAlloc").and_then(|m| m.parse().ok()).unwrap_or(512)),
         mods_count,
     })
 }
@@ -6802,7 +9545,7 @@ async fn create_new_instance(
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
-        let mut managed_pack_meta: Option<(String, String, String)> = None;
+        let mut managed_pack_meta: Option<(String, String, String, String, String)> = None;
 
         if let Some(spec) = &modpack {
             match mc::install_modpack(
@@ -6819,7 +9562,7 @@ async fn create_new_instance(
                     if outcome.loader_version.is_some() {
                         final_loader_ver = outcome.loader_version;
                     }
-                    managed_pack_meta = Some((outcome.pack_type, outcome.pack_id, outcome.pack_name));
+                    managed_pack_meta = Some((outcome.pack_type, outcome.pack_id, outcome.pack_name, outcome.pack_version_id, outcome.pack_version_name));
                 }
                 Err(e) => {
                     let _ = std::fs::remove_dir_all(&inst_dir);
@@ -6837,13 +9580,21 @@ async fn create_new_instance(
             "InstanceType=OneSix\nname={}\nIntendedVersion={}\nIntendedLoader={}\niconKey=default\nnotes=\n",
             clean_name, final_mc_version, final_loader
         );
-        if let Some((pack_type, pack_id, pack_name)) = &managed_pack_meta {
+        if let Some((pack_type, pack_id, pack_name, version_id, version_name)) = &managed_pack_meta {
             cfg_content.push_str(&format!(
                 "ManagedPack=true\nManagedPackType={}\nManagedPackID={}\nManagedPackName={}\n",
                 escape_prism_ini_value(pack_type),
                 escape_prism_ini_value(pack_id),
                 escape_prism_ini_value(pack_name),
             ));
+            // the exact version (same keys as Prism): what a group's recipe builds on
+            if !version_id.is_empty() && version_id != "0" {
+                cfg_content.push_str(&format!(
+                    "ManagedPackVersionID={}\nManagedPackVersionName={}\n",
+                    escape_prism_ini_value(version_id),
+                    escape_prism_ini_value(version_name),
+                ));
+            }
         }
         let java_path = java_path.map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
         if let Some(jp) = &java_path {
@@ -6862,10 +9613,9 @@ async fn create_new_instance(
         if let Some(args) = jvm_args.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
             cfg_content.push_str(&format!("OverrideJavaArgs=true\nJvmArgs={}\n", escape_prism_ini_value(args)));
         }
-        if let Some(max) = max_mem_mb {
-            let min = min_mem_mb.unwrap_or(512).min(max);
-            cfg_content.push_str(&format!("OverrideMemory=true\nMinMemAlloc={}\nMaxMemAlloc={}\n", min, max));
-        }
+        let max = max_mem_mb.unwrap_or(8192);
+        let min = min_mem_mb.unwrap_or(512).min(max);
+        cfg_content.push_str(&format!("OverrideMemory=true\nMinMemAlloc={}\nMaxMemAlloc={}\n", min, max));
         let _ = std::fs::write(&cfg_path, cfg_content);
 
         let pack_path = inst_dir.join("mmc-pack.json");
@@ -7273,6 +10023,23 @@ pub fn run() {
         std::process::exit(if rtss::write_profile() { 0 } else { 1 });
     }
 
+    // Parallel disk work (mod scans, instance list, wallpapers) runs on rayon's shared pool. Below
+    // normal priority and two cores left free, so a scan never takes the CPU from the window, the
+    // WebView or Wallpaper Engine (it only gets what they leave).
+    {
+        let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        let _ = rayon::ThreadPoolBuilder::new()
+            .num_threads(cores.saturating_sub(2).max(2))
+            .start_handler(|_| {
+                #[cfg(target_os = "windows")]
+                unsafe {
+                    use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL};
+                    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+                }
+            })
+            .build_global();
+    }
+
     #[cfg(target_os = "windows")]
     {
         // Clean up stale lockfile if left over from an unexpected crash/kill
@@ -7295,10 +10062,25 @@ pub fn run() {
                 let _ = w.set_focus();
             }
         }))
+        // Files for the page (convertFileSrc) are read off the UI thread: see asset_protocol.rs.
+        .register_asynchronous_uri_scheme_protocol("asset", |_ctx, request, responder| {
+            asset_protocol::handle(request, responder)
+        })
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_log::Builder::default().build())
+        // The plugin's default level is Trace: every TLS handshake, HTTP request and certificate
+        // of every library was formatted and written to the console and the log file.
+        .plugin(
+            tauri_plugin_log::Builder::default()
+                .level(log::LevelFilter::Warn)
+                .level_for("app_lib", if cfg!(debug_assertions) { log::LevelFilter::Debug } else { log::LevelFilter::Info })
+                .build(),
+        )
         .setup(|app| {
+            std::thread::spawn(|| {
+                scanner::warm_cache();
+                manager::warm_cache();
+            });
             #[cfg(target_os = "windows")]
             we_freeze::recover_after_crash();
             if let Some(main_win) = app.get_webview_window("main") {
@@ -7332,10 +10114,23 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             match event {
-                tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed => {
-                    save_window_state(window);
-                    let _ = stop_we_wallpaper();
-                    window.app_handle().exit(0);
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    if window.label() == "main" {
+                        save_window_state(window);
+                        let _ = stop_we_wallpaper();
+                        window.app_handle().exit(0);
+                    } else {
+                        // For secondary windows like console_dock, hide on close instead of exiting
+                        api.prevent_close();
+                        let _ = window.hide();
+                    }
+                }
+                tauri::WindowEvent::Destroyed => {
+                    if window.label() == "main" {
+                        save_window_state(window);
+                        let _ = stop_we_wallpaper();
+                        window.app_handle().exit(0);
+                    }
                 }
                 tauri::WindowEvent::Resized(_) if window.is_minimized().unwrap_or(false) => {
                     if let Some(wv) = window.app_handle().get_webview_window(window.label()) {
@@ -7353,11 +10148,75 @@ pub fn run() {
                     }
                     #[cfg(target_os = "windows")]
                     {
-                        if let Some(hwnd_val) = get_we_window_hwnd() {
-                            let app_hwnd = window.hwnd().map(|h| h.0 as we_win32::HWND).unwrap_or(std::ptr::null_mut());
-                            if !app_hwnd.is_null() {
+                        let app_hwnd = window.hwnd().map(|h| h.0 as we_win32::HWND).unwrap_or(std::ptr::null_mut());
+                        if !app_hwnd.is_null() {
+                            if let Some(hwnd_val) = get_we_window_hwnd() {
                                 let (scale, pan_x, pan_y) = get_we_transform();
                                 update_we_geometry_internal(hwnd_val as we_win32::HWND, app_hwnd, scale, pan_x, pan_y);
+                            }
+                            let (_cx, _cy, _cw, _ch, c_vis) = *LAST_CONSOLE_RECT.lock().unwrap_or_else(|e| e.into_inner());
+                            if c_vis {
+                                if let Some(b_val) = get_console_blur_hwnd() {
+                                    let b_hwnd = b_val as we_win32::HWND;
+                                    unsafe {
+                                        let mut client_rc = we_win32::RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                                        we_win32::GetClientRect(app_hwnd, &mut client_rc);
+                                        let mut origin = we_win32::POINT { x: 0, y: 0 };
+                                        we_win32::ClientToScreen(app_hwnd, &mut origin);
+
+                                        let min_x = origin.x;
+                                        let min_y = origin.y;
+                                        let max_x = origin.x + client_rc.right;
+                                        let max_y = origin.y + client_rc.bottom;
+
+                                        /* if we_win32::IsWindowVisible(b_hwnd) == 0 {
+                                            let sx = (origin.x + 40).clamp(min_x, (max_x - 520).max(min_x));
+                                            let sy = (origin.y + 70).clamp(min_y, (max_y - 330).max(min_y));
+                                            let sw = 520;
+                                            let sh = 330;
+                                            we_win32::SetWindowPos(
+                                                b_hwnd,
+                                                0 as we_win32::HWND,
+                                                sx,
+                                                sy,
+                                                sw,
+                                                sh,
+                                                we_win32::SWP_SHOWWINDOW,
+                                            );
+                                        } */ if we_win32::IsWindowVisible(b_hwnd) != 0 {
+                                            let mut cur_rc = we_win32::RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                                            we_win32::GetWindowRect(b_hwnd, &mut cur_rc);
+                                            let w = cur_rc.right - cur_rc.left;
+                                            let h = cur_rc.bottom - cur_rc.top;
+                                            let mut new_x = cur_rc.left;
+                                            let mut new_y = cur_rc.top;
+
+                                            if new_x < min_x {
+                                                new_x = min_x;
+                                            } else if new_x + w > max_x {
+                                                new_x = (max_x - w).max(min_x);
+                                            }
+
+                                            if new_y < min_y {
+                                                new_y = min_y;
+                                            } else if new_y + h > max_y {
+                                                new_y = (max_y - h).max(min_y);
+                                            }
+
+                                            if new_x != cur_rc.left || new_y != cur_rc.top {
+                                                we_win32::SetWindowPos(
+                                                    b_hwnd,
+                                                    0 as we_win32::HWND,
+                                                    new_x,
+                                                    new_y,
+                                                    w,
+                                                    h,
+                                                    we_win32::SWP_NOACTIVATE | we_win32::SWP_NOZORDER,
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -7384,7 +10243,10 @@ pub fn run() {
                                         if let Some(u_val) = get_underlay_hwnd() {
                                             we_win32::ShowWindow(u_val as we_win32::HWND, we_win32::SW_HIDE);
                                         }
-                                        we_win32::ShowWindow(hwnd_val as we_win32::HWND, we_win32::SW_HIDE);
+                                        if let Some(b_val) = get_console_blur_hwnd() {
+                                            we_win32::ShowWindow(b_val as we_win32::HWND, we_win32::SW_HIDE);
+                                        }
+                                        we_win32::ShowWindowAsync(hwnd_val as we_win32::HWND, we_win32::SW_HIDE);
                                     }
                                     *LAST_WE_GEOM.lock().unwrap_or_else(|e| e.into_inner()) = (0, 0, 0, 0);
                                 } else if *focused {
@@ -7403,6 +10265,8 @@ pub fn run() {
             scan_directory,
             compare_instances,
             open_browser,
+            autostart_enabled,
+            set_autostart,
             toggle_mod_disabled,
             delete_mod_file,
             get_mod_details,
@@ -7419,10 +10283,6 @@ pub fn run() {
             get_steam_workshop_wallpapers,
             fetch_steam_workshop_online,
             fetch_steam_item_details,
-            download_steam_workshop_item,
-            launch_steamcmd_login,
-            launch_steam_qr_login,
-            open_steam_workshop_item,
             check_steam_item_installed,
             read_local_wallpaper_blob,
             get_all_instances,
@@ -7430,9 +10290,9 @@ pub fn run() {
             get_all_downloaded_wallpapers,
             pick_wallpaper_file,
             import_wallpaper_file,
+            import_wallpaper_from_youtube,
             open_wallpapers_folder,
             delete_downloaded_wallpaper,
-            sync_wallpaper_engine_desktop,
             app_window_minimize,
             app_window_toggle_maximize,
             app_window_close,
@@ -7441,6 +10301,8 @@ pub fn run() {
             find_wallpaper_engine_exe,
             get_we_preview_path,
             capture_we_snapshot,
+            capture_we_frame,
+            capture_we_mini_thumb,
             is_we_scene_rendering,
             freeze_we_scene,
             thaw_we_scene,
@@ -7449,9 +10311,15 @@ pub fn run() {
             play_we_wallpaper,
             stop_we_wallpaper,
             sync_we_window_rect,
+            sync_console_blur_rect,
+            set_console_blur_behind_app,
+            open_console_window,
+            toggle_console_window,
+            open_main_console_view,
             update_we_transform,
             apply_we_properties,
             get_we_wallpaper_properties,
+            translate_texts,
             get_minecraft_block_textures,
             open_block_textures_folder,
             get_instance_log_status,
@@ -7469,6 +10337,8 @@ pub fn run() {
             update_instance,
             console_tools::game_stats,
             console_tools::stop_game,
+            mc::instance_missing_files,
+            mc::retry_missing_files,
             share::share_room_create,
             share::share_room_get,
             share::share_room_update,
@@ -7478,10 +10348,26 @@ pub fn run() {
             share::share_box_get,
             share::share_box_send,
             share::share_box_ack,
+            share::social_hub_url,
+            share::social_sync,
+            share::social_friend,
+            share::group_call,
+            share::group_image_upload,
+            share::name_status,
+            share::name_claim,
+            share::group_pack_changed,
+            share::encode_avif,
+            share::group_upload,
+            share::group_install,
+            share::group_pack_delta,
+            share::group_pack_remember,
             share::share_pack,
             share::share_read_chunk,
             share::share_discard,
             share::share_cleanup,
+            share::compare_links,
+            share::social_compare,
+            share::compare_download,
             share::share_recv_begin,
             share::share_recv_chunk,
             share::share_recv_abort,
@@ -7494,6 +10380,7 @@ pub fn run() {
             manager::set_instance_shader,
             manager::set_instance_resourcepacks,
             manager::instance_meta,
+            manager::instance_metas,
             manager::duplicate_instance,
             manager::trash_instance,
             manager::install_mod_version,

@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ika Console Dock</title>
+  <style>
+    /* Reset & Base Transparent Container */
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: transparent !important;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      color: #f1f5f9;
+    }
+
+    /* Native Glass Window Container */
+    .glass-console-root {
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      border-radius: 16px;
+      /* Subtle dark glass tint without border */
+      background: rgba(10, 8, 22, 0.45);
+      border: none !important;
+      outline: none !important;
+      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.65);
+      overflow: hidden;
+      position: relative;
+    }
+
+    /* Top Drag Header */
+    .console-header {
+      height: 48px;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+      background: rgba(255, 255, 255, 0.03);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      cursor: grab;
+    }
+
+    .console-header:active {
+      cursor: grabbing;
+    }
+
+    .console-header-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      pointer-events: none;
+    }
+
+    .console-terminal-icon {
+      color: #c084fc;
+      filter: drop-shadow(0 0 8px rgba(192, 132, 252, 0.5));
+    }
+
+    .console-title {
+      font-size: 13.5px;
+      font-weight: 700;
+      letter-spacing: 0.3px;
+      color: #f8fafc;
+      text-shadow: 0 2px 4px rgba(0,0,0,0.6);
+    }
+
+    .console-header-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .console-btn-win {
+      width: 28px;
+      height: 28px;
+      border-radius: 6px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      color: #cbd5e1;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .console-btn-win:hover {
+      background: rgba(255, 255, 255, 0.15);
+      color: #ffffff;
+      transform: scale(1.05);
+    }
+
+    .console-btn-win:active {
+      transform: scale(0.95);
+    }
+
+    /* Terminal Log Body */
+    .console-body {
+      flex: 1 1 auto;
+      min-height: 120px;
+      display: flex;
+      flex-direction: column;
+      padding: 10px 16px;
+      overflow: hidden;
+    }
+
+    .console-terminal {
+      flex: 1 1 auto;
+      width: 100%;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      overflow-y: auto;
+      overflow-x: hidden;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 12px;
+      line-height: 1.5;
+      padding-right: 4px;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(192, 132, 252, 0.3) transparent;
+    }
+
+    .console-terminal::-webkit-scrollbar {
+      width: 4px;
+    }
+    .console-terminal::-webkit-scrollbar-thumb {
+      background: rgba(192, 132, 252, 0.3);
+      border-radius: 4px;
+    }
+
+    .console-empty-hint {
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #64748b;
+      font-style: italic;
+      font-size: 13px;
+    }
+
+    /* Dino Arcade Canvas (When Idle) */
+    .hcp-dino-wrap {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      min-height: 130px;
+      flex: 1 1 auto;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      background: rgba(0, 0, 0, 0.25);
+      border-radius: 8px;
+      cursor: pointer;
+    }
+
+    .hcp-dino-canvas {
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+      max-width: 100%;
+      height: auto;
+    }
+
+    .hcp-dino-hint {
+      position: absolute;
+      bottom: 8px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.4px;
+      color: rgba(226, 232, 240, 0.75);
+      background: rgba(15, 23, 42, 0.65);
+      padding: 3px 10px;
+      border-radius: 12px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      pointer-events: none;
+    }
+
+    /* Terminal Line Styles */
+    .hcp-log-line {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      word-break: break-all;
+      user-select: text;
+      -webkit-user-select: text;
+    }
+
+    .hcp-line-meta {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+
+    .hcp-time {
+      color: #64748b;
+      font-size: 11px;
+    }
+
+    .hcp-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.4px;
+      text-transform: uppercase;
+    }
+
+    .badge-info { background: rgba(56, 189, 248, 0.2); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.4); }
+    .badge-warn { background: rgba(251, 191, 36, 0.2); color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.4); }
+    .badge-error { background: rgba(248, 113, 113, 0.25); color: #f87171; border: 1px solid rgba(248, 113, 113, 0.5); }
+    .badge-milestone { background: rgba(52, 211, 153, 0.2); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.4); }
+    .badge-launcher { background: rgba(168, 85, 247, 0.2); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.4); }
+
+    .hcp-thread {
+      color: #94a3b8;
+      font-size: 11px;
+      opacity: 0.8;
+      flex-shrink: 0;
+    }
+
+    .hcp-msg {
+      color: #e2e8f0;
+      flex: 1 1 auto;
+    }
+
+    .sev-error .hcp-msg { color: #fca5a5; }
+    .sev-warn .hcp-msg { color: #fde68a; }
+
+    /* Footer: Status and Cyber Button */
+    .console-footer {
+      height: 60px;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 20px;
+      background: rgba(255, 255, 255, 0.02);
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    .console-footer-status {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+      flex: 1 1 auto;
+    }
+
+    .console-footer-icon {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      filter: drop-shadow(0 0 8px rgba(52, 211, 153, 0.65));
+    }
+
+    .console-footer-text {
+      color: #34d399;
+      font-weight: 700;
+      font-size: 13.5px;
+      letter-spacing: 0.2px;
+      text-shadow: 0 0 12px rgba(52, 211, 153, 0.45);
+    }
+
+    .console-footer-divider {
+      color: rgba(232, 121, 249, 0.4);
+      font-size: 15px;
+      font-weight: 300;
+      margin: 0 4px;
+    }
+
+    .console-footer-runtime {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      color: #8da2bf;
+      font-size: 13px;
+      letter-spacing: 0.4px;
+      white-space: nowrap;
+    }
+
+    .btn-console-cyber {
+      height: 38px;
+      padding: 0 22px;
+      background: #5820ff;
+      border: none;
+      border-radius: 8px;
+      color: #ffffff;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      box-shadow: 0 4px 16px rgba(88, 32, 255, 0.45);
+      transition: all 0.15s ease;
+      white-space: nowrap;
+    }
+
+    .btn-console-cyber:hover {
+      background: #6c32ff;
+      box-shadow: 0 6px 22px rgba(88, 32, 255, 0.65);
+      transform: translateY(-1px);
+    }
+
+    .btn-console-cyber:active {
+      background: #4a15e6;
+      transform: translateY(0);
+    }
+  </style>
+</head>
+<body>
+  <div class="glass-console-root">
+    <!-- Header with Tauri Drag Region -->
+    <header class="console-header" data-tauri-drag-region>
+      <div class="console-header-left" data-tauri-drag-region>
+        <svg class="console-terminal-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="4 17 10 11 4 5"></polyline>
+          <line x1="12" y1="19" x2="20" y2="19"></line>
+        </svg>
+        <span class="console-title" data-tauri-drag-region>Consola de la instancia</span>
+      </div>
+      <div class="console-header-actions">
+        <button type="button" class="console-btn-win" id="btn-minimize-console" title="Minimizar">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="5" y1="12" x2="19" y2="12"></line>
+          </svg>
+        </button>
+        <button type="button" class="console-btn-win" id="btn-close-console" title="Cerrar consola">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+            <line x1="6" y1="18" x2="18" y2="6"></line>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Body: Logs Stream -->
+    <main class="console-body">
+      <div class="console-terminal" id="console-logs-container">
+        <div class="console-empty-hint">Esperando que se lance el juego...</div>
+      </div>
+    </main>
+
+    <!-- Footer: Status and Action -->
+    <footer class="console-footer">
+      <div class="console-footer-status" id="footer-status">
+        <span class="console-footer-icon" id="footer-icon">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none">
+            <circle cx="12" cy="12" r="10" stroke="#34d399" stroke-width="2.2" />
+            <polyline points="7.5 12 10.5 15 16.5 9" stroke="#34d399" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </span>
+        <span class="console-footer-text" id="footer-text">Listo para jugar</span>
+        <span class="console-footer-divider">|</span>
+        <span class="console-footer-runtime" id="footer-runtime">Runtime: Minecraft</span>
+      </div>
+
+      <button type="button" class="btn-console-cyber" id="btn-open-full-console">
+        <span>Abrir consola detallada</span>
+      </button>
+    </footer>
+  </div>
+
+  <script type="module" src="/src/console_window.js"></script>
+</body>
+</html>

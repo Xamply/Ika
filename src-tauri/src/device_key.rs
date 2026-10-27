@@ -89,6 +89,16 @@ pub fn device_key() -> Result<SigningKey, String> {
 /// publishes there; empty disables publishing.
 const DEFAULT_SKINS_SERVICE: &str = "https://ika-skins.ika-skins.workers.dev";
 
+/// This launcher's version. Every signed call to the service says it (X-Ika-Version, `v` in the
+/// live connection's query) and signs it with the rest ("{prefix}@{version}"), so a call can't
+/// be passed off as coming from another version; the service refuses versions older than the
+/// one it asks for.
+pub const CLIENT_VERSION: &str = env!("IKA_APP_VERSION");
+
+pub fn signed_prefix(prefix: &str) -> String {
+    format!("{}@{}", prefix, CLIENT_VERSION)
+}
+
 /// Where the skins service lives: IKA_SKINS_SERVICE, ika_root/skins-service.txt, or the
 /// built-in URL. None = publishing disabled.
 pub fn skins_service_url() -> Option<String> {
@@ -132,7 +142,7 @@ pub fn publish_skin(agent: &ureq::Agent, service: &str, name: &str, png: &[u8]) 
         .map(|d| d.as_millis())
         .unwrap_or(0)
         .to_string();
-    let message = format!("ika-skin-v1\nPUT\n{}\n{}\n{}", lname, ts, hash);
+    let message = format!("{}\nPUT\n{}\n{}\n{}", signed_prefix("ika-skin-v1"), lname, ts, hash);
     let signature = key.sign(message.as_bytes());
     let url = format!("{}/skins/{}", service, lname);
     let resp = agent
@@ -140,6 +150,7 @@ pub fn publish_skin(agent: &ureq::Agent, service: &str, name: &str, png: &[u8]) 
         .set("content-type", "image/png")
         .set("x-ika-pubkey", &B64.encode(key.verifying_key().to_bytes()))
         .set("x-ika-timestamp", &ts)
+        .set("x-ika-version", CLIENT_VERSION)
         .set("x-ika-signature", &B64.encode(signature.to_bytes()))
         .send_bytes(png);
     match resp {
@@ -154,6 +165,7 @@ pub fn publish_skin(agent: &ureq::Agent, service: &str, name: &str, png: &[u8]) 
             Ok(PublishOutcome::Published { claimed: body.get("claimed").and_then(|c| c.as_bool()).unwrap_or(false) })
         }
         Err(ureq::Error::Status(403, _)) => Ok(PublishOutcome::NameTaken),
+        Err(ureq::Error::Status(426, _)) => Err("esta versión de Ika ya no es compatible: actualiza el launcher".to_string()),
         Err(ureq::Error::Status(code, r)) => Err(format!("el servicio respondió {}: {}", code, r.into_string().unwrap_or_default())),
         Err(e) => Err(e.to_string()),
     }

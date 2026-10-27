@@ -36,6 +36,12 @@ struct ScannedMod {
 
 static SCAN_CACHE: DiskCache<ScannedMod> = DiskCache::new("mod_scan_cache");
 
+/// Loads the scan cache in the background at startup (a few MB of JSON): the first instance shown
+/// is scanned right after, and that scan used to wait for the file.
+pub fn warm_cache() {
+    SCAN_CACHE.warm();
+}
+
 /// Identifies this build of the launcher: the size and date of its executable.
 fn build_stamp() -> u64 {
     static STAMP: std::sync::OnceLock<u64> = std::sync::OnceLock::new();

@@ -47,6 +47,11 @@ impl<T: Serialize + DeserializeOwned + Clone + Send + 'static> DiskCache<T> {
         data_dir().join(format!("{}.json", self.name))
     }
 
+    /// Reads the file now (it is otherwise read by the first lookup, which then waits for it).
+    pub fn warm(&self) {
+        self.with(|_| ());
+    }
+
     fn with<R>(&self, f: impl FnOnce(&mut HashMap<String, Entry<T>>) -> R) -> R {
         let mut guard = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         let map = guard.get_or_insert_with(|| {
