@@ -86,7 +86,7 @@ export const THEMES = {
 export const ROLES = {
   // the selection pills: main menu, Inicio's instance filter, Wallpapers' pages, Grupos' tabs and
   // Abierto/Selecto
-  pill: [".view-switcher-glider", ".inst-pill-glider", ".steam-page-btn.active", ".seg-thumb"],
+  pill: [".view-switcher-glider", ".inst-pill-glider", ".mgr-filter-glider", ".steam-page-btn.active", ".seg-thumb"],
   // the icons of the instance's details bar (mods, RAM, loader...)
   icon: [".instance-specs-bar .spec-icon"],
 };

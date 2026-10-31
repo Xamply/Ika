@@ -12,12 +12,13 @@
       padding: 0;
       overflow: hidden;
     }
-    html:not(.has-we-active),
+    /* Body supplies the opaque base until a native wallpaper is ready. Keeping
+       html transparent avoids changing root styles and invalidating the whole UI. */
+    html { background: transparent !important; }
     body:not(.has-we-active) {
       background-color: #080611;
       background: #080611;
     }
-    html.has-we-active,
     body.has-we-active {
       background-color: transparent !important;
       background: transparent !important;
@@ -41,7 +42,7 @@
   </style>
 </head>
 <body>
-  <div id="app" class="app-root" data-view="inicio">
+  <div id="app" class="app-root overlay-dock" data-view="inicio">
 
     <!-- Shared SVG Definitions for Cyber HUD Hairlines (Top Titlebar & Bottom Dock) -->
     <svg id="hud-hairline-defs" style="position: absolute; width: 0; height: 0; pointer-events: none; overflow: hidden;" aria-hidden="true">
@@ -1027,16 +1028,16 @@
     </svg>
 
     <!-- Custom Titlebar: Matching reference image with centered pill tabs and glowing active button -->
-    <div class="custom-titlebar" id="custom-titlebar" data-tauri-drag-region>
-      <div class="titlebar-left" data-tauri-drag-region>
-        <div class="titlebar-icon-wrap" data-tauri-drag-region>
-          <img src="/app-icon-64.png" class="titlebar-app-icon" alt="" data-tauri-drag-region />
+    <div class="custom-titlebar" id="custom-titlebar">
+      <div class="titlebar-left">
+        <div class="titlebar-icon-wrap">
+          <img src="/app-icon-64.png" class="titlebar-app-icon" alt="" />
         </div>
-        <span class="titlebar-app-name" data-tauri-drag-region>Ika Launcher</span>
+        <span class="titlebar-app-name">Ika Launcher</span>
       </div>
 
       <!-- Center: 4-Tab Pill Navigation in Curved Notch ("Montañita") -->
-      <div class="titlebar-notch-container" data-tauri-drag-region>
+      <div class="titlebar-notch-container">
         <div class="titlebar-notch" id="titlebar-notch">
           <!-- Seamless Cyber HUD Notch Backdrop & Glowing Circuit Hairlines (Matching bottom zone) -->
           <svg class="notch-shape" id="notch-shape" viewBox="0 0 940 102" preserveAspectRatio="none">
@@ -1109,7 +1110,7 @@
       </div>
 
       <!-- Right: Standard Window Controls -->
-      <div class="titlebar-right" data-tauri-drag-region>
+      <div class="titlebar-right">
         <div class="titlebar-window-actions">
           <button id="titlebar-btn-update" class="titlebar-update-btn hidden" title="Actualización disponible" aria-label="Actualizar Launcher">
             <svg class="update-btn-border-svg" aria-hidden="true">
@@ -1147,7 +1148,7 @@
           <button id="titlebar-btn-minimize" class="titlebar-square-btn" title="Minimizar">
             <svg width="11" height="11" viewBox="0 0 12 12" fill="none"><rect y="5.5" width="12" height="1.2" fill="currentColor"/></svg>
           </button>
-          <button id="titlebar-btn-maximize" class="titlebar-square-btn titlebar-max-btn" title="Maximizar / Restaurar">
+          <button id="titlebar-btn-maximize" class="titlebar-square-btn titlebar-max-btn" title="Elegir monitor" aria-label="Elegir monitor" aria-haspopup="dialog">
             <svg width="15" height="15" viewBox="0 0 15 15" fill="none"><rect x="2" y="2" width="11" height="11" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" fill="none"/></svg>
           </button>
           <button id="titlebar-btn-close" class="titlebar-square-btn titlebar-close-btn" title="Cerrar">
@@ -1618,7 +1619,7 @@
             </aside>
 
             <!-- Visor de Instancias 5-Card Coverflow Carousel -->
-            <div class="home-instance-switcher-zone" id="home-instance-switcher-zone">
+            <div class="home-instance-switcher-zone" id="home-instance-switcher-zone" data-instance-preset="coverflow">
               <!-- Barra de Filtros y Buscador de Instancias -->
               <div class="instance-filter-search-bar" id="instance-filter-search-bar">
                 <nav class="instance-category-pills" id="instance-category-pills">
@@ -1714,6 +1715,9 @@
                 </button>
               </div>
 
+              <!-- Cuadrícula Grid Container (Visible when preset is "grid") -->
+              <div class="home-grid-instances-container hidden" id="home-grid-instances-container" tabindex="0" role="region" aria-label="Visor de Cuadrícula de Instancias"></div>
+
               <!-- Active Instance Details (Below center card) -->
               <div class="instance-active-details" id="instance-active-details">
                 <div class="instance-title-row">
@@ -1765,6 +1769,7 @@
           <div class="cx-stage" id="cx-stage">
             <aside class="cx-hud">
               <section class="cx-card cx-instance-card">
+                <div class="hcp-we-blur-bg" aria-hidden="true"></div>
                 <div class="cx-instance-top">
                   <div class="cx-sprite" id="cx-sprite" data-state="idle" aria-hidden="true"></div>
                   <div class="cx-instance-info">
@@ -1773,17 +1778,18 @@
                     <span class="cx-instance-meta" id="console-inst-badge">-</span>
                   </div>
                 </div>
-                <div class="cx-state" id="cx-state" data-state="idle">
+                <div class="cx-state hidden" id="cx-state" data-state="idle" style="display: none !important;">
                   <span class="cx-led"></span>
-                  <span class="cx-state-text" id="cx-state-text">Listo para jugar</span>
+                  <span class="cx-state-text" id="cx-state-text"></span>
                 </div>
                 <div class="cx-instance-actions">
-                  <button type="button" class="cx-btn" id="cx-btn-edit">Editar</button>
-                  <button type="button" class="cx-btn" id="cx-btn-folder" title="Abrir la carpeta del juego">Carpeta</button>
+                  <button type="button" class="cx-btn" id="cx-btn-prev" title="Instancia anterior">Anterior</button>
+                  <button type="button" class="cx-btn" id="cx-btn-next" title="Instancia siguiente">Siguiente</button>
                 </div>
               </section>
 
               <section class="cx-card cx-meters-card">
+                <div class="hcp-we-blur-bg" aria-hidden="true"></div>
                 <div class="cx-card-title"><span class="cx-kicker">Rendimiento</span><span class="cx-uptime" id="cx-uptime">--:--:--</span></div>
                 <div class="cx-meter">
                   <div class="cx-meter-head"><span>RAM</span><span id="cx-ram-text">Sin jugar</span></div>
@@ -1801,16 +1807,24 @@
               </section>
 
               <section class="cx-card cx-crash-card" id="cx-crash-card" data-has-crash="false">
-                <div class="cx-card-title"><span class="cx-kicker">Último crash</span><span class="cx-crash-date" id="cx-crash-date"></span></div>
+                <div class="hcp-we-blur-bg" aria-hidden="true"></div>
+                <div class="cx-card-title"><span class="cx-kicker">Crash report</span><span class="cx-crash-date" id="cx-crash-date"></span></div>
                 <div class="cx-crash-text" id="cx-crash-text">Sin crasheos registrados. Todo en orden.</div>
                 <button type="button" class="cx-btn cx-btn-small" id="cx-btn-crash-open">Ver reporte</button>
               </section>
             </aside>
 
             <section class="cx-terminal">
+              <div class="hcp-we-blur-bg" aria-hidden="true"></div>
               <div class="cx-tabs">
                 <div class="cx-tab-group" role="tablist">
-                  <button type="button" class="cx-tab is-active" data-pane="live">Consola</button>
+                  <button type="button" class="cx-tab is-active" data-pane="live">
+                    <svg class="hcp-terminal-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                      <polyline points="4 17 10 11 4 5"></polyline>
+                      <line x1="12" y1="19" x2="20" y2="19"></line>
+                    </svg>
+                    <span>Consola</span>
+                  </button>
                 </div>
                 <div class="cx-tab-tools" id="cx-live-tools">
                   <div class="cx-level-toggles" id="cx-level-toggles">
@@ -1819,12 +1833,12 @@
                     <button type="button" class="cx-level cx-level-error is-on" data-level="error">ERROR</button>
                   </div>
                   <input type="text" class="cx-search" id="cx-live-search" placeholder="Filtrar..." autocomplete="off" spellcheck="false" />
-                  <label class="cx-check" title="Seguir nuevos registros"><input type="checkbox" id="console-autoscroll-chk" checked /><span>Auto</span></label>
+                  <label class="cx-check hidden" title="Seguir nuevos registros" style="display: none !important;"><input type="checkbox" id="console-autoscroll-chk" checked /><span>Auto</span></label>
                   <button type="button" class="cx-icon-btn" id="btn-console-copy" title="Copiar consola">
-                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 8V7a3 3 0 0 1 3-3h6a3 3 0 0 1 3 3v6a3 3 0 0 1-3 3h-1"></path><rect x="4" y="8" width="12" height="12" rx="3"></rect></svg>
                   </button>
                   <button type="button" class="cx-icon-btn" id="btn-console-clear" title="Limpiar consola">
-                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"></path></svg>
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"></path></svg>
                   </button>
                 </div>
               </div>
@@ -1832,7 +1846,6 @@
               <div class="cx-pane is-active" data-pane="live">
                 <div class="console-body cx-live-output" id="console-output"></div>
                 <form class="console-input-bar cx-input-bar" id="console-input-form">
-                  <span class="console-prompt-symbol">&gt;_</span>
                   <input type="text" id="console-cmd-input" class="console-cmd-input" placeholder="Comando: help, status, launch, mods, clear..." autocomplete="off" spellcheck="false" />
                 </form>
               </div>
@@ -1842,12 +1855,14 @@
             <!-- Right column: last crash report and latest.log, readable without opening files -->
             <aside class="cx-side" id="cx-side">
               <section class="cx-card cx-side-panel cx-side-crash" id="cx-side-crash" data-has-crash="false">
-                <div class="cx-card-title"><span class="cx-kicker">Último crash report</span><span class="cx-crash-date" id="cx-side-crash-date"></span></div>
+                <div class="hcp-we-blur-bg" aria-hidden="true"></div>
+                <div class="cx-card-title"><span class="cx-kicker">Crash report</span><span class="cx-crash-date" id="cx-side-crash-date"></span></div>
                 <div class="cx-side-body" id="cx-side-crash-body"><div class="cx-viewer-empty">Sin crasheos registrados. Todo en orden.</div></div>
               </section>
               <div class="cx-side-resizer" id="cx-side-resizer" title="Arrastra para redimensionar las ventanas (Doble clic para centrar)"></div>
               <section class="cx-card cx-side-panel cx-side-log" id="cx-side-log">
-                <div class="cx-card-title"><span class="cx-kicker">latest.log</span><span class="cx-crash-date" id="cx-side-log-date"></span></div>
+                <div class="hcp-we-blur-bg" aria-hidden="true"></div>
+                <div class="cx-card-title"><span class="cx-kicker">Latest log</span><span class="cx-crash-date" id="cx-side-log-date"></span></div>
                 <div class="cx-side-body" id="cx-side-log-body"><div class="cx-viewer-empty">Todavía no hay log: juega una vez.</div></div>
               </section>
             </aside>
@@ -2222,19 +2237,27 @@
                     </span>
                     <h2 class="mgr-inst-title">Instancias<span class="mgr-panel-n" id="mgr-inst-count"></span></h2>
                     <div class="mgr-head-actions">
-                      <button type="button" class="mgr-icon-btn mgr-new" id="mgr-new" title="Nueva instancia" aria-label="Nueva instancia">
-                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-                      </button>
                       <button type="button" class="mgr-icon-btn mgr-btn-min" id="mgr-min-instances" title="Minimizar panel de instancias" aria-label="Minimizar">
                         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>
                       </button>
                     </div>
                   </div>
-                  <label class="mgr-search mgr-search-sm">
-                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
-                    <input type="search" id="mgr-inst-search" placeholder="Buscar instancia..." autocomplete="off" spellcheck="false" />
-                  </label>
-                  <div class="mgr-filters" id="mgr-filters" role="tablist" aria-label="Tipo de instancia"></div>
+                  <div class="mgr-inst-search-row">
+                    <label class="mgr-search mgr-search-sm">
+                      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+                      <input type="search" id="mgr-inst-search" placeholder="Buscar instancia..." autocomplete="off" spellcheck="false" />
+                    </label>
+                    <button type="button" class="mgr-btn-create" id="mgr-new" data-act="new" title="Crear nueva instancia" aria-label="Crear nueva instancia">
+                      <svg class="mgr-btn-create-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="12" y1="5" x2="12" y2="19"></line>
+                        <line x1="5" y1="12" x2="19" y2="12"></line>
+                      </svg>
+                      <span>Crear</span>
+                    </button>
+                  </div>
+                  <div class="mgr-filters" id="mgr-filters" role="tablist" aria-label="Tipo de instancia">
+                    <div class="mgr-filter-glider" id="mgr-filter-glider" aria-hidden="true"></div>
+                  </div>
                 </div>
 
                 <!-- Vertical carousel: the chosen instance in the middle, under the ring; two above and two below at most -->
@@ -4308,6 +4331,7 @@
 
         <!-- Modal Tabs Navigation: MotionBGs vs Steam Workshop vs Playlist -->
         <div class="mbg-tabs-header">
+          <span class="mbg-tab-underline" aria-hidden="true"></span>
           <button class="mbg-tab-nav-btn active" id="btn-tab-mbg-downloaded">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
@@ -4808,17 +4832,31 @@
                 stroke="url(#hairlineGradRight)" stroke-width="1.8"
                 stroke-linecap="round" stroke-linejoin="round" fill="none" />
         </svg>
-        <!-- Header with Back Button, Title & Subtitle -->
+        <!-- Header with Title & Subtitle -->
         <div class="create-inst-header">
-          <button type="button" class="create-inst-back-btn" id="btn-close-modal-create-inst" title="Volver">
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-              <line x1="19" y1="12" x2="5" y2="12"></line>
-              <polyline points="12 19 5 12 12 5"></polyline>
-            </svg>
-          </button>
           <div class="create-inst-header-titles">
-            <h2 class="create-inst-title">Crear nueva instancia</h2>
-            <p class="create-inst-sub">Configura los detalles de tu nueva instancia de Minecraft.</p>
+            <div class="create-inst-title-row">
+              <div class="create-inst-title-pill">
+                <svg class="create-inst-title-border-svg" aria-hidden="true">
+                  <defs>
+                    <linearGradient id="createInstPillGradCyan" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="260" y2="0" spreadMethod="repeat">
+                      <stop offset="0%" stop-color="#076573" />
+                      <stop offset="18%" stop-color="#00a8b5" />
+                      <stop offset="36%" stop-color="#00f0e6" />
+                      <stop offset="50%" stop-color="#7efcf6" />
+                      <stop offset="64%" stop-color="#00e5df" />
+                      <stop offset="82%" stop-color="#0891b2" />
+                      <stop offset="100%" stop-color="#076573" />
+                      <animateTransform attributeName="gradientTransform" type="translate" from="0 0" to="-260 0" dur="4.2s" repeatCount="indefinite" />
+                    </linearGradient>
+                  </defs>
+                  <rect class="share-pill-hairline-bloom" x="0.5" y="0.5" rx="8" ry="8" stroke="url(#createInstPillGradCyan)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.38" filter="url(#hairlineNeonGlow)" fill="none" />
+                  <rect class="share-pill-hairline-core" x="0.5" y="0.5" rx="8" ry="8" stroke="url(#createInstPillGradCyan)" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" fill="none" />
+                </svg>
+                <h2 class="create-inst-title">Crear instancia</h2>
+              </div>
+              <span class="create-inst-edit-name" id="create-inst-edit-name"></span>
+            </div>
           </div>
         </div>
 
@@ -4867,7 +4905,7 @@
                       <rect x="3" y="6" width="18" height="16" rx="2"></rect>
                       <circle cx="12" cy="14" r="3"></circle>
                     </svg>
-                    <input type="text" id="input-new-inst-name" class="create-inst-text-field" placeholder="Mi nueva instancia" value="Mi nueva instancia" maxlength="50" required autocomplete="off" spellcheck="false" />
+                    <input type="text" id="input-new-inst-name" class="create-inst-text-field" placeholder="Mi instancia" value="Mi instancia" maxlength="50" required autocomplete="off" spellcheck="false" />
                     <span class="create-inst-char-limit" id="create-inst-char-limit">18/50</span>
                   </div>
                 </div>
@@ -5130,16 +5168,26 @@
                         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#c4b5fd" stroke-width="2">
                           <path d="M6 19v-3M10 19v-3M14 19v-3M18 19v-3M6 5v3M10 5v3M14 5v3M18 5v3M2 8h20v8H2z"></path>
                         </svg>
-                        <span class="create-inst-label">Memoria RAM Asignada</span>
+                        <span class="create-inst-label">RAM mínima al iniciar <code>-Xms</code></span>
                       </div>
-                      <span class="create-inst-ram-value" id="create-inst-ram-value">4 GB</span>
+                      <span class="create-inst-ram-value" id="create-inst-ram-min-value">512 MB</span>
                     </div>
-                    <input type="range" id="input-create-inst-ram" class="create-inst-ram-slider" min="1024" max="16384" step="512" value="4096" />
-                    <div class="create-inst-ram-scale">
-                      <span>1 GB</span>
-                      <span id="create-inst-ram-hint">Sistema: -</span>
-                      <span id="create-inst-ram-max">16 GB</span>
+                    <input type="range" id="input-create-inst-ram-min" class="create-inst-ram-slider" min="512" max="16384" step="512" value="512" aria-label="Memoria mínima de Minecraft (-Xms)" />
+                    <div class="create-inst-ram-scale"><span>512 MB</span><span id="create-inst-ram-min-limit">Máximo: 8 GB</span></div>
+                  </div>
+
+                  <div class="create-inst-jvm-block">
+                    <div class="create-inst-ram-row">
+                      <div class="create-inst-jvm-header-left">
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#c4b5fd" stroke-width="2">
+                          <path d="M6 19v-3M10 19v-3M14 19v-3M18 19v-3M6 5v3M10 5v3M14 5v3M18 5v3M2 8h20v8H2z"></path>
+                        </svg>
+                        <span class="create-inst-label">RAM máxima <code>-Xmx</code></span>
+                      </div>
+                      <span class="create-inst-ram-value" id="create-inst-ram-max-value">8 GB</span>
                     </div>
+                    <input type="range" id="input-create-inst-ram-max" class="create-inst-ram-slider" min="512" max="16384" step="512" value="8192" aria-label="Memoria máxima de Minecraft (-Xmx)" />
+                    <div class="create-inst-ram-scale"><span>512 MB</span><span id="create-inst-ram-hint">RAM del sistema: -</span><span id="create-inst-ram-max-limit">16 GB</span></div>
                   </div>
 
                   <div class="create-inst-jvm-block create-inst-jvm-args-block">
@@ -5250,7 +5298,6 @@
           <!-- Modal Footer Actions -->
           <div class="create-inst-footer">
             <div class="create-inst-edit-summary" id="create-inst-edit-summary"></div>
-            <button type="button" class="btn-create-inst-cancel btn-edit-inst-undo" id="btn-edit-inst-undo">Deshacer cambios</button>
             <button type="button" class="btn-create-inst-cancel" id="btn-cancel-create-inst">Cancelar</button>
             <button type="submit" class="btn-create-inst-submit" id="btn-submit-create-inst">
               <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5">
@@ -5997,30 +6044,8 @@
           <div class="profile-identity-wrap">
             <div class="profile-name-row">
               <span class="profile-display-name" id="profile-display-name">Faally</span>
-              <button type="button" class="profile-switch-chevron-btn" id="btn-profile-switch-account" title="Cambiar de cuenta o gestionar">
-                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                  <polyline points="6 9 12 15 18 9"></polyline>
-                </svg>
-              </button>
             </div>
             <span class="profile-handle" id="profile-handle">@Faally</span>
-          </div>
-
-          <!-- Dropdown popover for switching accounts -->
-          <div class="profile-account-dropdown hidden" id="profile-account-dropdown">
-            <div class="profile-account-dropdown-header">Cuentas vinculadas</div>
-            <div class="profile-account-dropdown-list" id="profile-account-dropdown-list">
-              <!-- Dynamically populated -->
-            </div>
-            <div class="profile-account-dropdown-divider"></div>
-            <button type="button" class="profile-dropdown-action" id="btn-dropdown-add-user">
-              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-              <span>Agregar otra cuenta</span>
-            </button>
-            <button type="button" class="profile-dropdown-action profile-dropdown-danger" id="btn-dropdown-logout">
-              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>
-              <span>Cerrar sesión</span>
-            </button>
           </div>
 
           <!-- Dynamic Live Search Bar (Directly below @faally) -->
@@ -6527,9 +6552,36 @@
                     </div>
                   </div>
                   <div class="appearance-sec-detail-switches">
-                    <div class="settings-switch-card">
+                    <div class="settings-switch-card appearance-section-card-main">
                       <div class="settings-switch-info">
-                        <span class="settings-switch-title">Reloj</span>
+                        <div class="appearance-header-pill appearance-pill-pc">
+                          <svg class="appearance-pill-border-svg" aria-hidden="true">
+                            <defs>
+                              <linearGradient id="appearancePillGradClock" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="240" y2="0" spreadMethod="repeat">
+                                <stop offset="0%" stop-color="#352882" />
+                                <stop offset="18%" stop-color="#5b21b6" />
+                                <stop offset="35%" stop-color="#a855f7" />
+                                <stop offset="48%" stop-color="#d8b4fe" />
+                                <stop offset="60%" stop-color="#9333ea" />
+                                <stop offset="78%" stop-color="#4338ca" />
+                                <stop offset="100%" stop-color="#352882" />
+                                <animateTransform attributeName="gradientTransform" type="translate" from="0 0" to="-240 0" dur="4.2s" repeatCount="indefinite" />
+                              </linearGradient>
+                            </defs>
+                            <rect class="appearance-pill-hairline-bloom" x="0.5" y="0.5" rx="7" ry="7"
+                                  stroke="url(#appearancePillGradClock)" stroke-width="1.8"
+                                  stroke-linecap="round" stroke-linejoin="round"
+                                  opacity="0.32" filter="url(#hairlineNeonGlow)" fill="none" />
+                            <rect class="appearance-pill-hairline-core" x="0.5" y="0.5" rx="7" ry="7"
+                                  stroke="url(#appearancePillGradClock)" stroke-width="0.95"
+                                  stroke-linecap="round" stroke-linejoin="round" fill="none" />
+                          </svg>
+                          <svg class="appearance-pill-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <circle cx="12" cy="12" r="9"/>
+                            <polyline points="12 6 12 12 15.5 13.5"/>
+                          </svg>
+                          <span class="appearance-pill-label">Reloj</span>
+                        </div>
                         <span class="settings-switch-desc">Mostrar el reloj en la pantalla de inicio. Elige su estilo abajo.</span>
                       </div>
                       <input type="checkbox" id="setting-ui-show-clock" class="cyber-checkbox" checked />
@@ -6548,9 +6600,320 @@
                         </button>
                       </div>
                     </div>
-                    <div class="settings-switch-card">
+                    <div class="settings-switch-card clock-time-format-card">
                       <div class="settings-switch-info">
-                        <span class="settings-switch-title">Animación de las ventanas</span>
+                        <span class="settings-switch-title">Formato de hora</span>
+                        <span class="settings-switch-desc">Elige formato de 12 o 24 horas y si mostrar el indicador AM/PM.</span>
+                      </div>
+                      <div class="clock-time-actions-row">
+                        <div class="clock-seg-control" id="clock-hour-format-seg" role="radiogroup" aria-label="Formato de hora">
+                          <button type="button" class="clock-seg-btn" data-value="12" role="radio" aria-checked="false">12h</button>
+                          <button type="button" class="clock-seg-btn is-active" data-value="24" role="radio" aria-checked="true">24h</button>
+                        </div>
+                        <button type="button" class="clock-ampm-toggle-btn is-disabled" id="clock-ampm-toggle-btn" title="Mostrar u ocultar indicador AM/PM en formato 12h" aria-pressed="true">
+                          <span class="clock-ampm-pill-dot"></span>
+                          <span class="clock-ampm-pill-text">AM/PM</span>
+                        </button>
+                      </div>
+                    </div>
+                    <div class="settings-switch-card clock-date-format-card">
+                      <div class="settings-switch-info">
+                        <span class="settings-switch-title">Formato de fecha</span>
+                        <span class="settings-switch-desc">Personaliza cómo se muestra la fecha debajo de la hora.</span>
+                      </div>
+                      <div class="clock-date-control">
+                        <div class="clock-select-wrapper">
+                          <select id="setting-ui-clock-date-format" class="clock-cyber-select" aria-label="Formato de fecha">
+                            <option value="month_day_year">Octubre 28, 2026 (Mes Día, Año)</option>
+                            <option value="day_month_year">28 de Octubre, 2026 (Día Mes, Año)</option>
+                            <option value="weekday_day_month">Miércoles, 28 de Octubre</option>
+                            <option value="weekday_short_date">Mié, 28 Oct</option>
+                            <option value="day_month_short_year">28 Oct 2026</option>
+                            <option value="numeric_slash">28/10/2026 (DD/MM/AAAA)</option>
+                            <option value="numeric_dash">2026-10-28 (AAAA-MM-DD)</option>
+                            <option value="hidden">Sin fecha (Ocultar)</option>
+                          </select>
+                          <span class="clock-select-chevron" aria-hidden="true">
+                            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                              <polyline points="6 9 12 15 18 9"></polyline>
+                            </svg>
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- Visor de Instancias en Inicio -->
+                    <div class="settings-switch-card appearance-section-card-main">
+                      <div class="settings-switch-info">
+                        <div class="appearance-header-pill appearance-pill-pc">
+                          <svg class="appearance-pill-border-svg" aria-hidden="true">
+                            <defs>
+                              <linearGradient id="appearancePillGradInstances" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="240" y2="0" spreadMethod="repeat">
+                                <stop offset="0%" stop-color="#352882" />
+                                <stop offset="18%" stop-color="#5b21b6" />
+                                <stop offset="35%" stop-color="#a855f7" />
+                                <stop offset="48%" stop-color="#d8b4fe" />
+                                <stop offset="60%" stop-color="#9333ea" />
+                                <stop offset="78%" stop-color="#4338ca" />
+                                <stop offset="100%" stop-color="#352882" />
+                                <animateTransform attributeName="gradientTransform" type="translate" from="0 0" to="-240 0" dur="4.2s" repeatCount="indefinite" />
+                              </linearGradient>
+                            </defs>
+                            <rect class="appearance-pill-hairline-bloom" x="0.5" y="0.5" rx="7" ry="7"
+                                  stroke="url(#appearancePillGradInstances)" stroke-width="1.8"
+                                  stroke-linecap="round" stroke-linejoin="round"
+                                  opacity="0.32" filter="url(#hairlineNeonGlow)" fill="none" />
+                            <rect class="appearance-pill-hairline-core" x="0.5" y="0.5" rx="7" ry="7"
+                                  stroke="url(#appearancePillGradInstances)" stroke-width="0.95"
+                                  stroke-linecap="round" stroke-linejoin="round" fill="none" />
+                          </svg>
+                          <svg class="appearance-pill-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <rect x="2" y="4" width="20" height="13" rx="2.2"/>
+                            <line x1="8" y1="21" x2="16" y2="21"/>
+                            <line x1="12" y1="17" x2="12" y2="21"/>
+                          </svg>
+                          <span class="appearance-pill-label">Visor de instancias</span>
+                        </div>
+                        <span class="settings-switch-desc">Muestra el carrusel y la barra de filtros en la pantalla de inicio. Desactívalo para ocultarlo y dejar el fondo completamente despejado.</span>
+                      </div>
+                      <input type="checkbox" id="setting-ui-show-home-instances" class="cyber-checkbox" checked />
+                    </div>
+
+                    <label class="settings-switch-card" for="setting-ui-autohide-home-instances">
+                      <div class="settings-switch-info">
+                        <span class="settings-switch-title">Ocultar visor automáticamente</span>
+                        <span class="settings-switch-desc">Oculta el carrusel y la barra superior tras 2 segundos sin interacción. Permanecen visibles mientras el ratón esté en su zona o uses sus controles con el teclado.</span>
+                      </div>
+                      <input type="checkbox" id="setting-ui-autohide-home-instances" class="cyber-checkbox" />
+                    </label>
+
+                    <!-- Diseño del Visor de Instancias (Presets) -->
+                    <div class="settings-switch-card" id="wrap-home-instances-preset-card">
+                      <div class="settings-switch-info">
+                        <span class="settings-switch-title">Diseño del visor de instancias</span>
+                        <span class="settings-switch-desc">Personaliza el diseño del carrusel horizontal y la barra de filtros superior. Pulsa un preset para aplicarlo en tiempo real.</span>
+                      </div>
+                    </div>
+                    <div class="instance-preset-grid" id="instance-preset-grid" role="radiogroup" aria-label="Diseño del visor de instancias"></div>
+
+                    <!-- Panel de configuración detallada para Cuadrícula Grid -->
+                    <div class="home-grid-settings-card hidden" id="home-grid-settings-card">
+                      <div class="home-grid-settings-header">
+                        <div class="hgs-title-row">
+                          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#a855f7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="3" width="7" height="7" rx="1.5"></rect>
+                            <rect x="14" y="3" width="7" height="7" rx="1.5"></rect>
+                            <rect x="3" y="14" width="7" height="7" rx="1.5"></rect>
+                            <rect x="14" y="14" width="7" height="7" rx="1.5"></rect>
+                          </svg>
+                          <span class="hgs-title">Configuraciones de Cuadrícula Grid</span>
+                          <span class="hgs-badge">Personalización</span>
+                        </div>
+                        <span class="hgs-desc">Ajusta columnas, filas, espaciado, esquinas de bloques, modo escritorio libre con arrastre y grupos.</span>
+                      </div>
+
+                      <div class="home-grid-settings-body">
+                        <!-- 1. Modo de colocación -->
+                        <div class="hgs-control-row">
+                          <div class="hgs-label-wrap">
+                            <span class="hgs-label">Modo de colocación</span>
+                            <span class="hgs-hint">Grilla fija organizada o escritorio libre estilo Windows</span>
+                          </div>
+                          <select id="hgs-mode-select" class="hgs-select">
+                            <option value="grid">Cuadrícula alineada (Grilla)</option>
+                            <option value="free">Escritorio libre (Arrastra los iconos donde quieras)</option>
+                          </select>
+                        </div>
+
+                        <!-- Alinear iconos a la cuadrícula (Snap to grid) -->
+                        <div class="hgs-control-row" id="hgs-snap-row">
+                          <div class="hgs-label-wrap">
+                            <span class="hgs-label">Alinear iconos a la cuadrícula</span>
+                            <span class="hgs-hint">Ajusta los iconos a una rejilla invisible al soltarlos (como en el escritorio de Windows)</span>
+                          </div>
+                          <input type="checkbox" id="hgs-snap-toggle" class="cyber-checkbox" checked />
+                        </div>
+
+                        <!-- Organizar iconos automáticamente (Auto-arrange estilo Windows) -->
+                        <div class="hgs-control-row" id="hgs-auto-arrange-row">
+                          <div class="hgs-label-wrap">
+                            <span class="hgs-label">Organizar iconos automáticamente</span>
+                            <span class="hgs-hint">Mantiene los iconos en orden consecutivo. Desactívalo para moverlos libremente por la cuadrícula.</span>
+                          </div>
+                          <input type="checkbox" id="hgs-auto-arrange-toggle" class="cyber-checkbox" />
+                        </div>
+
+                        <!-- 2. Orientación del flujo -->
+                        <div class="hgs-control-row" id="hgs-flow-row">
+                          <div class="hgs-label-wrap">
+                            <span class="hgs-label">Orientación del flujo</span>
+                            <span class="hgs-hint">Distribución de iconos en columnas en el lateral izquierdo o filas</span>
+                          </div>
+                          <select id="hgs-flow-select" class="hgs-select">
+                            <option value="horizontal">Horizontal (De izquierda a derecha, 8 columnas)</option>
+                            <option value="vertical">Vertical (En columnas hacia abajo)</option>
+                          </select>
+                        </div>
+
+                        <!-- 3. Columnas & Filas -->
+                        <div class="hgs-control-row-double" id="hgs-cols-rows-row">
+                          <div class="hgs-subcontrol">
+                            <label class="hgs-label" for="hgs-cols-select">Columnas</label>
+                            <select id="hgs-cols-select" class="hgs-select">
+                              <option value="auto">Automático</option>
+                              <option value="1">1 Columna (Lista vertical)</option>
+                              <option value="2">2 Columnas</option>
+                              <option value="3">3 Columnas</option>
+                              <option value="4">4 Columnas</option>
+                              <option value="5">5 Columnas</option>
+                              <option value="6">6 Columnas</option>
+                              <option value="8">8 Columnas</option>
+                            </select>
+                          </div>
+                          <div class="hgs-subcontrol">
+                            <label class="hgs-label" for="hgs-rows-select">Filas</label>
+                            <select id="hgs-rows-select" class="hgs-select">
+                              <option value="auto">Automático</option>
+                              <option value="1">1 Fila (Tira horizontal)</option>
+                              <option value="2">2 Filas</option>
+                              <option value="3">3 Filas</option>
+                              <option value="4">4 Filas</option>
+                              <option value="5">5 Filas</option>
+                            </select>
+                          </div>
+                        </div>
+
+                        <!-- 4. Separación entre iconos (Gap) -->
+                        <div class="hgs-control-row" id="hgs-gap-row">
+                          <div class="hgs-label-wrap">
+                            <div class="hgs-label-with-val">
+                              <span class="hgs-label">Separación entre iconos</span>
+                              <span class="hgs-val-badge" id="hgs-gap-val">16px</span>
+                            </div>
+                            <span class="hgs-hint">Distancia y margen entre bloques</span>
+                          </div>
+                          <input type="range" id="hgs-gap-slider" class="hgs-slider" min="8" max="48" step="2" value="16" />
+                        </div>
+
+                        <!-- 5. Redondeo de las caras de bloques -->
+                        <div class="hgs-control-row">
+                          <div class="hgs-label-wrap">
+                            <div class="hgs-label-with-val">
+                              <span class="hgs-label">Redondeo del bloque</span>
+                              <span class="hgs-val-badge" id="hgs-radius-val">8px</span>
+                            </div>
+                            <span class="hgs-hint">0px para bloque Minecraft pixel puro hasta 24px redondeado</span>
+                          </div>
+                          <div class="hgs-slider-wrap">
+                            <input type="range" id="hgs-radius-slider" class="hgs-slider" min="0" max="24" step="1" value="8" />
+                            <div class="hgs-range-labels">
+                              <span>0px (Cubo pixel)</span>
+                              <span>12px</span>
+                              <span>24px (Redondo)</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <!-- 6. Tamaño del icono de bloque -->
+                        <div class="hgs-control-row">
+                          <div class="hgs-label-wrap">
+                            <div class="hgs-label-with-val">
+                              <span class="hgs-label">Tamaño del icono</span>
+                              <span class="hgs-val-badge" id="hgs-size-val">64px</span>
+                            </div>
+                            <span class="hgs-hint">Ajusta libremente el tamaño de los bloques (36px a 140px)</span>
+                          </div>
+                          <div class="hgs-size-controls-wrap">
+                            <div class="hgs-size-quick-pills">
+                              <button type="button" class="hgs-size-pill" data-size="44">Pequeño</button>
+                              <button type="button" class="hgs-size-pill is-active" data-size="64">Mediano</button>
+                              <button type="button" class="hgs-size-pill" data-size="88">Grande</button>
+                              <button type="button" class="hgs-size-pill" data-size="120">Enorme</button>
+                            </div>
+                            <input type="range" id="hgs-size-slider" class="hgs-slider" min="36" max="140" step="4" value="64" />
+                          </div>
+                        </div>
+
+                        <!-- 7. Criterio de ordenación -->
+                        <div class="hgs-control-row">
+                          <div class="hgs-label-wrap">
+                            <span class="hgs-label">Criterio de ordenación</span>
+                            <span class="hgs-hint">Orden en el que se presentan las instancias</span>
+                          </div>
+                          <select id="hgs-sort-select" class="hgs-select">
+                            <option value="name-asc">Nombre (A → Z)</option>
+                            <option value="name-desc">Nombre (Z → A)</option>
+                            <option value="recent">Recientes / Última jugada</option>
+                            <option value="version">Versión de Minecraft (1.21 → 1.12)</option>
+                            <option value="mods">Cantidad de Mods (Mayor a menor)</option>
+                            <option value="date">Fecha de creación</option>
+                          </select>
+                        </div>
+
+                        <!-- 8. Agrupar por categoría -->
+                        <div class="hgs-control-row">
+                          <div class="hgs-label-wrap">
+                            <span class="hgs-label">Agrupar instancias</span>
+                            <span class="hgs-hint">Separar con encabezados visuales por versión, loader o favoritas</span>
+                          </div>
+                          <select id="hgs-group-select" class="hgs-select">
+                            <option value="none">Sin agrupar</option>
+                            <option value="version">Agrupar por Versión de Minecraft</option>
+                            <option value="loader">Agrupar por Loader (Forge, Fabric, NeoForge...)</option>
+                            <option value="category">Agrupar por Favoritas y Resto</option>
+                          </select>
+                        </div>
+
+                        <!-- 9. Botón Alinear a cuadrícula (Para Escritorio Libre) -->
+                        <div class="hgs-control-row hgs-action-row" id="hgs-free-action-row">
+                          <div class="hgs-label-wrap">
+                            <span class="hgs-label">Reorganizar iconos libres</span>
+                            <span class="hgs-hint">Restaura y alinea todos los iconos automáticamente a una cuadrícula limpia</span>
+                          </div>
+                          <button type="button" class="hgs-btn-reset-positions" id="btn-hgs-reset-positions" title="Alinear iconos de escritorio a cuadrícula">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                              <rect x="3" y="3" width="7" height="7"></rect>
+                              <rect x="14" y="3" width="7" height="7"></rect>
+                              <rect x="14" y="14" width="7" height="7"></rect>
+                              <rect x="3" y="14" width="7" height="7"></rect>
+                            </svg>
+                            <span>Alinear a cuadrícula</span>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div class="settings-switch-card appearance-section-card-main">
+                      <div class="settings-switch-info">
+                        <div class="appearance-header-pill appearance-pill-pc">
+                          <svg class="appearance-pill-border-svg" aria-hidden="true">
+                            <defs>
+                              <linearGradient id="appearancePillGradWindowAnim" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="240" y2="0" spreadMethod="repeat">
+                                <stop offset="0%" stop-color="#352882" />
+                                <stop offset="18%" stop-color="#5b21b6" />
+                                <stop offset="35%" stop-color="#a855f7" />
+                                <stop offset="48%" stop-color="#d8b4fe" />
+                                <stop offset="60%" stop-color="#9333ea" />
+                                <stop offset="78%" stop-color="#4338ca" />
+                                <stop offset="100%" stop-color="#352882" />
+                                <animateTransform attributeName="gradientTransform" type="translate" from="0 0" to="-240 0" dur="4.2s" repeatCount="indefinite" />
+                              </linearGradient>
+                            </defs>
+                            <rect class="appearance-pill-hairline-bloom" x="0.5" y="0.5" rx="7" ry="7"
+                                  stroke="url(#appearancePillGradWindowAnim)" stroke-width="1.8"
+                                  stroke-linecap="round" stroke-linejoin="round"
+                                  opacity="0.32" filter="url(#hairlineNeonGlow)" fill="none" />
+                            <rect class="appearance-pill-hairline-core" x="0.5" y="0.5" rx="7" ry="7"
+                                  stroke="url(#appearancePillGradWindowAnim)" stroke-width="0.95"
+                                  stroke-linecap="round" stroke-linejoin="round" fill="none" />
+                          </svg>
+                          <svg class="appearance-pill-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <rect x="3" y="3" width="18" height="18" rx="2.5"/>
+                            <path d="M3 9h18"/>
+                            <path d="M9 21V9"/>
+                          </svg>
+                          <span class="appearance-pill-label">Animación de las ventanas</span>
+                        </div>
                         <span class="settings-switch-desc">Cómo se abren y se cierran todas las ventanas del launcher. Pulsa una para verla.</span>
                       </div>
                     </div>
@@ -7703,6 +8066,40 @@
         </linearGradient>
       </defs>
     </svg>
+
+    
+    <!-- Modal: Carpeta de Instancias (Home Grid Android-Style Folder) -->
+    <div id="modal-home-grid-group" class="modal-overlay hidden" style="z-index: 99999;">
+      <div class="modal-box modal-arcade home-grid-folder-box">
+        <svg class="share-modal-border-svg" aria-hidden="true">
+          <rect class="share-modal-hairline-core" x="1" y="1" rx="16" ry="16"
+                stroke="url(#hairlineGradRight)" stroke-width="1.6"
+                stroke-linecap="round" stroke-linejoin="round"
+                vector-effect="non-scaling-stroke" fill="none" />
+        </svg>
+        <div class="modal-header home-grid-folder-header">
+          <div class="home-grid-folder-title-wrap">
+            <div class="home-grid-folder-icon-preview">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#c084fc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+            </div>
+            <input type="text" id="home-grid-folder-name-input" class="home-grid-folder-name-input" maxlength="32" placeholder="Nombre de la carpeta" />
+            <span id="home-grid-folder-count-badge" class="home-grid-folder-count-badge">0 instancias</span>
+          </div>
+          <div class="home-grid-folder-header-actions">
+            <button type="button" id="btn-home-grid-folder-disband" class="home-grid-folder-btn-disband" title="Desagrupar todas las instancias y volver a ponerlas en el escritorio">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
+              <span>Desagrupar</span>
+            </button>
+            <button type="button" class="modal-close titlebar-square-btn titlebar-close-btn share-close-btn" id="btn-close-home-grid-folder" title="Cerrar ventana">
+              <svg width="15" height="15" viewBox="0 0 15 15" fill="none"><path d="M2 2L13 13M13 2L2 13" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="modal-body home-grid-folder-body">
+          <div id="home-grid-folder-items-container" class="home-grid-folder-items-grid"></div>
+        </div>
+      </div>
+    </div>
 
     <script type="module" src="/src/main.js"></script>
 </body>

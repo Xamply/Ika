@@ -1275,7 +1275,11 @@ impl Log4jParser {
                 return;
             }
             if !trimmed.is_empty() {
-                out.push(ConsoleLine { level: guess_level(line).to_string(), text: line.trim_end().to_string(), ts: 0 });
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                out.push(ConsoleLine { level: guess_level(line).to_string(), text: line.trim_end().to_string(), ts: now_ms });
             }
             return;
         }

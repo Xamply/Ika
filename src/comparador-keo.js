@@ -1,7 +1,7 @@
 // Comparador header stage: instance cards with animated neon borders (WebGL), the plasma orb with
 // its energy streams and the stat panels. Visual code from comparador-keo.html, scoped to one root
 // element; the launcher fills the texts and thumbnails and decides when it animates.
-import { onTick } from "./frame-clock.js";
+import { onTickAfterPaint } from "./frame-clock.js";
 import { themedRgb, DEFAULT_THEME } from "./theme/palette.js";
 
 // The stage is drawn in Cyber Índigo; in another theme every colour of it (the sampled border
@@ -700,9 +700,15 @@ export function createKeoStage(root) {
     });
     // where each half burns hottest; the hot zones wander slowly
     const HOT = { '-1': [0.85, 2.5], '1': [1.3, 2.45] };
+    const hotCenters = new Map();
     function gmap(side, th, t){
-      const [c1, c2] = HOT[side];
-      const v = gauss(th, c1 + 0.45 * vnoise(t * 0.05, side * 3), 0.42) + gauss(th, c2 + 0.4 * vnoise(t * 0.045 + 7, side * 5), 0.36);
+      let centers = hotCenters.get(side);
+      if (!centers || centers.t !== t) {
+        const [c1, c2] = HOT[side];
+        centers = { t, c1: c1 + 0.45 * vnoise(t * 0.05, side * 3), c2: c2 + 0.4 * vnoise(t * 0.045 + 7, side * 5) };
+        hotCenters.set(side, centers);
+      }
+      const v = gauss(th, centers.c1, 0.42) + gauss(th, centers.c2, 0.36);
       return 0.4 + 0.6 * Math.min(1, v + 0.35 * gauss(th, 0.05, 0.12));
     }
     const CROSS = [];
@@ -770,22 +776,34 @@ export function createKeoStage(root) {
 
     /* ---------- the plasma-fire ring ---------- */
     function sideFibre(s, t, md){
-      const span = s.th1 - s.th0, n = Math.max(10, Math.round(span / 0.035)), pts = [], env = [];
+      // Geometry and envelopes depend on the fibre, not time. Keep both those
+      // samples and output buffers instead of allocating/recomputing every tick.
+      if (!s.samples) {
+        const span = s.th1 - s.th0, n = Math.max(10, Math.round(span / 0.035));
+        s.samples = Array.from({ length: n + 1 }, (_, k) => {
+          const u = k / n, th = s.th0 + span * u, sin = Math.sin(th), cos = Math.cos(th);
+          return { th, sin, cos, bx: CX + s.side * 90 * sin, by: CY - 90 * cos,
+            conv: Math.pow(sin, 0.7), spread: 0.5 + Math.abs(Math.sin(2 * th)),
+            tip: s.tip * Math.exp(-th / 0.2), bot: s.bot * Math.exp(-(PI - th) / 0.25),
+            taper: Math.max(0, s.full ? Math.min(1, u / 0.05, (1 - u) / 0.05) : Math.pow(Math.sin(PI * u), 0.9)) };
+        });
+        s.points = s.samples.map(() => [0, 0]);
+        s.envelope = new Array(s.samples.length);
+      }
+      const pts = s.points, env = s.envelope;
       const flick = 0.75 + 0.25 * vnoise(t * 2.2, s.ox);
       const pres = 0.2 + 0.8 * clamp01(0.5 + 1.3 * vnoise(t * s.pv, s.oy));          // fibres come and go
       const ampT = s.A1 * md * (0.55 + 0.8 * clamp01(0.5 + vnoise(t * 0.08, s.ox + 7)));
-      for (let k = 0; k <= n; k++){
-        const u = k / n, th = s.th0 + span * u;
-        const bx = CX + s.side * 90 * Math.sin(th), by = CY - 90 * Math.cos(th);
-        const conv = Math.pow(Math.sin(th), 0.7), spread = 0.5 + Math.abs(Math.sin(2 * th));
+      for (let k = 0; k < s.samples.length; k++){
+        const { th, sin, cos, bx, by, conv, spread, tip, bot, taper } = s.samples[k];
         const shared = flow(bx, by, t, 3.1, 7.3);
         const own = flow(bx, by, t, s.ox, s.oy, s.sp);
         const lick = Math.pow(Math.max(0, flow(bx, by, t, s.ox + 40, s.oy, 1.25) - 0.15), 2) * s.L * 2.6 * md;
         const r = 90 + (s.r0 - 90) * conv + conv * spread * (s.A2 * shared + ampT * own) + conv * lick;
-        pts.push([CX + s.side * r * Math.sin(th), CY - r * Math.cos(th) - s.tip * Math.exp(-th / 0.2) + s.bot * Math.exp(-(PI - th) / 0.25)]);
-        const taper = s.full ? Math.min(1, u / 0.05, (1 - u) / 0.05) : Math.pow(Math.sin(PI * u), 0.9);
+        pts[k][0] = CX + s.side * r * sin;
+        pts[k][1] = CY - r * cos - tip + bot;
         const hot = Math.pow(clamp01(0.5 + 0.8 * fire(bx, by, t, s.ox + 80, s.oy + 20, 1.1)), 1.4);
-        env.push(Math.max(0, taper) * (0.2 + 0.8 * hot) * gmap(s.side, th, t) * flick);
+        env[k] = taper * (0.2 + 0.8 * hot) * gmap(s.side, th, t) * flick;
       }
       fiber(pts, env, s.w, 0.17 * s.a * (s.full && s.w > 1.35 ? 1 : pres), s.w > 1.35 ? G.ringHot : G.ring);
     }
@@ -978,7 +996,7 @@ export function createKeoStage(root) {
       if (on === running) return;
       if (on){ base = performance.now(); } else { frozen = clock(); }
       running = on;
-      if (on && !untick) untick = onTick(tick);
+      if (on && !untick) untick = onTickAfterPaint(tick);
       if (!on && untick){ untick(); untick = null; }
       root.querySelector('#kx-stage').classList.toggle('kx-paused', !on);
     }
@@ -989,6 +1007,7 @@ export function createKeoStage(root) {
 
   const stageEl = root.querySelector('#kx-stage');
   let scale = 1;
+  let fittedWidth = null, fittedDpr = null;
 
   // The orb's swirl, the floating cube and the pulsing total move in the same 30 fps loop as the
   // canvases (as CSS animations they made the browser recomposite the blurred, blended layers at the
@@ -1025,12 +1044,19 @@ export function createKeoStage(root) {
     // Scales the stage to the given width (keeping its axis in the middle of it when the scale is
     // capped) and re-renders the canvases at that size.
     fit(width) {
+      if (!Number.isFinite(width) || width <= 0) return scale;
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      // Setting canvas.width/height clears its backing store even for the same
+      // value. Keep the rendered scene across section returns and observer calls.
+      if (width === fittedWidth && dpr === fittedDpr) return scale;
       scale = Math.max(0.4, Math.min(1.6, width / W));
       stageEl.style.left = `${((width - W * scale) / 2).toFixed(2)}px`;
       stageEl.style.transform = `scale(${scale})`;
       Borders.resize(scale);
       OrbLight.resize(scale);
       Energy.resize(scale);
+      fittedWidth = width;
+      fittedDpr = dpr;
       return scale;
     },
     setRunning(on) {

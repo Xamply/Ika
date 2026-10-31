@@ -10,6 +10,7 @@ mod scanner;
 mod manager;
 mod share;
 mod wallpaper_glass;
+mod wallpaper_preview;
 #[cfg(target_os = "windows")]
 mod wallpaper_capture;
 
@@ -2950,11 +2951,14 @@ fn delete_downloaded_wallpaper(video_path: String) -> Result<(), String> {
 /// lets Chromium throttle the page) and to keep its memory as low as possible
 /// (drops caches, trims the GPU/renderer processes). Restored on un-minimize.
 static WEBVIEW_BACKGROUND_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static WEBVIEW_FOCUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 fn set_webview_background_mode(window: &tauri::WebviewWindow, background: bool) {
     if WEBVIEW_BACKGROUND_MODE.swap(background, std::sync::atomic::Ordering::SeqCst) == background {
         return;
+    }
+    // Restore the cache budget before making the WebView render again.
+    if !background {
+        apply_webview_memory_level(window);
     }
     #[cfg(target_os = "windows")]
     {
@@ -2962,22 +2966,15 @@ fn set_webview_background_mode(window: &tauri::WebviewWindow, background: bool) 
             let _ = wv.controller().SetIsVisible(!background);
         });
     }
-    apply_webview_memory_level(window);
-}
-
-/// Focus changes only touch the memory target (the page keeps rendering, e.g. the video
-/// background behind a game), minimizing additionally hides the WebView.
-fn set_webview_focused(window: &tauri::WebviewWindow, focused: bool) {
-    if WEBVIEW_FOCUSED.swap(focused, std::sync::atomic::Ordering::SeqCst) != focused {
+    if background {
         apply_webview_memory_level(window);
     }
 }
 
-/// LOW while the launcher is inactive (minimized or not focused): WebView2 drops caches
-/// and trims its processes. NORMAL as soon as the user is back in the launcher.
+/// Trim caches only while minimized. A visible but unfocused launcher still
+/// renders its wallpaper and must retain section surfaces for the next visit.
 fn apply_webview_memory_level(window: &tauri::WebviewWindow) {
-    let low = WEBVIEW_BACKGROUND_MODE.load(std::sync::atomic::Ordering::SeqCst)
-        || !WEBVIEW_FOCUSED.load(std::sync::atomic::Ordering::SeqCst);
+    let low = WEBVIEW_BACKGROUND_MODE.load(std::sync::atomic::Ordering::SeqCst);
     #[cfg(target_os = "windows")]
     {
         let _ = window.with_webview(move |wv| unsafe {
@@ -3055,14 +3052,181 @@ fn app_window_minimize(window: tauri::Window) {
 }
 
 #[tauri::command]
-fn app_window_toggle_maximize(window: tauri::Window) {
-    if let Ok(is_max) = window.is_maximized() {
-        if is_max {
-            let _ = window.unmaximize();
-        } else {
-            let _ = window.maximize();
+fn app_window_monitors(window: tauri::Window) -> Result<serde_json::Value, String> {
+    let current = window.current_monitor().map_err(|e| e.to_string())?;
+    let primary = window.primary_monitor().map_err(|e| e.to_string())?;
+    let monitors = window.available_monitors().map_err(|e| e.to_string())?;
+    Ok(serde_json::Value::Array(monitors.iter().map(|monitor| {
+        let matches = |other: &tauri::Monitor| other.position() == monitor.position() && other.name() == monitor.name();
+        serde_json::json!({
+            "name": monitor.name(), "displayName": monitor_friendly_name(monitor.name()),
+            "x": monitor.position().x, "y": monitor.position().y,
+            "width": monitor.size().width, "height": monitor.size().height,
+            "scale": monitor.scale_factor(),
+            "current": current.as_ref().is_some_and(matches),
+            "primary": primary.as_ref().is_some_and(matches),
+        })
+    }).collect()))
+}
+
+fn monitor_friendly_name(name: Option<&String>) -> Option<String> {
+    #[cfg(target_os = "windows")]
+    if let Some(name) = name {
+        if let Some(friendly) = windows_monitor_friendly_name(name) { return Some(friendly); }
+    }
+
+    name.filter(|name| !name.starts_with(r"\\.\DISPLAY") && !name.starts_with(r"\Display"))
+        .cloned()
+        .or_else(|| name.map(|_| "Pantalla".to_string()))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_display_number(value: &str) -> Option<&str> {
+    value.trim_end_matches(|character: char| !character.is_ascii_digit())
+        .rsplit(|character: char| !character.is_ascii_digit())
+        .next()
+}
+
+#[cfg(target_os = "windows")]
+fn windows_monitor_friendly_name(device_name: &str) -> Option<String> {
+    if let Some(name) = windows_enum_monitor_name(device_name) { return Some(name); }
+
+    use windows_sys::Win32::Devices::Display::{
+        DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QueryDisplayConfig,
+        DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+        DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO,
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME, QDC_ONLY_ACTIVE_PATHS,
+    };
+
+    unsafe {
+        let mut path_count = 0;
+        let mut mode_count = 0;
+        if GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut path_count, &mut mode_count) != 0 {
+            return None;
+        }
+        let mut paths: Vec<DISPLAYCONFIG_PATH_INFO> = (0..path_count).map(|_| std::mem::zeroed()).collect();
+        let mut modes: Vec<DISPLAYCONFIG_MODE_INFO> = (0..mode_count).map(|_| std::mem::zeroed()).collect();
+        if QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &mut path_count, paths.as_mut_ptr(),
+            &mut mode_count, modes.as_mut_ptr(), std::ptr::null_mut()) != 0 {
+            return None;
+        }
+        for path in paths.iter().take(path_count as usize) {
+            let mut source: DISPLAYCONFIG_SOURCE_DEVICE_NAME = std::mem::zeroed();
+            source.header = DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+                size: std::mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
+                adapterId: path.sourceInfo.adapterId,
+                id: path.sourceInfo.id,
+            };
+            if DisplayConfigGetDeviceInfo(&mut source.header) != 0 { continue; }
+            let end = source.viewGdiDeviceName.iter().position(|&c| c == 0).unwrap_or(source.viewGdiDeviceName.len());
+            let source_name = String::from_utf16_lossy(&source.viewGdiDeviceName[..end]);
+            let source_number = windows_display_number(&source_name);
+            let requested_number = windows_display_number(device_name);
+            if source_number.is_none() || source_number != requested_number { continue; }
+
+            let mut target: DISPLAYCONFIG_TARGET_DEVICE_NAME = std::mem::zeroed();
+            target.header = DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+                size: std::mem::size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32,
+                adapterId: path.targetInfo.adapterId,
+                id: path.targetInfo.id,
+            };
+            if DisplayConfigGetDeviceInfo(&mut target.header) != 0 { return None; }
+            let end = target.monitorFriendlyDeviceName.iter().position(|&c| c == 0).unwrap_or(target.monitorFriendlyDeviceName.len());
+            let model = String::from_utf16_lossy(&target.monitorFriendlyDeviceName[..end]).trim().to_string();
+            if model.is_empty() { return None; }
+            let path_end = target.monitorDevicePath.iter().position(|&c| c == 0).unwrap_or(target.monitorDevicePath.len());
+            let monitor_path = String::from_utf16_lossy(&target.monitorDevicePath[..path_end]);
+            // Windows exposes EDID's 16-bit manufacturer code byte-swapped.
+            let manufacturer_id = target.edidManufactureId.swap_bytes();
+            let edid_manufacturer = [
+                ((manufacturer_id >> 10) & 0x1f) as u8,
+                ((manufacturer_id >> 5) & 0x1f) as u8,
+                (manufacturer_id & 0x1f) as u8,
+            ].map(|letter| (letter + b'@') as char).into_iter().collect::<String>();
+            let edid_manufacturer = match edid_manufacturer.as_str() {
+                "SAM" => "Samsung",
+                "GSM" => "LG",
+                "DEL" => "Dell",
+                "AUS" => "ASUS",
+                "ACR" => "Acer",
+                "HWP" => "HP",
+                "LEN" => "Lenovo",
+                _ => edid_manufacturer.as_str(),
+            };
+            let manufacturer = windows_monitor_vendor(&monitor_path).unwrap_or(edid_manufacturer);
+            return Some(format!("{manufacturer} {model}"));
         }
     }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn windows_enum_monitor_name(device_name: &str) -> Option<String> {
+    use windows_sys::Win32::Graphics::Gdi::{EnumDisplayDevicesW, DISPLAY_DEVICEW};
+
+    unsafe {
+        for adapter_index in 0..32 {
+            let mut adapter: DISPLAY_DEVICEW = std::mem::zeroed();
+            adapter.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
+            if EnumDisplayDevicesW(std::ptr::null(), adapter_index, &mut adapter, 0) == 0 { break; }
+            let adapter_end = adapter.DeviceName.iter().position(|&c| c == 0).unwrap_or(adapter.DeviceName.len());
+            let adapter_name = String::from_utf16_lossy(&adapter.DeviceName[..adapter_end]);
+            if windows_display_number(&adapter_name) != windows_display_number(device_name) { continue; }
+
+            let mut monitor: DISPLAY_DEVICEW = std::mem::zeroed();
+            monitor.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
+            if EnumDisplayDevicesW(adapter.DeviceName.as_ptr(), 0, &mut monitor, 0) == 0 { return None; }
+            let model_end = monitor.DeviceString.iter().position(|&c| c == 0).unwrap_or(monitor.DeviceString.len());
+            let model = String::from_utf16_lossy(&monitor.DeviceString[..model_end]).trim().to_string();
+            if model.is_empty() || model.eq_ignore_ascii_case("Generic PnP Monitor") { return None; }
+
+            let id_end = monitor.DeviceID.iter().position(|&c| c == 0).unwrap_or(monitor.DeviceID.len());
+            let device_id = String::from_utf16_lossy(&monitor.DeviceID[..id_end]);
+            let vendor = windows_monitor_vendor(&device_id).unwrap_or("");
+            return Some(if vendor.is_empty() { model } else { format!("{vendor} {model}") });
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn windows_monitor_vendor(device_id: &str) -> Option<&'static str> {
+    let segments: Vec<String> = device_id.split(['\\', '#', '&'])
+        .map(|part| part.to_ascii_uppercase()).collect();
+    [
+        ("SAM", "Samsung"), ("GSM", "LG"), ("DEL", "Dell"), ("AUS", "ASUS"),
+        ("ACR", "Acer"), ("HWP", "HP"), ("LEN", "Lenovo"),
+    ].into_iter().find_map(|(code, name)| segments.iter().any(|part| part.starts_with(code)).then_some(name))
+}
+
+// Re-enumerate on selection: an unplugged display must never move Ika offscreen.
+#[tauri::command]
+fn app_window_select_monitor(window: tauri::WebviewWindow, name: Option<String>, x: i32, y: i32) -> Result<(), String> {
+    if window.label() != "main" { return Err("Ventana no compatible".into()); }
+    let monitor = window.available_monitors().map_err(|e| e.to_string())?.into_iter()
+        .find(|m| m.position().x == x && m.position().y == y && m.name() == name.as_ref())
+        .ok_or("Monitor desconectado. Vuelve a abrir el selector.")?;
+    MONITOR_SWITCHING.store(true, std::sync::atomic::Ordering::SeqCst);
+    let result = (|| -> tauri::Result<()> {
+        window.unmaximize()?;
+        let area = monitor.work_area();
+        window.set_size(tauri::PhysicalSize::new((area.size.width / 2).max(1), (area.size.height / 2).max(1)))?;
+        window.set_position(tauri::PhysicalPosition::new(area.position.x + 20, area.position.y + 20))?;
+        window.maximize()?;
+        window.set_focus()?;
+        Ok(())
+    })();
+    MONITOR_SWITCHING.store(false, std::sync::atomic::Ordering::SeqCst);
+    // Recover maximized state even if moving failed halfway through.
+    if let Err(error) = window.maximize() { log::warn!("No se pudo maximizar Ika: {error}"); }
+    apply_ui_zoom(&window);
+    #[cfg(target_os = "windows")]
+    if result.is_ok() {
+        if let Ok(hwnd) = window.hwnd() { window_state::save(hwnd.0 as isize); }
+    }
+    result.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -3156,10 +3320,6 @@ mod window_state {
         }
     }
 
-    pub fn has_saved_state() -> bool {
-        path().exists()
-    }
-
     /// Applies the saved bounds to the window, which stays hidden. Returns whether it was
     /// maximized.
     pub fn restore(hwnd: isize) -> bool {
@@ -3175,7 +3335,12 @@ mod window_state {
         let Some(mut wp) = placement(hwnd) else { return false };
         wp.flags = 0;
         wp.showCmd = SW_HIDE;
-        wp.rcNormalPosition = RECT { left, top, right, bottom };
+        // Keep the saved position, but never restore an obsolete windowed size.
+        wp.rcNormalPosition = RECT {
+            left, top,
+            right: left.saturating_add(super::RESTORE_SIZE.0 as i32),
+            bottom: top.saturating_add(super::RESTORE_SIZE.1 as i32),
+        };
         unsafe {
             SetWindowPlacement(hwnd as *mut c_void, &wp);
         }
@@ -3218,26 +3383,6 @@ fn save_window_state(window: &tauri::Window) {
 }
 
 #[tauri::command]
-fn app_window_start_dragging(window: tauri::Window) {
-    #[cfg(target_os = "windows")]
-    {
-        let app_hwnd = window.hwnd().map(|h| h.0 as we_win32::HWND).unwrap_or(std::ptr::null_mut());
-        if !app_hwnd.is_null() {
-            unsafe {
-                we_win32::SetWindowPos(
-                    app_hwnd,
-                    0 as we_win32::HWND, // HWND_TOP
-                    0, 0, 0, 0,
-                    we_win32::SWP_NOMOVE | we_win32::SWP_NOSIZE | we_win32::SWP_NOACTIVATE,
-                );
-                we_win32::BringWindowToTop(app_hwnd);
-            }
-        }
-    }
-    let _ = window.start_dragging();
-}
-
-#[tauri::command]
 fn app_window_show(window: tauri::Window) {
     let _ = window.show();
     let _ = window.set_focus();
@@ -3251,6 +3396,8 @@ mod we_win32 {
     pub type HWND = *mut c_void;
     pub type BOOL = i32;
     pub type LONG_PTR = isize;
+    pub type HWINEVENTHOOK = *mut c_void;
+    pub type WINEVENTPROC = unsafe extern "system" fn(HWINEVENTHOOK, u32, HWND, i32, i32, u32, u32);
 
     pub const GWL_STYLE: i32 = -16;
     pub const GWL_EXSTYLE: i32 = -20;
@@ -3337,6 +3484,10 @@ mod we_win32 {
         pub fn SetWindowLongPtrW(hWnd: HWND, nIndex: i32, dwNewLong: LONG_PTR) -> LONG_PTR;
         pub fn GetWindowLongPtrW(hWnd: HWND, nIndex: i32) -> LONG_PTR;
         pub fn GetWindowRect(hWnd: HWND, lpRect: *mut RECT) -> BOOL;
+        pub fn GetWindowThreadProcessId(hWnd: HWND, process_id: *mut u32) -> u32;
+        pub fn SetWinEventHook(event_min: u32, event_max: u32, module: HMODULE,
+            callback: Option<WINEVENTPROC>, process_id: u32, thread_id: u32, flags: u32) -> HWINEVENTHOOK;
+        pub fn UnhookWinEvent(hook: HWINEVENTHOOK) -> BOOL;
         pub fn GetClientRect(hWnd: HWND, lpRect: *mut RECT) -> BOOL;
         pub fn ClientToScreen(hWnd: HWND, lpPoint: *mut POINT) -> BOOL;
         pub fn SetWindowPos(
@@ -3362,6 +3513,7 @@ mod we_win32 {
         pub fn SetActiveWindow(hWnd: HWND) -> HWND;
         pub fn BringWindowToTop(hWnd: HWND) -> BOOL;
         pub fn GetAncestor(hwnd: HWND, gaFlags: u32) -> HWND;
+        pub fn GetWindow(hwnd: HWND, command: u32) -> HWND;
 
         pub fn CoInitialize(pvReserved: *mut std::ffi::c_void) -> i32;
         pub fn CoCreateInstance(
@@ -3400,6 +3552,7 @@ mod we_win32 {
         pub fn SetCapture(hWnd: HWND) -> HWND;
         pub fn GetCursorPos(lpPoint: *mut POINT) -> BOOL;
         pub fn LoadCursorW(hInstance: HINSTANCE, lpCursorName: *const u16) -> HCURSOR;
+        pub fn SetCursor(cursor: HCURSOR) -> HCURSOR;
         pub fn IsWindow(hWnd: HWND) -> BOOL;
         pub fn IsWindowVisible(hWnd: HWND) -> BOOL;
         pub fn GetModuleHandleW(lpModuleName: *const u16) -> HMODULE;
@@ -3436,6 +3589,14 @@ mod we_win32 {
     pub type HDC = *mut c_void;
     pub const BLACK_BRUSH: i32 = 4;
     pub type WNDPROC = Option<unsafe extern "system" fn(HWND, u32, usize, isize) -> isize>;
+    pub type SUBCLASSPROC = Option<unsafe extern "system" fn(HWND, u32, usize, isize, usize, usize) -> isize>;
+
+    #[link(name = "comctl32")]
+    extern "system" {
+        pub fn SetWindowSubclass(hwnd: HWND, callback: SUBCLASSPROC, id: usize, data: usize) -> BOOL;
+        pub fn RemoveWindowSubclass(hwnd: HWND, callback: SUBCLASSPROC, id: usize) -> BOOL;
+        pub fn DefSubclassProc(hwnd: HWND, msg: u32, wparam: usize, lparam: isize) -> isize;
+    }
 
     #[repr(C)]
     #[allow(non_snake_case)]
@@ -3635,7 +3796,6 @@ mod we_win32 {
     pub fn get_visible_window_rect(hwnd: HWND) -> (i32, i32, u32, u32) {
         let mut pt = POINT { x: 0, y: 0 };
         let mut client_rect = RECT::default();
-        let is_max = unsafe { IsZoomed(hwnd) != 0 };
         unsafe {
             ClientToScreen(hwnd, &mut pt);
             GetClientRect(hwnd, &mut client_rect);
@@ -3643,12 +3803,9 @@ mod we_win32 {
         let w = (client_rect.right - client_rect.left).max(100) as u32;
         let h = (client_rect.bottom - client_rect.top).max(100) as u32;
 
-        let inset = if is_max { 0 } else { 1 };
-        let x = pt.x + inset;
-        let y = pt.y + inset;
-        let final_w = w.saturating_sub((inset * 2) as u32);
-        let final_h = h.saturating_sub((inset * 2) as u32);
-        (x, y, final_w, final_h)
+        // This launcher is borderless. The native region already clips rounded corners;
+        // a mode-dependent inset leaves a dark edge while Snap changes maximized state.
+        (pt.x, pt.y, w, h)
     }
 
     pub fn delete_taskbar_tab(hwnd: HWND) {
@@ -3754,6 +3911,7 @@ static BLUR_DRAG_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::Atom
 static BLUR_DRAG_START: Mutex<(i32, i32, i32, i32, i32, i32, i32, i32)> = Mutex::new((0, 0, 0, 0, 0, 0, 0, 0));
 static LAST_DRAGGED_POS: Mutex<(i32, i32)> = Mutex::new((-9999, -9999));
 static WE_THUMBNAIL_ID: Mutex<Option<isize>> = Mutex::new(None);
+static WE_THUMBNAIL_HAS_SOURCE_CROP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static UNDERLAY_CLASS_REGISTERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static WE_TRANSFORM: Mutex<(f32, f32, f32)> = Mutex::new((1.0, 0.0, 0.0));
 const WE_WINDOW_TITLE: &str = "ModComparer_BG";
@@ -3762,6 +3920,9 @@ const WE_WINDOW_TITLE: &str = "ModComparer_BG";
 /// resends) capture it and bail out once a newer scene has taken over, so they never
 /// touch the next scene's window with the previous scene's data.
 static WE_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+// A WebView reload drops its pending JS promises, not the native open operation.
+// Serialize opens and let the newest generation cancel obsolete window work.
+static WE_PLAY_OPERATION: Mutex<()> = Mutex::new(());
 
 fn bump_we_generation() -> u64 {
     WE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
@@ -3810,10 +3971,12 @@ fn get_we_thumbnail_id() -> Option<isize> {
 fn set_we_thumbnail_id(id: Option<isize>) {
     let mut lock = WE_THUMBNAIL_ID.lock().unwrap_or_else(|e| e.into_inner());
     *lock = id;
+    WE_THUMBNAIL_HAS_SOURCE_CROP.store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
 fn take_we_thumbnail_id() -> Option<isize> {
     let mut lock = WE_THUMBNAIL_ID.lock().unwrap_or_else(|e| e.into_inner());
+    WE_THUMBNAIL_HAS_SOURCE_CROP.store(false, std::sync::atomic::Ordering::Relaxed);
     lock.take()
 }
 
@@ -3828,6 +3991,23 @@ fn set_we_transform(scale: f32, pan_x: f32, pan_y: f32) {
 
 static LAST_WE_GEOM: Mutex<(i32, i32, i32, i32)> = Mutex::new((0, 0, 0, 0));
 static LAST_WE_RGN: Mutex<(i32, i32, i32, i32)> = Mutex::new((0, 0, 0, 0));
+// Only one external move/resize may be outstanding. New drag positions replace
+// the desired layout, rather than queuing a trail of moves in WE's message loop.
+static WE_SOURCE_REQUESTED_RECT: Mutex<Option<(isize, i32, i32, i32, i32)>> = Mutex::new(None);
+
+#[cfg(target_os = "windows")]
+unsafe fn move_wallpaper_underlay_with_launcher(app: we_win32::HWND, x: i32, y: i32) {
+    let Some(underlay) = get_underlay_hwnd() else { return };
+    let underlay = underlay as we_win32::HWND;
+    if we_win32::IsIconic(app) != 0 { return; }
+    let mut current = we_win32::RECT::default();
+    if we_win32::GetWindowRect(underlay, &mut current) != 0 && (current.left, current.top) != (x, y) {
+        // Both windows belong to this UI thread. Move within the parent's native
+        // positioning operation, before returning to Windows' modal drag loop.
+        we_win32::SetWindowPos(underlay, std::ptr::null_mut(), x, y, 0, 0,
+            we_win32::SWP_NOSIZE | we_win32::SWP_NOZORDER | we_win32::SWP_NOACTIVATE);
+    }
+}
 
 #[cfg(target_os = "windows")]
 unsafe extern "system" fn underlay_wnd_proc(
@@ -3859,7 +4039,69 @@ unsafe extern "system" fn underlay_wnd_proc(
     we_win32::DefWindowProcW(hwnd, msg, wparam, lparam)
 }
 
-static PREV_APP_WNDPROC: Mutex<Option<usize>> = Mutex::new(None);
+static APP_SUBCLASSED_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+const APP_SUBCLASS_ID: usize = 0x494B41;
+#[cfg(target_os = "windows")]
+static WE_LAYOUT_SYNC_PENDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(target_os = "windows")]
+const WM_SYNC_WE_LAYOUT: u32 = 0x8000 + 0x4B1;
+#[cfg(target_os = "windows")]
+static WE_LAYOUT_APP_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+#[cfg(target_os = "windows")]
+static WE_SOURCE_LOCATION_HOOK: Mutex<(isize, u32)> = Mutex::new((0, 0));
+
+#[cfg(target_os = "windows")]
+fn queue_we_layout_sync(app_hwnd: we_win32::HWND) -> bool {
+    use std::sync::atomic::Ordering;
+    if app_hwnd.is_null() { return false; }
+    if WE_LAYOUT_SYNC_PENDING.swap(true, Ordering::Relaxed) { return true; }
+    if unsafe { we_win32::PostMessageW(app_hwnd, WM_SYNC_WE_LAYOUT, 0, 0) } == 0 {
+        WE_LAYOUT_SYNC_PENDING.store(false, Ordering::Relaxed);
+        return false;
+    }
+    true
+}
+
+// Called after the external WE window commits a move/resize, or its renderer delivers
+// the first frame at a new size. Launcher resize events alone precede both operations.
+#[cfg(target_os = "windows")]
+fn we_source_layout_changed(source: isize) {
+    if get_we_window_hwnd() != Some(source) { return; }
+    // The external process acknowledged a layout/frame change. It may clamp a
+    // requested rectangle, so do not wait forever for exact coordinate equality.
+    *WE_SOURCE_REQUESTED_RECT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    let app = WE_LAYOUT_APP_HWND.load(std::sync::atomic::Ordering::Relaxed);
+    queue_we_layout_sync(app as we_win32::HWND);
+}
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn we_source_location_changed(
+    _hook: we_win32::HWINEVENTHOOK, event: u32, hwnd: we_win32::HWND,
+    object: i32, child: i32, _thread: u32, _time: u32,
+) {
+    if event == 0x800B && object == 0 && child == 0 && !hwnd.is_null() {
+        we_source_layout_changed(hwnd as isize);
+    }
+}
+
+// Install on the launcher's UI thread, which also receives the out-of-context events.
+// The hook is limited to WE's process; other applications cannot trigger a layout update.
+#[cfg(target_os = "windows")]
+unsafe fn watch_we_source_geometry(source: we_win32::HWND, app: we_win32::HWND) {
+    WE_LAYOUT_APP_HWND.store(app as isize, std::sync::atomic::Ordering::Relaxed);
+    let mut process_id = 0;
+    if we_win32::GetWindowThreadProcessId(source, &mut process_id) == 0 || process_id == 0 { return; }
+    let mut hook = WE_SOURCE_LOCATION_HOOK.lock().unwrap_or_else(|e| e.into_inner());
+    if hook.0 != 0 && hook.1 == process_id { return; }
+    if hook.0 != 0 { we_win32::UnhookWinEvent(hook.0 as we_win32::HWINEVENTHOOK); }
+    let installed = we_win32::SetWinEventHook(0x800B, 0x800B, std::ptr::null_mut(),
+        Some(we_source_location_changed), process_id, 0, 0);
+    *hook = (installed as isize, process_id);
+    if installed.is_null() {
+        log::warn!("No se pudo observar el cambio de tamaño del fondo: {}", std::io::Error::last_os_error());
+    }
+}
 
 #[cfg(target_os = "windows")]
 unsafe extern "system" fn app_subclass_wndproc(
@@ -3867,10 +4109,51 @@ unsafe extern "system" fn app_subclass_wndproc(
     msg: u32,
     wparam: usize,
     lparam: isize,
+    _subclass_id: usize,
+    _reference_data: usize,
 ) -> isize {
     const WM_ACTIVATE: u32 = 0x0006;
     const WM_ACTIVATEAPP: u32 = 0x001C;
     const WM_SHOWWINDOW: u32 = 0x0018;
+    const WM_SIZE: u32 = 0x0005;
+    const WM_DPICHANGED: u32 = 0x02E0;
+    const WM_EXITSIZEMOVE: u32 = 0x0232;
+    const WM_NCHITTEST: u32 = 0x0084;
+    const WM_WINDOWPOSCHANGING: u32 = 0x0046;
+    const WM_WINDOWPOSCHANGED: u32 = 0x0047;
+    const WM_SETCURSOR: u32 = 0x0020;
+
+    if msg == WM_SETCURSOR && (10..=17).contains(&(lparam & 0xFFFF)) {
+        we_win32::SetCursor(we_win32::LoadCursorW(std::ptr::null_mut(), 32512 as *const u16));
+        return 1;
+    }
+
+    if msg == WM_WINDOWPOSCHANGING && lparam != 0 {
+        let position = &*(lparam as *const windows_sys::Win32::UI::WindowsAndMessaging::WINDOWPOS);
+        if position.flags & we_win32::SWP_NOMOVE == 0 {
+            let mut outer = we_win32::RECT::default();
+            if we_win32::GetWindowRect(hwnd, &mut outer) != 0
+                && (position.flags & we_win32::SWP_NOSIZE != 0
+                    || (position.cx == outer.right - outer.left && position.cy == outer.bottom - outer.top)) {
+                let (cx, cy, _, _) = we_win32::get_visible_window_rect(hwnd);
+                move_wallpaper_underlay_with_launcher(hwnd,
+                    position.x + (cx - outer.left), position.y + (cy - outer.top));
+            }
+        }
+    }
+
+    if msg == WM_SYNC_WE_LAYOUT {
+        WE_LAYOUT_SYNC_PENDING.store(false, std::sync::atomic::Ordering::Relaxed);
+        if we_win32::IsIconic(hwnd) == 0 {
+            if let (Some(source), Some(underlay)) = (get_we_window_hwnd(), get_underlay_hwnd()) {
+                if we_win32::IsWindowVisible(underlay as we_win32::HWND) != 0 {
+                    let (scale, pan_x, pan_y) = get_we_transform();
+                    update_we_geometry_internal(source as we_win32::HWND, hwnd, scale, pan_x, pan_y);
+                }
+            }
+        }
+        return 0;
+    }
 
     if msg == WM_ACTIVATE || msg == WM_ACTIVATEAPP || msg == WM_SHOWWINDOW {
         let is_active = if msg == WM_ACTIVATE {
@@ -3892,17 +4175,9 @@ unsafe extern "system" fn app_subclass_wndproc(
                         pan_y,
                     );
                     let h_val = hwnd as usize;
-                    let we_val = we_hwnd_val as usize;
                     std::thread::spawn(move || {
                         std::thread::sleep(std::time::Duration::from_millis(60));
-                        let (s, px, py) = get_we_transform();
-                        update_we_geometry_internal(
-                            we_val as we_win32::HWND,
-                            h_val as we_win32::HWND,
-                            s,
-                            px,
-                            py,
-                        );
+                        queue_we_layout_sync(h_val as we_win32::HWND);
                     });
                 }
             }
@@ -3915,6 +4190,11 @@ unsafe extern "system" fn app_subclass_wndproc(
     const WM_DWMSENDICONICLIVEPREVIEWBITMAP: u32 = 0x0326;
     const WM_SYSCOMMAND: u32 = 0x0112;
     const SC_MINIMIZE: usize = 0xF020;
+    // Only the monitor selector can reposition/restore the launcher.
+    if msg == WM_SYSCOMMAND && matches!(wparam & 0xFFF0, 0xF000 | 0xF010 | 0xF120)
+        && we_win32::IsIconic(hwnd) == 0 { // SC_SIZE, SC_MOVE, SC_RESTORE
+        return 0;
+    }
     if get_we_window_hwnd().is_some() {
         if msg == WM_DWMSENDICONICTHUMBNAIL {
             let max_w = ((lparam >> 16) & 0xFFFF) as i32;
@@ -3933,29 +4213,51 @@ unsafe extern "system" fn app_subclass_wndproc(
         }
     }
 
-    let prev = PREV_APP_WNDPROC.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    if let Some(p) = prev {
-        let prev_fn: we_win32::WNDPROC = std::mem::transmute(p);
-        we_win32::CallWindowProcW(prev_fn, hwnd, msg, wparam, lparam)
-    } else {
-        we_win32::DefWindowProcW(hwnd, msg, wparam, lparam)
+    if msg == 0x0082 { // WM_NCDESTROY
+        we_win32::RemoveWindowSubclass(hwnd, Some(app_subclass_wndproc), APP_SUBCLASS_ID);
+        APP_SUBCLASSED_HWND.store(0, std::sync::atomic::Ordering::Relaxed);
     }
+    let result = we_win32::DefSubclassProc(hwnd, msg, wparam, lparam);
+
+    if msg == WM_WINDOWPOSCHANGED {
+        let (x, y, _, _) = we_win32::get_visible_window_rect(hwnd);
+        move_wallpaper_underlay_with_launcher(hwnd, x, y);
+    }
+
+    if msg == WM_NCHITTEST && (result == 2 || (10..=17).contains(&result)) { // HTLEFT .. HTBOTTOMRIGHT
+        return 1; // HTCLIENT: edges cannot start a manual resize.
+    }
+
+    // Aero Snap finishes the native drag/resize after the usual Tauri callbacks.
+    // Reconcile once Windows has processed that message, instead of relying on a
+    // later focus/click event to supply the final maximized bounds. Coalesce bursts.
+    if matches!(msg, WM_SIZE | WM_DPICHANGED | WM_EXITSIZEMOVE)
+        && get_we_window_hwnd().is_some()
+    {
+        queue_we_layout_sync(hwnd);
+    }
+    if msg == 0x0082 { // WM_NCDESTROY: release the hook on its installing thread.
+        let mut hook = WE_SOURCE_LOCATION_HOOK.lock().unwrap_or_else(|e| e.into_inner());
+        if hook.0 != 0 { we_win32::UnhookWinEvent(hook.0 as we_win32::HWINEVENTHOOK); }
+        *hook = (0, 0);
+        WE_LAYOUT_APP_HWND.store(0, std::sync::atomic::Ordering::Relaxed);
+        WE_LAYOUT_SYNC_PENDING.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+    result
 }
 
 pub fn ensure_app_subclassed(app_hwnd: we_win32::HWND) {
     if app_hwnd.is_null() {
         return;
     }
-    let mut prev = PREV_APP_WNDPROC.lock().unwrap_or_else(|e| e.into_inner());
-    if prev.is_none() {
+    if APP_SUBCLASSED_HWND.load(std::sync::atomic::Ordering::Relaxed) != app_hwnd as isize {
         unsafe {
-            let old = we_win32::SetWindowLongPtrW(
-                app_hwnd,
-                we_win32::GWLP_WNDPROC,
-                app_subclass_wndproc as *const () as isize,
-            );
-            if old != 0 {
-                *prev = Some(old as usize);
+            // Join Tauri/Wry's subclass chain. A legacy WNDPROC replacement can sit
+            // below their handlers, which consume hit-testing before our policy runs.
+            if we_win32::SetWindowSubclass(app_hwnd, Some(app_subclass_wndproc), APP_SUBCLASS_ID, 0) != 0 {
+                APP_SUBCLASSED_HWND.store(app_hwnd as isize, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                log::warn!("No se pudo instalar el control de ventana: {}", std::io::Error::last_os_error());
             }
         }
     }
@@ -6467,6 +6769,32 @@ fn open_main_console_view(app: tauri::AppHandle) -> Result<(), String> {
     }
     Ok(())
 }
+fn wallpaper_cover_bounds(
+    src_w: i32, src_h: i32, dest_w: i32, dest_h: i32,
+    scale: f32, pan_x: f32, pan_y: f32,
+) -> (f64, f64, f64, f64) {
+    let sw = src_w.max(1) as f64;
+    let sh = src_h.max(1) as f64;
+    let dw = dest_w.max(1) as f64;
+    let dh = dest_h.max(1) as f64;
+    let fit = (dw / sw).max(dh / sh) * scale.clamp(0.4, 4.0) as f64;
+    let width = sw * fit;
+    let height = sh * fit;
+    ((dw - width) / 2.0 + pan_x as f64, (dh - height) / 2.0 + pan_y as f64, width, height)
+}
+
+fn wallpaper_destination_rect(
+    src_w: i32, src_h: i32, dest_w: i32, dest_h: i32,
+    scale: f32, pan_x: f32, pan_y: f32,
+) -> we_win32::RECT {
+    let (left, top, width, height) = wallpaper_cover_bounds(src_w, src_h, dest_w, dest_h, scale, pan_x, pan_y);
+    // Round outwards: a fractional edge must not expose the black underlay.
+    we_win32::RECT {
+        left: left.floor() as i32, top: top.floor() as i32,
+        right: (left + width).ceil() as i32, bottom: (top + height).ceil() as i32,
+    }
+}
+
 fn compute_thumbnail_rects(
     src_w: i32,
     src_h: i32,
@@ -6476,69 +6804,58 @@ fn compute_thumbnail_rects(
     pan_x: f32,
     pan_y: f32,
 ) -> (we_win32::RECT, we_win32::RECT) {
-    let clamped_scale = scale.clamp(0.5, 5.0);
-    let sw = src_w.max(10) as f32;
-    let sh = src_h.max(10) as f32;
-    let dw = dest_w.max(10) as f32;
-    let dh = dest_h.max(10) as f32;
+    let sw = src_w.max(1) as f64;
+    let sh = src_h.max(1) as f64;
+    let dw = dest_w.max(1) as f64;
+    let dh = dest_h.max(1) as f64;
 
-    if clamped_scale >= 1.0 {
-        let crop_w = (sw / clamped_scale).round() as i32;
-        let crop_h = (sh / clamped_scale).round() as i32;
-        let crop_w = crop_w.clamp(1, src_w);
-        let crop_h = crop_h.clamp(1, src_h);
+    // Match CSS translate(pan) scale(zoom) about the viewport's centre. Clip the
+    // destination first, then map it back to the source; clamping only the source
+    // previously prevented panning at 100% and used the wrong units above 100%.
+    let (left, top, scaled_w, scaled_h) = wallpaper_cover_bounds(src_w, src_h, dest_w, dest_h, scale, pan_x, pan_y);
+    let dest = we_win32::RECT {
+        left: left.max(0.0).min(dw).round() as i32,
+        top: top.max(0.0).min(dh).round() as i32,
+        right: (left + scaled_w).max(0.0).min(dw).round() as i32,
+        bottom: (top + scaled_h).max(0.0).min(dh).round() as i32,
+    };
+    if dest.right <= dest.left || dest.bottom <= dest.top {
+        return (we_win32::RECT::default(), we_win32::RECT::default());
+    }
+    let source = we_win32::RECT {
+        left: (((dest.left as f64 - left) / scaled_w) * sw).round().clamp(0.0, sw - 1.0) as i32,
+        top: (((dest.top as f64 - top) / scaled_h) * sh).round().clamp(0.0, sh - 1.0) as i32,
+        right: (((dest.right as f64 - left) / scaled_w) * sw).round().clamp(1.0, sw) as i32,
+        bottom: (((dest.bottom as f64 - top) / scaled_h) * sh).round().clamp(1.0, sh) as i32,
+    };
+    (source, dest)
+}
 
-        let center_x = (sw / 2.0) - (pan_x / clamped_scale);
-        let center_y = (sh / 2.0) - (pan_y / clamped_scale);
-
-        let mut l = (center_x - (crop_w as f32 / 2.0)).round() as i32;
-        let mut t = (center_y - (crop_h as f32 / 2.0)).round() as i32;
-
-        if l < 0 {
-            l = 0;
-        }
-        if l + crop_w > src_w {
-            l = (src_w - crop_w).max(0);
-        }
-        if t < 0 {
-            t = 0;
-        }
-        if t + crop_h > src_h {
-            t = (src_h - crop_h).max(0);
-        }
-
-        let rc_source = we_win32::RECT {
-            left: l,
-            top: t,
-            right: l + crop_w,
-            bottom: t + crop_h,
-        };
-        let rc_dest = we_win32::RECT {
-            left: 0,
-            top: 0,
-            right: dest_w,
-            bottom: dest_h,
-        };
-        (rc_source, rc_dest)
+fn wallpaper_thumbnail_properties(
+    src_w: i32, src_h: i32, dest_w: i32, dest_h: i32,
+    scale: f32, pan_x: f32, pan_y: f32,
+) -> we_win32::DWM_THUMBNAIL_PROPERTIES {
+    let cropped = scale != 1.0 || pan_x != 0.0 || pan_y != 0.0;
+    let (source, dest) = if cropped {
+        // Clip destination AND its matching source before handing coordinates to DWM.
+        // A negative destination origin can introduce a dark band on the leading edge.
+        compute_thumbnail_rects(src_w, src_h, dest_w, dest_h, scale, pan_x, pan_y)
     } else {
-        let target_dest_w = (dw * clamped_scale).round() as i32;
-        let target_dest_h = (dh * clamped_scale).round() as i32;
-        let dl = (((dw - target_dest_w as f32) / 2.0) + pan_x).round() as i32;
-        let dt = (((dh - target_dest_h as f32) / 2.0) + pan_y).round() as i32;
-
-        let rc_source = we_win32::RECT {
-            left: 0,
-            top: 0,
-            right: src_w,
-            bottom: src_h,
-        };
-        let rc_dest = we_win32::RECT {
-            left: dl,
-            top: dt,
-            right: dl + target_dest_w,
-            bottom: dt + target_dest_h,
-        };
-        (rc_source, rc_dest)
+        // Keep the live full-source mapping during ordinary viewport changes.
+        (we_win32::RECT::default(),
+            wallpaper_destination_rect(src_w, src_h, dest_w, dest_h, scale, pan_x, pan_y))
+    };
+    we_win32::DWM_THUMBNAIL_PROPERTIES {
+        dwFlags: we_win32::DWM_TNP_RECTDESTINATION
+            | we_win32::DWM_TNP_VISIBLE
+            | we_win32::DWM_TNP_SOURCECLIENTAREAONLY
+            | we_win32::DWM_TNP_OPACITY
+            | if cropped { we_win32::DWM_TNP_RECTSOURCE } else { 0 },
+        rcDestination: dest,
+        rcSource: source,
+        opacity: 255,
+        fVisible: if dest.right > dest.left && dest.bottom > dest.top { 1 } else { 0 },
+        fSourceClientAreaOnly: 1,
     }
 }
 
@@ -6549,9 +6866,16 @@ fn update_we_geometry_internal(
     scale: f32,
     pan_x: f32,
     pan_y: f32,
-) {
+) -> i32 {
     if hwnd.is_null() || app_hwnd.is_null() {
-        return;
+        return -1;
+    }
+    // Geometry reads and writes must be ordered on the owning UI thread. A worker
+    // can otherwise finish an old SetWindowPos after Snap has applied newer bounds.
+    let owner_thread = unsafe { we_win32::GetWindowThreadProcessId(app_hwnd, std::ptr::null_mut()) };
+    if owner_thread == 0 { return -1; }
+    if owner_thread != unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() } {
+        return if queue_we_layout_sync(app_hwnd) { 0 } else { -1 };
     }
     thaw_we_scene_before_window_ops();
     let (win_x, win_y, win_w, win_h) = we_win32::get_visible_window_rect(app_hwnd);
@@ -6569,7 +6893,7 @@ fn update_we_geometry_internal(
             }
         }
         *LAST_WE_GEOM.lock().unwrap_or_else(|e| e.into_inner()) = (0, 0, 0, 0);
-        return;
+        return -1;
     }
 
     ensure_app_subclassed(app_hwnd);
@@ -6582,6 +6906,7 @@ fn update_we_geometry_internal(
     let show_flag = if is_hidden { we_win32::SWP_SHOWWINDOW } else { 0 };
     let we_hidden = unsafe { we_win32::IsWindowVisible(hwnd) == 0 };
     let we_show_flag = if we_hidden { we_win32::SWP_SHOWWINDOW } else { 0 };
+    let (source_x, source_y, source_w, source_h) = we_source_geometry(win_x, win_y, win_w, win_h);
 
     unsafe {
         if is_hidden {
@@ -6596,12 +6921,15 @@ fn update_we_geometry_internal(
             //    We check app_hwnd itself as well as any child/ancestor window (WebView2).
 
 
-            we_win32::SetWindowPos(
-                app_hwnd,
-                0 as we_win32::HWND, // HWND_TOP
-                0, 0, 0, 0,
-                we_win32::SWP_NOMOVE | we_win32::SWP_NOSIZE | we_win32::SWP_NOACTIVATE,
-            );
+            let foreground = we_win32::GetForegroundWindow();
+            if foreground == app_hwnd || we_win32::GetAncestor(foreground, 2) == app_hwnd {
+                we_win32::SetWindowPos(
+                    app_hwnd,
+                    0 as we_win32::HWND, // HWND_TOP
+                    0, 0, 0, 0,
+                    we_win32::SWP_NOMOVE | we_win32::SWP_NOSIZE | we_win32::SWP_NOACTIVATE,
+                );
+            }
 
             // 2. Position underlay window ALWAYS directly behind app_hwnd so it never covers the UI
             we_win32::SetWindowPos(
@@ -6614,22 +6942,49 @@ fn update_we_geometry_internal(
                 we_win32::SWP_NOACTIVATE | show_flag,
             );
 
-            // 3. Position found_hwnd deeply inset (60px inside on all 4 borders) right behind underlay
-            let inset = 60;
-            let hwnd_x = win_x + inset;
-            let hwnd_y = win_y + inset;
-            let hwnd_w = (win_w as i32 - (inset * 2)).max(100);
-            let hwnd_h = (win_h as i32 - (inset * 2)).max(100);
+            // Keep the source hidden inside the launcher, using the same aspect ratio.
+            let hwnd_x = source_x;
+            let hwnd_y = source_y;
+            let hwnd_w = source_w as i32;
+            let hwnd_h = source_h as i32;
 
-            we_win32::SetWindowPos(
-                hwnd,
-                underlay,
-                hwnd_x,
-                hwnd_y,
-                hwnd_w,
-                hwnd_h,
-                we_win32::SWP_NOACTIVATE | we_win32::SWP_ASYNCWINDOWPOS | we_show_flag,
-            );
+            let mut source_rect = we_win32::RECT::default();
+            let have_source_rect = we_win32::GetWindowRect(hwnd, &mut source_rect) != 0;
+            let source_matches = have_source_rect
+                && source_rect.left == hwnd_x && source_rect.top == hwnd_y
+                && source_rect.right - source_rect.left == hwnd_w
+                && source_rect.bottom - source_rect.top == hwnd_h;
+            // An acknowledgement must refresh DWM without starting another source resize.
+            let geometry_flags = if source_matches {
+                we_win32::SWP_NOMOVE | we_win32::SWP_NOSIZE
+            } else { 0 };
+
+            // Do not feed location-change notifications back into another identical
+            // SetWindowPos. Only repair source bounds, visibility or its stacking order.
+            let mut requested = WE_SOURCE_REQUESTED_RECT.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((source, x, y, w, h)) = *requested {
+                if source != hwnd as isize || !have_source_rect
+                    || (source_rect.left == x && source_rect.top == y
+                        && source_rect.right - source_rect.left == w && source_rect.bottom - source_rect.top == h) {
+                    *requested = None;
+                }
+            }
+            if requested.is_none()
+                && (!source_matches || we_hidden || we_win32::GetWindow(hwnd, 3) != underlay) { // GW_HWNDPREV
+                let moved = we_win32::SetWindowPos(
+                    hwnd,
+                    underlay,
+                    hwnd_x,
+                    hwnd_y,
+                    hwnd_w,
+                    hwnd_h,
+                    we_win32::SWP_NOACTIVATE | we_win32::SWP_ASYNCWINDOWPOS | we_show_flag | geometry_flags,
+                );
+                if moved != 0 && !source_matches {
+                    *requested = Some((hwnd as isize, hwnd_x, hwnd_y, hwnd_w, hwnd_h));
+                }
+            }
+            drop(requested);
 
 
             // 4. Update region only if dimensions changed to avoid stutter during drag
@@ -6664,6 +7019,14 @@ fn update_we_geometry_internal(
             }
         }
 
+    let cropped = scale != 1.0 || pan_x != 0.0 || pan_y != 0.0;
+    if !cropped && WE_THUMBNAIL_HAS_SOURCE_CROP.load(std::sync::atomic::Ordering::Relaxed) {
+        // DWM retains rcSource even when a later update omits RECTSOURCE. Reset once
+        // on returning to the default transform, so async resize cannot retain a crop.
+        if let Some(old) = take_we_thumbnail_id() {
+            unsafe { we_win32::DwmUnregisterThumbnail(old as we_win32::HTHUMBNAIL); }
+        }
+    }
     // Register thumbnail if not yet registered
     let thumb_opt = get_we_thumbnail_id();
     let thumb_id = if let Some(tid) = thumb_opt {
@@ -6680,45 +7043,34 @@ fn update_we_geometry_internal(
     };
 
     if !thumb_id.is_null() {
-        let mut src_size = we_win32::SIZE { cx: win_w as i32, cy: win_h as i32 };
-        unsafe {
-            let _ = we_win32::DwmQueryThumbnailSourceSize(thumb_id, &mut src_size);
+        // Read actual DWM source dimensions, not the async resize request. Location
+        // and complete-frame notifications refresh this mapping when the source changes.
+        let mut source_size = we_win32::SIZE { cx: source_w as i32, cy: source_h as i32 };
+        let queried = unsafe { we_win32::DwmQueryThumbnailSourceSize(thumb_id, &mut source_size) };
+        if queried < 0 || source_size.cx <= 0 || source_size.cy <= 0 {
+            source_size = we_win32::SIZE { cx: source_w as i32, cy: source_h as i32 };
         }
-        let src_w = if src_size.cx > 0 { src_size.cx } else { win_w as i32 };
-        let src_h = if src_size.cy > 0 { src_size.cy } else { win_h as i32 };
-
-        let (src_rect, dest_rect) = compute_thumbnail_rects(
-            src_w,
-            src_h,
-            win_w as i32,
-            win_h as i32,
-            scale,
-            pan_x,
-            pan_y,
-        );
-
-        let props = we_win32::DWM_THUMBNAIL_PROPERTIES {
-            dwFlags: we_win32::DWM_TNP_RECTDESTINATION
-                | we_win32::DWM_TNP_RECTSOURCE
-                | we_win32::DWM_TNP_VISIBLE
-                | we_win32::DWM_TNP_SOURCECLIENTAREAONLY
-                | we_win32::DWM_TNP_OPACITY,
-            rcDestination: dest_rect,
-            rcSource: src_rect,
-            opacity: 255,
-            fVisible: 1,
-            fSourceClientAreaOnly: 1,
-        };
-
+        let props = wallpaper_thumbnail_properties(source_size.cx, source_size.cy,
+            win_w as i32, win_h as i32, scale, pan_x, pan_y);
         unsafe {
-            let _ = we_win32::DwmUpdateThumbnailProperties(thumb_id, &props);
+            let result = we_win32::DwmUpdateThumbnailProperties(thumb_id, &props);
+            if result >= 0 {
+                WE_THUMBNAIL_HAS_SOURCE_CROP.store(cropped, std::sync::atomic::Ordering::Relaxed);
+            }
+            return result;
         }
     }
+    -1
 }
 
 fn ensure_wallpaper_engine_running(we_exe: &std::path::Path) {
     #[cfg(target_os = "windows")]
     {
+        // Toolhelp already supplies this lookup for scene freezing. Avoid starting
+        // tasklist on every switch; retain the fallback if enumeration finds no daemon.
+        if we_freeze::we_pid().is_some() {
+            return;
+        }
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         let running = std::process::Command::new("tasklist")
@@ -6881,12 +7233,22 @@ fn spawn_we_window(
 #[cfg(target_os = "windows")]
 fn we_window_geometry(app_hwnd: we_win32::HWND) -> (i32, i32, u32, u32) {
     let (x, y, width, height) = we_win32::get_visible_window_rect(app_hwnd);
-    let inset = 60;
+    we_source_geometry(x, y, width, height)
+}
+
+fn we_source_geometry(x: i32, y: i32, width: u32, height: u32) -> (i32, i32, u32, u32) {
+    // Subtracting 120 from both dimensions changes their ratio and squeezes the
+    // scene when it is enlarged. Contain a proportional source behind the underlay.
+    let available_w = width.saturating_sub(120).max(1) as f64;
+    let available_h = height.saturating_sub(120).max(1) as f64;
+    let fit = (available_w / width.max(1) as f64).min(available_h / height.max(1) as f64);
+    let source_w = (width as f64 * fit).floor().max(1.0) as u32;
+    let source_h = (height as f64 * fit).floor().max(1.0) as u32;
     (
-        x + inset,
-        y + inset,
-        width.saturating_sub((inset * 2) as u32).max(100),
-        height.saturating_sub((inset * 2) as u32).max(100),
+        x + (width.saturating_sub(source_w) / 2) as i32,
+        y + (height.saturating_sub(source_h) / 2) as i32,
+        source_w,
+        source_h,
     )
 }
 
@@ -6894,9 +7256,10 @@ fn we_window_geometry(app_hwnd: we_win32::HWND) -> (i32, i32, u32, u32) {
 /// if it is somehow still alive it shares the title, so it must never be mistaken
 /// for the new one.
 #[cfg(target_os = "windows")]
-fn wait_for_we_window(title: &str, stale: Option<isize>) -> we_win32::HWND {
+fn wait_for_we_window(title: &str, stale: Option<isize>, generation: u64) -> we_win32::HWND {
     let wide_title = we_win32::to_wide(title);
     for _ in 0..170 {
+        if !is_current_we_generation(generation) { return std::ptr::null_mut(); }
         std::thread::sleep(std::time::Duration::from_millis(30));
         let hwnd = unsafe { we_win32::FindWindowW(std::ptr::null(), wide_title.as_ptr()) };
         if !hwnd.is_null() && Some(hwnd as isize) != stale {
@@ -6909,7 +7272,7 @@ fn wait_for_we_window(title: &str, stale: Option<isize>) -> we_win32::HWND {
 /// Closes the scene playing in the launcher window and blocks until Wallpaper Engine
 /// has fully destroyed it, so the next scene is only opened once the old one is gone.
 #[cfg(target_os = "windows")]
-fn close_we_window_and_wait(we_exe: &std::path::Path, old_hwnd: Option<isize>) {
+fn close_we_window_and_wait(we_exe: &std::path::Path, old_hwnd: Option<isize>, generation: u64) {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
     let wide_title = we_win32::to_wide(WE_WINDOW_TITLE);
@@ -6923,14 +7286,18 @@ fn close_we_window_and_wait(we_exe: &std::path::Path, old_hwnd: Option<isize>) {
 
     // Retry the close once in case WE was still busy loading the old scene.
     for _attempt in 0..2 {
-        let _ = std::process::Command::new(we_exe)
+        if !is_current_we_generation(generation) { return; }
+        // Completion is the old HWND disappearing, not the control helper exiting.
+        // Waiting for its process serialized extra startup/teardown work before polling.
+        let _close_command = std::process::Command::new(we_exe)
             .args(["-control", "closeWallpaper", "-location", WE_WINDOW_TITLE])
             .creation_flags(CREATE_NO_WINDOW)
-            .status();
+            .spawn();
         for _ in 0..120 {
+            if !is_current_we_generation(generation) { return; }
             if is_gone() {
-                // Let WE release the scene/CEF resources before opening the next one.
-                std::thread::sleep(std::time::Duration::from_millis(300));
+                // Window destruction is the completion condition. The serialized play operation
+                // still prevents overlapping scene replacement; no fixed post-close delay needed.
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(25));
@@ -7914,7 +8281,7 @@ mod we_freeze {
         }
     }
 
-    fn we_pid() -> Option<u32> {
+    pub(super) fn we_pid() -> Option<u32> {
         let snap = snapshot(TH32CS_SNAPPROCESS)?;
         let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
         entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
@@ -8166,6 +8533,10 @@ fn play_we_wallpaper_blocking(
 
     // Invalidate follow-up threads of the previous scene before touching anything.
     let gen = bump_we_generation();
+    let _play_operation = WE_PLAY_OPERATION.lock().unwrap_or_else(|e| e.into_inner());
+    if !is_current_we_generation(gen) { return Ok(false); }
+    #[cfg(target_os = "windows")]
+    wallpaper_capture::pause();
 
     // A frozen previous scene must run again before WE is asked to close it, and no
     // freeze may start while this scene is being opened (see SCENE_BUSY).
@@ -8202,8 +8573,10 @@ fn play_we_wallpaper_blocking(
                 we_win32::ShowWindowAsync(h as we_win32::HWND, we_win32::SW_HIDE);
             }
         }
-        close_we_window_and_wait(&we_exe, old_hwnd);
+        close_we_window_and_wait(&we_exe, old_hwnd, gen);
     }
+
+    if !is_current_we_generation(gen) { return Ok(false); }
 
     *CURRENT_WE_TITLE.lock().unwrap_or_else(|e| e.into_inner()) = WE_WINDOW_TITLE.to_string();
     *CURRENT_WE_PATH.lock().unwrap_or_else(|e| e.into_inner()) = project_path.clone();
@@ -8212,6 +8585,7 @@ fn play_we_wallpaper_blocking(
 
     // Ensure Wallpaper Engine daemon is running first so it can process commands
     ensure_wallpaper_engine_running(&we_exe);
+    if !is_current_we_generation(gen) { return Ok(false); }
 
     #[cfg(target_os = "windows")]
     let app_hwnd = window.hwnd().map_err(|e| e.to_string())?.0 as we_win32::HWND;
@@ -8229,9 +8603,9 @@ fn play_we_wallpaper_blocking(
 
     #[cfg(target_os = "windows")]
     {
-        let found_hwnd = wait_for_we_window(WE_WINDOW_TITLE, old_hwnd);
+        let found_hwnd = wait_for_we_window(WE_WINDOW_TITLE, old_hwnd, gen);
 
-        if !found_hwnd.is_null() {
+        if !found_hwnd.is_null() && is_current_we_generation(gen) {
             set_we_window_hwnd(Some(found_hwnd as isize));
 
             // The underlay window is created here (update_we_geometry_internal) and a
@@ -8246,7 +8620,9 @@ fn play_we_wallpaper_blocking(
             let (tx, rx) = std::sync::mpsc::channel();
             window
                 .run_on_main_thread(move || {
-                    unsafe { finish_we_window_setup(fh as _, ah as _, pf as _) };
+                    if is_current_we_generation(gen) {
+                        unsafe { finish_we_window_setup(fh as _, ah as _, pf as _) };
+                    }
                     let _ = tx.send(());
                 })
                 .map_err(|e| e.to_string())?;
@@ -8265,14 +8641,7 @@ fn play_we_wallpaper_blocking(
                         // time so hovering the taskbar never has to wait for it.
                         spawn_taskbar_preview_refresh(ah as we_win32::HWND);
                     }
-                    let (s, px, py) = get_we_transform();
-                    update_we_geometry_internal(
-                        fh as we_win32::HWND,
-                        ah as we_win32::HWND,
-                        s,
-                        px,
-                        py,
-                    );
+                    queue_we_layout_sync(ah as we_win32::HWND);
                 }
             });
 
@@ -8309,6 +8678,7 @@ unsafe fn finish_we_window_setup(
     // Apply current scale & pan transform with hardware DWM thumbnail scaling
     let (scale, pan_x, pan_y) = get_we_transform();
     update_we_geometry_internal(found_hwnd, app_hwnd, scale, pan_x, pan_y);
+    watch_we_source_geometry(found_hwnd, app_hwnd);
 
     // Taskbar thumbnail: show the scene instead of the transparent launcher.
     set_taskbar_preview_override(app_hwnd, true);
@@ -8449,22 +8819,35 @@ fn sync_we_window_rect(window: tauri::WebviewWindow, visible: bool) -> Result<()
 
 #[tauri::command]
 fn update_we_transform(window: tauri::WebviewWindow, scale: f64, pan_x: f64, pan_y: f64) -> Result<(), String> {
+    if !scale.is_finite() || !pan_x.is_finite() || !pan_y.is_finite()
+        || !(0.4..=4.0).contains(&scale) || pan_x.abs() > 1_000_000.0 || pan_y.abs() > 1_000_000.0 {
+        return Err("Transformación del fondo fuera de los límites válidos".into());
+    }
+    let previous = get_we_transform();
     set_we_transform(scale as f32, pan_x as f32, pan_y as f32);
     #[cfg(target_os = "windows")]
     {
         if let Some(hwnd_val) = get_we_window_hwnd() {
             let app_hwnd = window.hwnd().map(|h| h.0 as we_win32::HWND).unwrap_or(std::ptr::null_mut());
             if !app_hwnd.is_null() {
-                update_we_geometry_internal(
+                let result = update_we_geometry_internal(
                     hwnd_val as we_win32::HWND,
                     app_hwnd,
                     scale as f32,
                     pan_x as f32,
                     pan_y as f32,
                 );
+                if result < 0 {
+                    set_we_transform(previous.0, previous.1, previous.2);
+                    return Err(format!("No se pudo transformar el fondo de Wallpaper Engine (DWM: {result:#x})"));
+                }
+                return Ok(());
             }
         }
+        set_we_transform(previous.0, previous.1, previous.2);
+        return Err("No hay una ventana activa de Wallpaper Engine para transformar".into());
     }
+    #[cfg(not(target_os = "windows"))]
     Ok(())
 }
 
@@ -9348,18 +9731,19 @@ pub struct InstanceDetails {
 #[tauri::command(async)]
 fn get_instance_details(instance_path: String) -> Result<InstanceDetails, String> {
     let dir = instance_root_dir(&instance_path)?;
-    let pack: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("mmc-pack.json")).map_err(|e| e.to_string())?)
-        .map_err(|e| format!("mmc-pack.json inválido: {}", e))?;
-    let comps = pack.get("components").and_then(|c| c.as_array()).cloned().unwrap_or_default();
+    let pack: Option<serde_json::Value> = std::fs::read_to_string(dir.join("mmc-pack.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok());
+    let comps = pack.as_ref().and_then(|p| p.get("components")).and_then(|c| c.as_array()).cloned().unwrap_or_default();
     let comp_version = |c: &serde_json::Value| {
         c.get("version").and_then(|v| v.as_str()).or_else(|| c.get("cachedVersion").and_then(|v| v.as_str())).map(str::to_string)
     };
-    let mc_version = comps
+    let mut mc_version = comps
         .iter()
         .find(|c| c.get("uid").and_then(|u| u.as_str()) == Some("net.minecraft"))
         .and_then(comp_version)
         .unwrap_or_default();
-    let (loader, loader_version) = comps
+    let (mut loader, loader_version) = comps
         .iter()
         .find_map(|c| {
             let uid = c.get("uid").and_then(|u| u.as_str())?;
@@ -9369,6 +9753,18 @@ fn get_instance_details(instance_path: String) -> Result<InstanceDetails, String
 
     let cfg = read_instance_cfg(&dir);
     let get = |k: &str| cfg.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone());
+
+    if mc_version.is_empty() {
+        if let Some(iv) = get("IntendedVersion") {
+            mc_version = iv;
+        }
+    }
+    if loader == "Vanilla" || loader.is_empty() {
+        if let Some(il) = get("IntendedLoader") {
+            loader = canonical_loader_label(&il);
+        }
+    }
+
     let override_java = get("OverrideJavaLocation").map_or(false, |v| v == "true");
     let java_path = get("JavaPath").filter(|p| !p.is_empty() && (override_java || get("OverrideJavaLocation").is_none()));
     let _override_mem = get("OverrideMemory").map_or(false, |v| v == "true");
@@ -9377,10 +9773,70 @@ fn get_instance_details(instance_path: String) -> Result<InstanceDetails, String
     } else {
         String::new()
     };
-    let game_dir = if dir.join(".minecraft").exists() { dir.join(".minecraft") } else { dir.join("minecraft") };
-    let mods_count = std::fs::read_dir(game_dir.join("mods"))
-        .map(|rd| rd.flatten().filter(|e| e.file_name().to_string_lossy().to_lowercase().ends_with(".jar")).count())
-        .unwrap_or(0);
+
+    let mc_mods = dir.join("minecraft").join("mods");
+    let dot_mc_mods = dir.join(".minecraft").join("mods");
+    let root_mods = dir.join("mods");
+
+    let mut mods_dir = if mc_mods.exists() {
+        mc_mods
+    } else if dot_mc_mods.exists() {
+        dot_mc_mods
+    } else if root_mods.exists() {
+        root_mods
+    } else if dir.join(".minecraft").exists() {
+        dot_mc_mods
+    } else {
+        mc_mods
+    };
+
+    if mods_dir.is_dir() {
+        let has_direct_jars = std::fs::read_dir(&mods_dir)
+            .map(|rd| {
+                rd.flatten().any(|e| {
+                    let name = e.file_name().to_string_lossy().to_lowercase();
+                    (name.ends_with(".jar") || name.ends_with(".jar.disabled")) && !name.starts_with('.')
+                })
+            })
+            .unwrap_or(false);
+
+        if !has_direct_jars {
+            if let Ok(entries) = std::fs::read_dir(&mods_dir) {
+                for e in entries.flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        let has_sub_jars = std::fs::read_dir(&p)
+                            .map(|rd| {
+                                rd.flatten().any(|se| {
+                                    let name = se.file_name().to_string_lossy().to_lowercase();
+                                    (name.ends_with(".jar") || name.ends_with(".jar.disabled")) && !name.starts_with('.')
+                                })
+                            })
+                            .unwrap_or(false);
+                        if has_sub_jars {
+                            mods_dir = p;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mods_count = if mods_dir.exists() {
+        std::fs::read_dir(&mods_dir)
+            .map(|rd| {
+                rd.flatten()
+                    .filter(|e| {
+                        let name = e.file_name().to_string_lossy().to_lowercase();
+                        (name.ends_with(".jar") || name.ends_with(".jar.disabled")) && !name.starts_with('.')
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    } else {
+        0
+    };
 
     Ok(InstanceDetails {
         path: dir.to_string_lossy().to_string(),
@@ -9411,6 +9867,7 @@ pub struct InstanceChanges {
     java_path: Option<String>,
     java_runtime: Option<JavaRuntimeChoice>,
     jvm_args: Option<String>,
+    min_mem_mb: Option<u32>,
     max_mem_mb: Option<u32>,
 }
 
@@ -9484,10 +9941,16 @@ fn update_instance(instance_path: String, changes: InstanceChanges) -> Result<St
         set.push(("OverrideJavaArgs", "true".to_string()));
         set.push(("JvmArgs", escape_prism_ini_value(args.trim())));
     }
-    if let Some(max) = changes.max_mem_mb {
+    if changes.min_mem_mb.is_some() || changes.max_mem_mb.is_some() {
+        let current = get_instance_details(instance_path.clone())?;
+        let min = changes.min_mem_mb.or(current.min_mem_mb).unwrap_or(512);
+        let max = changes.max_mem_mb.or(current.max_mem_mb).unwrap_or(8192);
+        if min < 512 || max < 512 || min > max {
+            return Err("La RAM mínima debe ser de al menos 512 MB y no puede superar la RAM máxima.".to_string());
+        }
         set.push(("OverrideMemory", "true".to_string()));
         set.push(("MaxMemAlloc", max.to_string()));
-        set.push(("MinMemAlloc", 512.min(max).to_string()));
+        set.push(("MinMemAlloc", min.to_string()));
     }
 
     edit_instance_cfg(&dir, &set, &remove)?;
@@ -9523,6 +9986,11 @@ async fn create_new_instance(
         let clean_name = name.trim();
         if clean_name.is_empty() {
             return Err("El nombre de la instancia no puede estar vacío.".to_string());
+        }
+        let max = max_mem_mb.unwrap_or(8192);
+        let min = min_mem_mb.unwrap_or(512);
+        if min < 512 || max < 512 || min > max {
+            return Err("La RAM mínima debe ser de al menos 512 MB y no puede superar la RAM máxima.".to_string());
         }
 
         // New instances always go to the launcher's own folder.
@@ -9613,8 +10081,6 @@ async fn create_new_instance(
         if let Some(args) = jvm_args.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
             cfg_content.push_str(&format!("OverrideJavaArgs=true\nJvmArgs={}\n", escape_prism_ini_value(args)));
         }
-        let max = max_mem_mb.unwrap_or(8192);
-        let min = min_mem_mb.unwrap_or(512).min(max);
         cfg_content.push_str(&format!("OverrideMemory=true\nMinMemAlloc={}\nMaxMemAlloc={}\n", min, max));
         let _ = std::fs::write(&cfg_path, cfg_content);
 
@@ -9988,31 +10454,31 @@ fn rtss_exclude_launcher() -> bool {
     false
 }
 
-/// The interface is designed on a 2560×1440 screen at 100%. On any other screen the whole page
-/// is scaled the way a picture would be (the webview's zoom), so everything keeps its place and
-/// its proportions instead of being laid out again for a smaller area: 0.75 on a 1920×1080
-/// screen, 1.5 on a 3840×2160 one at 100%, 1 on that same one at 150%.
+/// One desktop composition at every resolution, independent of Windows DPI.
 const UI_REFERENCE_SCREEN: (f64, f64) = (2560.0, 1440.0);
-/// The zoom the page has now (0: not set yet).
+// Normal bounds are used only while restoring a saved monitor, before maximizing.
+const RESTORE_SIZE: (u32, u32) = (1536, 865);
 static UI_ZOOM: Mutex<f64> = Mutex::new(0.0);
+static MONITOR_SWITCHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Sets the page's zoom for the screen the window is on. Called when the window is created and
-/// whenever it may have changed screen (moved, resized, the screen's scale changed).
 fn apply_ui_zoom(window: &tauri::WebviewWindow) {
+    if window.label() != "main" { return; }
     let Ok(Some(monitor)) = window.current_monitor() else { return };
     let scale = monitor.scale_factor().max(0.1);
     let width = monitor.size().width as f64 / scale;
     let height = monitor.size().height as f64 / scale;
-    // not below 0.6: on a very small screen the text would stop being readable
-    let zoom = (width / UI_REFERENCE_SCREEN.0).min(height / UI_REFERENCE_SCREEN.1).clamp(0.6, 2.5);
-    let zoom = (zoom * 1000.0).round() / 1000.0;
+    let zoom = (width / UI_REFERENCE_SCREEN.0).min(height / UI_REFERENCE_SCREEN.1);
     let mut current = UI_ZOOM.lock().unwrap_or_else(|e| e.into_inner());
-    if (*current - zoom).abs() < 0.0005 {
-        return;
+    if (*current - zoom).abs() < 0.000001 { return; }
+    if window.set_zoom(zoom).is_ok() { *current = zoom; }
+}
+
+fn enforce_maximized(window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    if window.label() == "main" && !MONITOR_SWITCHING.load(std::sync::atomic::Ordering::SeqCst)
+        && !window.is_maximized()? && !window.is_minimized()? {
+        window.maximize()?;
     }
-    if window.set_zoom(zoom).is_ok() {
-        *current = zoom;
-    }
+    Ok(())
 }
 
 pub fn run() {
@@ -10089,16 +10555,13 @@ pub fn run() {
                 // the page lays itself out for that size from the start.
                 #[cfg(target_os = "windows")]
                 if let Ok(h) = main_win.hwnd() {
-                    let had_state = window_state::restore(h.0 as isize);
-                    if had_state || !window_state::has_saved_state() {
-                        let _ = main_win.maximize();
-                    }
+                    ensure_app_subclassed(h.0 as we_win32::HWND);
+                    window_state::restore(h.0 as isize);
                 }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    let _ = main_win.maximize();
+                if let Err(error) = enforce_maximized(&main_win) {
+                    log::warn!("No se pudo fijar el tamaño de la ventana: {error}");
                 }
-                // after the window is back on its screen: the zoom depends on which one it is
+                // Scale the original desktop composition for the selected monitor.
                 apply_ui_zoom(&main_win);
                 if let Some(icon) = app.default_window_icon() {
                     let _ = main_win.set_icon(icon.clone());
@@ -10139,6 +10602,9 @@ pub fn run() {
                 }
                 tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) | tauri::WindowEvent::ScaleFactorChanged { .. } => {
                     if let Some(wv) = window.app_handle().get_webview_window(window.label()) {
+                        if let Err(error) = enforce_maximized(&wv) {
+                            log::warn!("No se pudo mantener el tamaño de la ventana: {error}");
+                        }
                         apply_ui_zoom(&wv);
                     }
                     if WEBVIEW_BACKGROUND_MODE.load(std::sync::atomic::Ordering::SeqCst) {
@@ -10226,9 +10692,6 @@ pub fn run() {
                     if !*focused {
                         save_window_state(window);
                     }
-                    if let Some(wv) = window.app_handle().get_webview_window(window.label()) {
-                        set_webview_focused(&wv, *focused);
-                    }
                     #[cfg(target_os = "windows")]
                     {
                         if let Some(hwnd_val) = get_we_window_hwnd() {
@@ -10288,15 +10751,16 @@ pub fn run() {
             get_all_instances,
             rename_instance,
             get_all_downloaded_wallpapers,
+            wallpaper_preview::get_wallpaper_button_preview,
             pick_wallpaper_file,
             import_wallpaper_file,
             import_wallpaper_from_youtube,
             open_wallpapers_folder,
             delete_downloaded_wallpaper,
             app_window_minimize,
-            app_window_toggle_maximize,
+            app_window_monitors,
+            app_window_select_monitor,
             app_window_close,
-            app_window_start_dragging,
             app_window_show,
             find_wallpaper_engine_exe,
             get_we_preview_path,
@@ -10402,6 +10866,176 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn maximized_policy_blocks_manual_resize_and_preserves_wallpaper_moves() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{WINDOWPOS, WS_MAXIMIZE, WS_POPUP};
+        static BACKGROUND_ATTACHED_BEFORE_MOVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+        unsafe extern "system" fn framework_subclass(
+            hwnd: we_win32::HWND, msg: u32, wparam: usize, lparam: isize,
+            _id: usize, _data: usize,
+        ) -> isize {
+            if msg == 0x0046 && lparam != 0 {
+                let position = &*(lparam as *const WINDOWPOS);
+                if position.flags & we_win32::SWP_NOSIZE != 0 && position.flags & we_win32::SWP_NOMOVE == 0 {
+                    if let Some(background) = get_underlay_hwnd() {
+                        let mut rect = we_win32::RECT::default();
+                        we_win32::GetWindowRect(background as _, &mut rect);
+                        if (rect.left, rect.top) != (position.x + 8, position.y) {
+                            BACKGROUND_ATTACHED_BEFORE_MOVE.store(false, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                }
+            }
+            if msg == 0x0084 { return 12; } // Framework treats the upper edge as HTTOP.
+            if msg == 0x0083 && wparam == 1 {
+                // Simulate the invisible borderless shadow frame retained by Tauri.
+                let frame = &mut *(lparam as *mut windows_sys::Win32::UI::WindowsAndMessaging::NCCALCSIZE_PARAMS);
+                frame.rgrc[0].left += 8;
+                frame.rgrc[0].right -= 8;
+                frame.rgrc[0].bottom -= 9;
+                return 0;
+            }
+            we_win32::DefSubclassProc(hwnd, msg, wparam, lparam)
+        }
+        unsafe {
+            // A hidden native window exercises the real subclass chain without opening UI.
+            let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+            let hwnd = we_win32::CreateWindowExW(0, class.as_ptr(), class.as_ptr(), WS_POPUP,
+                0, 0, RESTORE_SIZE.0 as i32, RESTORE_SIZE.1 as i32,
+                std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut());
+            assert!(!hwnd.is_null());
+            struct HiddenWindow(we_win32::HWND);
+            impl Drop for HiddenWindow {
+                fn drop(&mut self) {
+                    if get_underlay_hwnd() == Some(self.0 as isize) { take_underlay_hwnd(); }
+                    unsafe { we_win32::DestroyWindow(self.0); }
+                }
+            }
+            let _window = HiddenWindow(hwnd);
+            assert_ne!(we_win32::SetWindowSubclass(hwnd, Some(framework_subclass), 1, 0), 0);
+            ensure_app_subclassed(hwnd);
+            assert_eq!(we_win32::SendMessageW(hwnd, 0x0084, 0, 0), 1); // HTCLIENT, not HTTOP.
+            let background = get_or_create_underlay_window(hwnd, 0, 0, 1536, 865);
+            assert!(!background.is_null());
+            let _background = HiddenWindow(background);
+
+            for (width, height) in [(960, 540), (1280, 720), (1920, 1032), (800, 1382)] {
+                assert_ne!(we_win32::SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, width, height,
+                    we_win32::SWP_NOACTIVATE | we_win32::SWP_NOZORDER), 0);
+                let mut client = we_win32::RECT::default();
+                assert_ne!(we_win32::GetClientRect(hwnd, &mut client), 0);
+                assert_eq!((client.right, client.bottom), (width - 16, height - 9));
+            }
+            for (x, y) in [(-1800, 80), (300, -200), (2300, 400), (-500, 100)] {
+                assert_ne!(we_win32::SetWindowPos(hwnd, std::ptr::null_mut(), x, y, 0, 0,
+                    we_win32::SWP_NOSIZE | we_win32::SWP_NOZORDER | we_win32::SWP_NOACTIVATE), 0);
+                let mut rect = we_win32::RECT::default();
+                we_win32::GetWindowRect(background, &mut rect);
+                assert_eq!((rect.left, rect.top), (x + 8, y));
+            }
+            assert!(BACKGROUND_ATTACHED_BEFORE_MOVE.load(std::sync::atomic::Ordering::Relaxed),
+                "background must move inside the native parent transaction, before framework callbacks");
+            // Programmatic monitor moves must keep requested dimensions in either state.
+            let style = we_win32::GetWindowLongPtrW(hwnd, we_win32::GWL_STYLE);
+            we_win32::SetWindowLongPtrW(hwnd, we_win32::GWL_STYLE, style | WS_MAXIMIZE as isize);
+            let mut position: WINDOWPOS = std::mem::zeroed();
+            position.hwnd = hwnd;
+            position.cx = 2560;
+            position.cy = 1382;
+            we_win32::SendMessageW(hwnd, 0x0046, 0, &mut position as *mut _ as isize);
+            assert_eq!((position.cx, position.cy), (2560, 1382));
+            we_win32::SetWindowLongPtrW(hwnd, we_win32::GWL_STYLE, style);
+            we_win32::SendMessageW(hwnd, 0x0046, 0, &mut position as *mut _ as isize);
+            assert_eq!((position.cx, position.cy), (2560, 1382));
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    mod wallpaper_geometry {
+        use super::*;
+
+        #[test]
+        fn old_frames_keep_their_shape_and_cover_every_viewport_edge() {
+            // Old WE surfaces can persist while Snap switches between these viewports.
+            for (sw, sh) in [(1542, 891), (2440, 1320), (1800, 960), (1200, 1600)] {
+                for (dw, dh) in [(2560, 1440), (1920, 1080), (1664, 1013), (1240, 780), (960, 600)] {
+                    let (_, _, width, height) = wallpaper_cover_bounds(sw, sh, dw, dh, 1.0, 0.0, 0.0);
+                    assert!((width / sw as f64 - height / sh as f64).abs() < 1e-9,
+                        "source {sw}x{sh} was stretched for {dw}x{dh}");
+                    let rect = wallpaper_destination_rect(sw, sh, dw, dh, 1.0, 0.0, 0.0);
+                    assert!(rect.left <= 0 && rect.top <= 0 && rect.right >= dw && rect.bottom >= dh,
+                        "uncovered edge for source {sw}x{sh}, viewport {dw}x{dh}: {rect:?}");
+                }
+            }
+        }
+
+        #[test]
+        fn hidden_source_preserves_aspect_ratio_on_either_monitor() {
+            for (x, y) in [(0, 0), (-1920, 0), (2560, -120)] {
+                for (width, height) in [(2560, 1440), (1920, 1080), (1664, 1013), (960, 600)] {
+                    let (sx, sy, sw, sh) = we_source_geometry(x, y, width, height);
+                    assert!(sx >= x + 60 && sy >= y + 60);
+                    assert!(sx + sw as i32 <= x + width as i32 - 60);
+                    assert!(sy + sh as i32 <= y + height as i32 - 60);
+                    // Pixel rounding can cost one source pixel, but cannot squeeze the image.
+                    assert!((sw as f64 / width as f64 - sh as f64 / height as f64).abs()
+                        <= 1.0 / width.min(height) as f64);
+                }
+            }
+        }
+
+        #[test]
+        fn leftward_pan_crops_source_without_moving_the_left_viewport_edge() {
+            for (sw, sh, dw, dh) in [(1536, 864, 1920, 1080), (2337, 1262, 2560, 1382)] {
+                let mut previous_source_left = -1;
+                for pan_x in [0.0, -60.0, -120.0, -240.0] {
+                    let props = wallpaper_thumbnail_properties(sw, sh, dw, dh, 1.5, pan_x, 0.0);
+                    assert_eq!(props.rcDestination.left, 0);
+                    assert_eq!(props.rcDestination.right, dw);
+                    assert!(props.rcSource.left >= previous_source_left);
+                    assert!(props.rcSource.right <= sw);
+                    assert_ne!(props.dwFlags & we_win32::DWM_TNP_RECTSOURCE, 0);
+                    previous_source_left = props.rcSource.left;
+                }
+                // Even beyond the source edge, moving left cannot reveal black on the LEFT.
+                let props = wallpaper_thumbnail_properties(sw, sh, dw, dh, 1.0, -240.0, 0.0);
+                assert_eq!(props.rcDestination.left, 0);
+                assert_eq!(props.rcDestination.right, dw - 240);
+                assert!(props.rcSource.left > 0);
+            }
+        }
+
+        #[test]
+        fn native_pan_clipping_handles_all_directions_and_default_resize_mapping() {
+            for (x, y) in [(-200.0, 0.0), (200.0, 0.0), (0.0, -200.0), (0.0, 200.0)] {
+                let props = wallpaper_thumbnail_properties(1536, 864, 1920, 1080, 1.5, x, y);
+                assert_eq!((props.rcDestination.left, props.rcDestination.top,
+                    props.rcDestination.right, props.rcDestination.bottom), (0, 0, 1920, 1080));
+                assert!(props.rcSource.left >= 0 && props.rcSource.top >= 0);
+                assert!(props.rcSource.right <= 1536 && props.rcSource.bottom <= 864);
+            }
+            let props = wallpaper_thumbnail_properties(1536, 864, 1920, 1080, 1.0, 0.0, 0.0);
+            assert_eq!(props.dwFlags & we_win32::DWM_TNP_RECTSOURCE, 0);
+        }
+
+        #[test]
+        fn cover_keeps_user_zoom_pan_and_snapshot_mapping() {
+            let (left, top, width, height) = wallpaper_cover_bounds(1542, 891, 2560, 1440, 1.5, 37.0, -19.0);
+            assert!((left + width / 2.0 - (1280.0 + 37.0)).abs() < 1e-9);
+            assert!((top + height / 2.0 - (720.0 - 19.0)).abs() < 1e-9);
+            let (_, _, base_w, base_h) = wallpaper_cover_bounds(1542, 891, 2560, 1440, 1.0, 0.0, 0.0);
+            assert!((width - base_w * 1.5).abs() < 1e-9);
+            assert!((height - base_h * 1.5).abs() < 1e-9);
+            let (source, dest) = compute_thumbnail_rects(1542, 891, 2560, 1440, 1.5, 37.0, -19.0);
+            assert_eq!((dest.left, dest.top, dest.right, dest.bottom), (0, 0, 2560, 1440));
+            assert!(source.left >= 0 && source.top >= 0 && source.right <= 1542 && source.bottom <= 891);
+            let scale_x = 2560.0 / (source.right - source.left) as f64;
+            let scale_y = 1440.0 / (source.bottom - source.top) as f64;
+            assert!((scale_x / scale_y - 1.0).abs() < 0.003);
+        }
+    }
 
     #[test]
     fn test_scan_steam_wallpapers() {

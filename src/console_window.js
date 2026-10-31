@@ -103,43 +103,49 @@ function renderStatus(state, detail, runtime) {
   }
 }
 
-function appendLogLine(line) {
-  if (!logContainer) return;
+function appendLogLines(lines) {
+  if (!logContainer || !lines.length) return;
   stopDino();
 
   const emptyHint = logContainer.querySelector(".console-empty-hint");
   if (emptyHint) emptyHint.remove();
 
   const isAtBottom = logContainer.scrollHeight - logContainer.scrollTop - logContainer.clientHeight <= 40;
+  const fragment = document.createDocumentFragment();
 
-  const div = document.createElement("div");
-  const lvl = String(line.level || "INFO").toUpperCase();
-  const sev = lvl === "ERROR" || lvl === "FATAL" ? "error" : lvl === "WARN" ? "warn" : "info";
-  div.className = `hcp-log-line sev-${sev}`;
+  for (const line of lines.slice(-MAX_LINES)) {
+    const div = document.createElement("div");
+    const lvl = String(line.level || "INFO").toUpperCase();
+    const sev = lvl === "ERROR" || lvl === "FATAL" ? "error" : lvl === "WARN" ? "warn" : "info";
+    div.className = `hcp-log-line sev-${sev}`;
 
-  const meta = document.createElement("span");
-  meta.className = "hcp-line-meta";
+    const meta = document.createElement("span");
+    meta.className = "hcp-line-meta";
 
-  if (line.ts) {
-    const time = new Date(line.ts).toTimeString().split(" ")[0];
+    let timeStr = line.ts ? new Date(line.ts).toTimeString().split(" ")[0] : "";
+    const tm = String(line.text || "").match(/^\[(\d{2}:\d{2}:\d{2})\]\s*/);
+    if (tm) timeStr = tm[1];
+    if (!timeStr) timeStr = new Date().toTimeString().split(" ")[0];
+
     const spTime = document.createElement("span");
     spTime.className = "hcp-time";
-    spTime.textContent = time;
+    spTime.textContent = timeStr;
     meta.appendChild(spTime);
+
+    const badge = document.createElement("span");
+    badge.className = `hcp-badge badge-${sev}`;
+    badge.textContent = lvl;
+    meta.appendChild(badge);
+
+    const msg = document.createElement("span");
+    msg.className = "hcp-msg";
+    msg.textContent = line.text || "";
+
+    div.appendChild(meta);
+    div.appendChild(msg);
+    fragment.appendChild(div);
   }
-
-  const badge = document.createElement("span");
-  badge.className = `hcp-badge badge-${sev}`;
-  badge.textContent = lvl;
-  meta.appendChild(badge);
-
-  const msg = document.createElement("span");
-  msg.className = "hcp-msg";
-  msg.textContent = line.text || "";
-
-  div.appendChild(meta);
-  div.appendChild(msg);
-  logContainer.appendChild(div);
+  logContainer.appendChild(fragment);
 
   const extra = logContainer.childElementCount - MAX_LINES;
   for (let i = 0; i < extra; i++) {
@@ -298,23 +304,20 @@ consoleChannel.onmessage = (ev) => {
         startDino();
       } else {
         logContainer.textContent = "";
-        msg.logs.forEach(appendLogLine);
+        appendLogLines(msg.logs);
       }
     }
   } else if (msg.type === "log") {
-    if (msg.line) appendLogLine(msg.line);
+    if (Array.isArray(msg.lines)) appendLogLines(msg.lines);
+    else if (msg.line) appendLogLines([msg.line]);
   } else if (msg.type === "clear") {
     logContainer.textContent = "";
     startDino();
   }
 };
 
-// Also listen to raw Tauri mc-game-log if available
-listen("mc-game-log", (ev) => {
-  const p = ev.payload || {};
-  const lines = Array.isArray(p.lines) ? p.lines : [];
-  lines.forEach((l) => appendLogLine(l));
-}).catch(() => {});
+// Main window forwards mc-game-log batches through this channel. Listening to the
+// raw event here too duplicates every line and all of its layout/scroll work.
 
 // Signal ready to main window
 consoleChannel.postMessage({ type: "ready" });

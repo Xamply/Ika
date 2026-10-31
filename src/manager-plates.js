@@ -4,7 +4,7 @@
 // The plates are drawn here (as layers that are drawn once and then only moved: see buildPlates);
 // the island is drawn by a worker (manager-world.worker.js).
 
-import { onTick } from "./frame-clock.js";
+import { onTickAfterPaint } from "./frame-clock.js";
 
 const NS = "http://www.w3.org/2000/svg";
 function el(tag, attrs, parent) {
@@ -25,6 +25,9 @@ function rng(a) {
 
 /* ===== Configuración: colores, posiciones y tamaño ===== */
 const W = 1000, H = 1000, CX = 500;
+// Waves occupy the front halves of the four plates, including lift/float,
+// antialiasing and four sigma of blur. Do not allocate empty sky/sea pixels.
+const WAVES_TOP = 176, WAVES_HEIGHT = 560;
 const HALF_W = 392; // mitad del ancho de cada placa
 const HALF_H = 96; // mitad del alto (profundidad aparente)
 const SKEW = 0; // 0 = placas simétricas
@@ -86,7 +89,7 @@ out float v_alpha;
 void main() {
   v_at = a_at + a_side * u_half;
   v_alpha = a_alpha;
-  vec2 px = vec2(v_at.x, v_at.y + u_lift) * u_sc;
+  vec2 px = vec2(v_at.x, v_at.y + u_lift - ${WAVES_TOP}.0) * u_sc;
   gl_Position = vec4(px.x / u_size.x * 2.0 - 1.0, 1.0 - px.y / u_size.y * 2.0, 0.0, 1.0);
 }`;
 // Only inside the plate's rhombus (u_plate: its centre), with a soft pixel at its edge.
@@ -184,6 +187,19 @@ function buildPlates(stage) {
       groups[i].push(s);
       return s;
     };
+    // These filters cover a whole rhombus (192 units tall). Reusing fractions
+    // sized for a 96-unit V allocated almost twice the necessary blur height.
+    // Fixed bounds include four sigma, non-scaling strokes at the minimum
+    // 260px stage width, and the lower lip. The mask keeps its original clip.
+    const edgeFilters = {};
+    for (const [n, sd, strokePad] of [[2, 4, 16], [3, 10, 40], [4, 22, 40], [5, 40, 40]]) {
+      const pad = 4 * sd + strokePad;
+      const filterId = `${id}b${n}`;
+      const filter = el("filter", { id: filterId, filterUnits: "userSpaceOnUse",
+        x: L.x - pad, y: B.y - pad, width: R.x - L.x + 2 * pad, height: F.y - B.y + 2 * pad }, defs);
+      el("feGaussianBlur", { stdDeviation: sd }, filter);
+      edgeFilters[n] = `url(#${filterId})`;
+    }
 
     // degradado A: recorre la placa de izquierda a derecha
     const ga = el("linearGradient", { id: id + "A", spreadMethod: "repeat", gradientUnits: "userSpaceOnUse", x1: 0, y1: 0, x2: 100, y2: 100 }, defs);
@@ -199,8 +215,13 @@ function buildPlates(stage) {
     const mg = el("linearGradient", { id: id + "M", gradientUnits: "userSpaceOnUse", x1: 0, y1: B.y - 20, x2: 0, y2: F.y + 20 }, defs);
     // desde la segunda placa, la sombra de la placa de arriba también oscurece los bordes traseros
     (i > 0 ? [[0, 0.22], [0.3, 0.4], [0.48, 0.85], [0.55, 1], [1, 1]] : [[0, 0.35], [0.55, 0.75], [1, 1]]).forEach(([o, a]) => el("stop", { offset: o, "stop-color": "#fff", "stop-opacity": a }, mg));
-    const mask = el("mask", { id: id + "mask", maskUnits: "userSpaceOnUse", x: 0, y: 0, width: W, height: H }, defs);
-    el("rect", { x: 0, y: 0, width: W, height: H, fill: `url(#${id}M)` }, mask);
+    // Match masks to the actual filter regions instead of full-stage surfaces.
+    for (const [suffix, pad] of [["mask", 200], ["edgeMask", 32]]) {
+      const y = Math.max(0, B.y - pad), bottom = Math.min(H, F.y + pad);
+      const bounds = { x: 0, y, width: W, height: bottom - y };
+      const mask = el("mask", { id: id + suffix, maskUnits: "userSpaceOnUse", ...bounds }, defs);
+      el("rect", { ...bounds, fill: `url(#${id}M)` }, mask);
+    }
     const cp = el("clipPath", { id: id + "clip" }, defs);
     el("rect", { x: 0, y: 0, width: 100, height: 100, rx: RADIUS, ry: RADIUS }, cp);
     const cps = el("clipPath", { id: id + "clipS", clipPathUnits: "userSpaceOnUse" }, defs);
@@ -272,19 +293,19 @@ function buildPlates(stage) {
     // ---- halo: the wide glows of the edges ----
     const halo = el("g", { mask: `url(#${id}mask)` }, layer("is-glow"));
     // brillo interior que nace del borde
-    const inner = el("g", { filter: "url(#mgrb3)", opacity: 0.5 }, halo);
+    const inner = el("g", { filter: edgeFilters[3], opacity: 0.5 }, halo);
     el("rect", { x: 0, y: 0, width: 100, height: 100, rx: RADIUS, ry: RADIUS, fill: "none", stroke: `url(#${id}H)`, "stroke-width": 44, "stroke-linejoin": "round", "stroke-linecap": "round", ...ns }, el("g", { transform: M, "clip-path": `url(#${id}clip)` }, inner));
     // halos exteriores, siguen las mismas zonas claras y oscuras
-    rect(el("g", { filter: "url(#mgrb5)", opacity: 0.7 }, halo), { fill: "none", stroke: `url(#${id}H)`, "stroke-width": 18, ...ns });
-    rect(el("g", { filter: "url(#mgrb4)", opacity: 1 }, halo), { fill: "none", stroke: `url(#${id}H)`, "stroke-width": 12, ...ns });
+    rect(el("g", { filter: edgeFilters[5], opacity: 0.7 }, halo), { fill: "none", stroke: `url(#${id}H)`, "stroke-width": 18, ...ns });
+    rect(el("g", { filter: edgeFilters[4], opacity: 1 }, halo), { fill: "none", stroke: `url(#${id}H)`, "stroke-width": 12, ...ns });
 
     // ---- line: the thin lines of the edges ----
-    const edge = el("g", { mask: `url(#${id}mask)` }, layer("is-glow"));
-    rect(el("g", { filter: "url(#mgrb2)", opacity: 1 }, edge), { fill: "none", stroke: `url(#${id}A)`, "stroke-width": 5, ...ns });
-    rect(el("g", { filter: "url(#mgrb2)", opacity: 0.7 }, edge), { fill: "none", stroke: `url(#${id}C)`, "stroke-width": 4, ...ns });
+    const edge = el("g", { mask: `url(#${id}edgeMask)` }, layer("is-glow"));
+    rect(el("g", { filter: edgeFilters[2], opacity: 1 }, edge), { fill: "none", stroke: `url(#${id}A)`, "stroke-width": 5, ...ns });
+    rect(el("g", { filter: edgeFilters[2], opacity: 0.7 }, edge), { fill: "none", stroke: `url(#${id}C)`, "stroke-width": 4, ...ns });
     // canto inferior: segunda línea finita bajo los bordes frontales
     const lip = `M${L.x + 12} ${L.y + 5} L${F.x} ${F.y + 5} L${R.x - 12} ${R.y + 5}`;
-    el("path", { d: lip, fill: "none", stroke: p.glow, "stroke-width": 4, opacity: 0.45, filter: "url(#mgrb2)", "stroke-linejoin": "round", "stroke-linecap": "round" }, edge);
+    el("path", { d: lip, fill: "none", stroke: p.glow, "stroke-width": 4, opacity: 0.45, filter: edgeFilters[2], "stroke-linejoin": "round", "stroke-linecap": "round" }, edge);
     el("path", { d: lip, fill: "none", stroke: p.edge, "stroke-width": 1, opacity: 0.4, "stroke-linejoin": "round", "stroke-linecap": "round" }, edge);
     // líneas nítidas: color variable + reflejo
     rect(edge, { fill: "none", stroke: `url(#${id}A)`, "stroke-width": 2.6, ...ns });
@@ -344,7 +365,7 @@ function buildPlates(stage) {
   const hexA = (hex, a) => `rgba(${parseInt(hex.slice(1, 3), 16)},${parseInt(hex.slice(3, 5), 16)},${parseInt(hex.slice(5, 7), 16)},${a})`;
   WAVES.forEach((w) => w.stops.forEach((st) => (st.rgba = hexA(st.color, st.a))));
   const wavePts = (w, t) => {
-    const N = 300, out = new Float32Array((N + 1) * 2);
+    const N = 300, out = w.points || (w.points = new Float32Array((N + 1) * 2));
     for (let j = 0; j <= N; j++) {
       const u = j / N, a = u < 0.5 ? w.L : w.F, b = u < 0.5 ? w.F : w.R, v = u < 0.5 ? u * 2 : (u - 0.5) * 2;
       const x = a.x + (b.x - a.x) * v, y = a.y + (b.y - a.y) * v;
@@ -408,10 +429,10 @@ function buildPlates(stage) {
         plateNow = w.i;
         const clip = new Path2D(`M${w.L.x} ${w.L.y}L${w.B.x} ${w.B.y}L${w.R.x} ${w.R.y}L${w.F.x} ${w.F.y}Z`); // solo dentro de la placa
         glowX.save();
-        glowX.setTransform(sc / 2, 0, 0, sc / 2, 0, (oy * sc) / 2);
+        glowX.setTransform(sc / 2, 0, 0, sc / 2, 0, ((oy - WAVES_TOP) * sc) / 2);
         glowX.clip(clip);
         coreX.save();
-        coreX.setTransform(sc, 0, 0, sc, 0, oy * sc);
+        coreX.setTransform(sc, 0, 0, sc, 0, (oy - WAVES_TOP) * sc);
         coreX.clip(clip);
       }
       const pts = wavePts(w, t), path = new Path2D();
@@ -635,6 +656,8 @@ export function createPlatesScene(stage, canvas) {
   const plates = buildPlates(stage);
   const newWavesCanvas = () => {
     const c = Object.assign(document.createElement("canvas"), { className: "mgr-plates-waves" });
+    c.style.top = `${WAVES_TOP / H * 100}%`;
+    c.style.height = `${WAVES_HEIGHT / H * 100}%`;
     c.setAttribute("aria-hidden", "true");
     stage.appendChild(c);
     return c;
@@ -655,7 +678,7 @@ export function createPlatesScene(stage, canvas) {
   const sizeWaves = () => {
     const r = stage.getBoundingClientRect(), pr = Math.min(devicePixelRatio || 1, 1.5);
     if (r.width > 0) plates.setUnit(r.width / W);
-    const w = Math.max(2, Math.round(r.width * pr)), h = Math.max(2, Math.round(r.height * pr));
+    const w = Math.max(2, Math.round(r.width * pr)), h = Math.max(2, Math.round(r.height * pr * WAVES_HEIGHT / H));
     if (wavesCanvas.width !== w || wavesCanvas.height !== h) {
       wavesCanvas.width = w;
       wavesCanvas.height = h;
@@ -706,12 +729,15 @@ export function createPlatesScene(stage, canvas) {
     try { shown = canvas.getContext("bitmaprenderer"); } catch (_) { shown = null; }
     const offscreen = shown ? null : canvas.transferControlToOffscreen();
     const worker = new Worker(new URL("./manager-world.worker.js", import.meta.url));
-    let ready = false, lastLayout = "";
+    let ready = false, drawing = false, lastLayout = "";
     worker.onmessage = ({ data }) => {
       if (data.type === "frame") {
+        drawing = false;
         nextBitmap?.close();
         nextBitmap = data.bitmap;
         if (!running) showWorldFrame(); // a repaint after a resize while the scene is still
+      } else if (data.type === "drawn") {
+        drawing = false;
       } else if (data.type === "ready") {
         ready = true;
         canvas.classList.add("is-ready");
@@ -734,7 +760,12 @@ export function createPlatesScene(stage, canvas) {
         worker.postMessage({ type: "layout", layout: next });
       },
       draw(t) {
-        if (ready) worker.postMessage({ type: "draw", t });
+        // Slow GPUs must not build a queue of stale frames. Next tick supplies
+        // current time once the worker has finished its one outstanding draw.
+        if (ready && !drawing) {
+          drawing = true;
+          worker.postMessage({ type: "draw", t });
+        }
       },
     };
   } catch (err) {
@@ -771,9 +802,10 @@ export function createPlatesScene(stage, canvas) {
     start() {
       if (running) return;
       running = true;
-      world?.resize();
+      // ResizeObserver owns geometry updates, including changes made while
+      // parked. Measuring here forces section layout again on every return.
       if (reduce) request();
-      else untick = onTick(frame);
+      else untick = onTickAfterPaint(frame);
     },
     stop() {
       running = false;

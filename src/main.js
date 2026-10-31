@@ -1,8 +1,16 @@
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { createButtonPreviewCache } from "./button-video-preview.js";
+import { installMonitorPicker } from "./monitor-picker.js";
+import { installHomeInstancesAutohide } from "./home-instances-autohide.js";
+import { decodeSnapshotBitmap } from "./snapshot-bitmap.js";
 import { listen } from "@tauri-apps/api/event";
 import { createKeoStage } from "./comparador-keo.js";
 import { createPlatesScene, PLATES, BASE_Y } from "./manager-plates.js";
 import { onTick } from "./frame-clock.js";
+import { startLatestFrameLoop } from "./latest-frame-loop.js";
+import { startVideoFrameLoop } from "./video-frame-loop.js";
+import { normalizeWallpaperTransform } from "./wallpaper-transform.js";
+import { fitHomePosition, HOME_REFERENCE_VIEWPORT } from "./home-layout.js";
 import { crtOpen, crtClose, installCrtModals, WINDOW_ANIMS, getWindowAnim, setWindowAnim } from "./crt-fx.js";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
@@ -18,6 +26,23 @@ initI18n();
 import modrinthLogo from "./assets/modrinth.png";
 import curseforgeLogo from "./assets/curseforge.png";
 import { DINO_SPRITE_B64 } from "./dino_assets.js";
+import { createVisibleTaskQueue } from "./visible-tasks.js";
+
+// Share disk work across sections without retaining stale scan results.
+const instanceScansInFlight = new Map();
+function scanInstanceDirectory(path, fresh = false) {
+  if (typeof path !== "string" || !path.trim()) return Promise.reject(new Error("Ruta de mods vacía"));
+  const pending = instanceScansInFlight.get(path);
+  if (pending) {
+    if (fresh) return pending.then(() => scanInstanceDirectory(path), () => scanInstanceDirectory(path));
+    return pending;
+  }
+  const request = invoke("scan_directory", { path }).finally(() => {
+    if (instanceScansInFlight.get(path) === request) instanceScansInFlight.delete(path);
+  });
+  instanceScansInFlight.set(path, request);
+  return request;
+}
 
 // Application State
 const state = {
@@ -129,7 +154,6 @@ const el = {
   // Create Instance
   btnCreateInstancePill: document.getElementById("btn-create-instance-pill"),
   modalCreateInstance: document.getElementById("modal-create-instance"),
-  btnCloseModalCreateInst: document.getElementById("btn-close-modal-create-inst"),
   btnCancelCreateInst: document.getElementById("btn-cancel-create-inst"),
   formCreateInstance: document.getElementById("form-create-instance"),
   inputNewInstName: document.getElementById("input-new-inst-name"),
@@ -989,6 +1013,11 @@ function makeDraggable(element, handle, options = {}) {
 
     const currentLeft = elemRect.left - containerRect.left;
     const currentTop = elemRect.top - containerRect.top;
+    // Bounds stay fixed during this drag; reading sizes after every left/top write forced layout.
+    const cWidth = container.clientWidth || window.innerWidth;
+    const cHeight = container.clientHeight || window.innerHeight;
+    const eWidth = element.offsetWidth;
+    const eHeight = element.offsetHeight;
 
     startX = e.clientX;
     startY = e.clientY;
@@ -1023,11 +1052,6 @@ function makeDraggable(element, handle, options = {}) {
       let newLeft = initialLeft + dx;
       let newTop = initialTop + dy;
 
-      const cWidth = container.clientWidth || window.innerWidth;
-      const cHeight = container.clientHeight || window.innerHeight;
-      const eWidth = element.offsetWidth;
-      const eHeight = element.offsetHeight;
-
       const topBarHeight = 60; // Minimum Y to avoid custom titlebar (52px + 8px margin)
       const bottomBarHeight = 168; // Minimum margin to avoid bottom cyber play dock (150px + margin)
 
@@ -1043,13 +1067,7 @@ function makeDraggable(element, handle, options = {}) {
 
       element.style.left = `${newLeft}px`;
       element.style.top = `${newTop}px`;
-      const blurBg = element.querySelector(".hcp-we-blur-bg");
-      if (blurBg) {
-        const clientX = containerRect.left + newLeft;
-        const clientY = containerRect.top + newTop;
-        blurBg.style.setProperty("--dock-x", `${Math.round(clientX)}px`);
-        blurBg.style.setProperty("--dock-y", `${Math.round(clientY)}px`);
-      }
+      queueLiveGlassAlignment();
       if (isCyberWin || element.classList.contains("is-minimized")) {
         updateEdgePanelsDragOver(ev.clientX, ev.clientY);
       }
@@ -1085,12 +1103,7 @@ function makeDraggable(element, handle, options = {}) {
         }
         if (isCyberWin) saveWindowsLayout();
       }
-      const blurBg = element.querySelector(".hcp-we-blur-bg");
-      if (blurBg) {
-        const finalRect = element.getBoundingClientRect();
-        blurBg.style.setProperty("--dock-x", `${Math.round(finalRect.left)}px`);
-        blurBg.style.setProperty("--dock-y", `${Math.round(finalRect.top)}px`);
-      }
+      queueLiveGlassAlignment();
       try {
         captureTarget.releasePointerCapture(ev.pointerId);
       } catch (_) {}
@@ -1359,12 +1372,7 @@ function makeResizable(element, options = {}) {
         if (dir.includes("w")) element.style.left = `${newLeft}px`;
         if (dir.includes("n")) element.style.top = `${newTop}px`;
 
-        const blurBg = element.querySelector(".hcp-we-blur-bg");
-        if (blurBg) {
-          const rect = element.getBoundingClientRect();
-          blurBg.style.setProperty("--dock-x", `${Math.round(rect.left)}px`);
-          blurBg.style.setProperty("--dock-y", `${Math.round(rect.top)}px`);
-        }
+        queueLiveGlassAlignment();
 
         element.dataset.openWidth = `${newWidth}`;
         element.dataset.openHeight = `${newHeight}`;
@@ -1511,11 +1519,13 @@ function refitCyberWindows() {
   cyberWindowHomes.forEach((home, id) => {
     const dock = document.getElementById(id);
     if (!dock || dock.classList.contains("is-docked-in-panel")) return;
+    if (!dock.offsetWidth) return; // defer hidden-section geometry until it is shown
     if (dock.classList.contains("is-dragging") || dock.classList.contains("is-holding-minimized") || dock.classList.contains("is-falling-physics")) return;
     if (!isCyberWindowAt(dock, home)) return; // moved since: it stays where it is
-    const width = parseFloat(dock.dataset.openWidth) || dock.offsetWidth;
-    const height = parseFloat(dock.dataset.openHeight) || dock.offsetHeight;
-    const pos = clampCyberWindowPosition(home.left, home.top, width, height);
+    const minimized = dock.classList.contains("is-minimized");
+    const width = minimized ? parseFloat(dock.dataset.openWidth) : dock.offsetWidth;
+    const height = minimized ? parseFloat(dock.dataset.openHeight) : dock.offsetHeight;
+    const pos = fitHomePosition(home, { width: innerWidth, height: innerHeight }, { width, height }, 168);
     home.shownLeft = pos.left;
     home.shownTop = pos.top;
     dock.dataset.openLeft = `${pos.left}`;
@@ -1560,7 +1570,7 @@ function saveWindowsLayout() {
         top = `${home.top}px`;
       } else if (!isNaN(parseFloat(left)) && !isNaN(parseFloat(top))) {
         const cur = { left: parseFloat(left), top: parseFloat(top) };
-        cyberWindowHomes.set(id, { left: cur.left, top: cur.top, shownLeft: cur.left, shownTop: cur.top });
+        cyberWindowHomes.set(id, { left: cur.left, top: cur.top, shownLeft: cur.left, shownTop: cur.top, viewportWidth: innerWidth, viewportHeight: innerHeight, width: dock.offsetWidth, height: dock.offsetHeight });
       }
     }
 
@@ -1568,6 +1578,10 @@ function saveWindowsLayout() {
     const customFH = dock.dataset.customFloatingHeight || (!isMin && !isDocked ? height : dock.dataset.openHeight);
 
     layout[id] = {
+      viewportWidth: cyberWindowHomes.get(id)?.viewportWidth || HOME_REFERENCE_VIEWPORT.viewportWidth,
+      viewportHeight: cyberWindowHomes.get(id)?.viewportHeight || HOME_REFERENCE_VIEWPORT.viewportHeight,
+      positionWidth: cyberWindowHomes.get(id)?.width || parseFloat(customFW),
+      positionHeight: cyberWindowHomes.get(id)?.height || parseFloat(customFH),
       left,
       top,
       width,
@@ -1616,7 +1630,7 @@ function restoreWindowsLayout() {
       if (isNaN(l)) l = 28;
       if (isNaN(t)) t = 60;
 
-      const home = { left: l, top: t };
+      const home = { left: l, top: t, viewportWidth: conf.viewportWidth, viewportHeight: conf.viewportHeight, width: conf.positionWidth || w, height: conf.positionHeight || h };
       ({ left: l, top: t } = clampCyberWindowPosition(l, t, w, h));
       if (conf.isDockedInPanel && conf.dockedSide) cyberWindowHomes.delete(id);
       else cyberWindowHomes.set(id, { ...home, shownLeft: l, shownTop: t });
@@ -1675,6 +1689,7 @@ function restoreWindowsLayout() {
   restoringWindowsLayout = false;
   placeDockedWelcome?.();
   placeDockedPixelClock?.();
+  requestAnimationFrame(refitCyberWindows);
 }
 
 let refitCyberWindowsFrame = 0;
@@ -3202,7 +3217,14 @@ function syncEdgePanelsHeight() {
   const bottomOffset = Math.max(0, Math.round(window.innerHeight - hairlineScreenY));
 
   if (bottomOffset > 0) {
-    document.documentElement.style.setProperty("--cyber-hairline-bottom", `${bottomOffset}px`);
+    const style = document.documentElement.style;
+    const setIfChanged = (name, value) => {
+      if (style.getPropertyValue(name) !== value) style.setProperty(name, value);
+    };
+    setIfChanged("--cyber-hairline-bottom", `${bottomOffset}px`);
+    // Match the original overlap of the card glow and dock rather than reserving
+    // the maximized dock's fixed 180px beneath a much smaller windowed dock.
+    if (rect.height > 0) setIfChanged("--home-dock-clearance", `${Math.max(0, Math.round(innerHeight - rect.top - 16))}px`);
   }
 }
 
@@ -3801,7 +3823,6 @@ function init() {
   const btnMin = document.getElementById("titlebar-btn-minimize");
   const btnMax = document.getElementById("titlebar-btn-maximize");
   const btnClose = document.getElementById("titlebar-btn-close");
-  const titlebar = document.getElementById("custom-titlebar");
 
   if (btnMin) {
     btnMin.addEventListener("click", async () => {
@@ -3815,21 +3836,8 @@ function init() {
       invoke("app_window_minimize").catch(() => {});
     });
   }
-  if (btnMax) btnMax.addEventListener("click", () => invoke("app_window_toggle_maximize").catch(() => {}));
+  if (btnMax) installMonitorPicker(btnMax, invoke);
   if (btnClose) btnClose.addEventListener("click", () => invoke("app_window_close").catch(() => {}));
-
-  if (titlebar) {
-    titlebar.addEventListener("mousedown", (e) => {
-      if (e.target.closest(".titlebar-btn") || e.target.closest("button") || e.target.closest("input")) return;
-      if (e.button === 0) {
-        invoke("app_window_start_dragging").catch(() => {});
-      }
-    });
-    titlebar.addEventListener("dblclick", (e) => {
-      if (e.target.closest(".titlebar-btn") || e.target.closest("button") || e.target.closest("input")) return;
-      invoke("app_window_toggle_maximize").catch(() => {});
-    });
-  }
 
   el.btnSelect1.addEventListener("click", () => handleSelectFolder(1));
   el.btnSelect2.addEventListener("click", () => handleSelectFolder(2));
@@ -3869,16 +3877,13 @@ function init() {
   // Tab switcher
   el.viewSwitcher.querySelectorAll(".view-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
-      el.viewSwitcher.querySelectorAll(".view-btn").forEach((b) => b.classList.remove("active"));
-      btn.classList.add("active");
-      updateViewSwitcherGlider(btn);
+      if (btn.classList?.contains("active")) return;
       switchView(btn.dataset.view);
     });
   });
-  initHoverPrewarm();
   initHexIconBounce();
   // Every window opens and closes like a CRT tube (Wallpapers and Exportar handle theirs).
-  installCrtModals({ exclude: ["modal-wallpapers", "modal-share"] });
+  installCrtModals({ exclude: ["modal-wallpapers", "modal-share", "modal-monitor-picker"] });
   window.addEventListener("resize", () => updateViewSwitcherGlider());
   requestAnimationFrame(() => updateViewSwitcherGlider());
   if (document.fonts?.ready) {
@@ -4195,6 +4200,7 @@ function init() {
   initHomeInstanceSwitcher();
   initConsoleTerminal();
   initSettingsModals();
+  installHomeInstancesAutohide();
   switchView(state.currentView);
 
   // Lazy-load comparador directories in idle background to prevent startup freezing
@@ -4291,6 +4297,7 @@ function saveUsersToStorage() {
 // among the windows docked there (called again once those are back, see restoreWindowsLayout).
 let placeDockedWelcome = null;
 let placeDockedPixelClock = null;
+let refitFloatingPixelClock = null;
 
 // The welcome message can be dragged anywhere in Inicio and, like the windows, dropped on an edge
 // panel: there it is one more card of the panel's column (the docked windows can be reordered
@@ -4364,6 +4371,24 @@ function initDraggableWelcomeDock() {
     dock.style.top = `${floatPos.top}px`;
     dock.style.right = "auto";
   }
+  const refitWelcomeDock = () => {
+    if (dockedSide() || !floatPos || dock.classList.contains("is-dragging")) return;
+    const width = dock.offsetWidth || 1;
+    const height = dock.offsetHeight || 1;
+    const left = Math.max(12, Math.min(floatPos.left, window.innerWidth - width - 12));
+    const top = Math.max(64, Math.min(floatPos.top, window.innerHeight - height - 110));
+    if (left !== floatPos.left || top !== floatPos.top) {
+      floatPos = { left, top };
+      dock.style.left = `${left}px`;
+      dock.style.top = `${top}px`;
+      save();
+    }
+  };
+  let welcomeRefitRaf = 0;
+  window.addEventListener("resize", () => {
+    cancelAnimationFrame(welcomeRefitRaf);
+    welcomeRefitRaf = requestAnimationFrame(() => requestAnimationFrame(refitWelcomeDock));
+  }, { passive: true });
   placeDockedWelcome = () => {
     const state = readSaved();
     const zone = state.dockedSide ? zoneOf(state.dockedSide) : null;
@@ -4491,6 +4516,7 @@ function initFloatingPixelClock() {
   let floatPos = null;
 
   let currentClockScale = 1.0;
+  let preferredClockScale = 1.0;
   const initialSaved = readSaved();
   if (typeof initialSaved.scale === "number" && initialSaved.scale >= 0.5 && initialSaved.scale <= 2.5) {
     currentClockScale = initialSaved.scale;
@@ -4500,6 +4526,28 @@ function initFloatingPixelClock() {
       if (!isNaN(s) && s >= 0.5 && s <= 2.5) currentClockScale = s;
     } catch (_) {}
   }
+  preferredClockScale = currentClockScale;
+
+  const refitClockToViewport = () => {
+    if (dockedSide() || clock.classList.contains("is-dragging") || clock.querySelector(".clock-resize-handle.is-resizing")) return;
+    if (!clock.offsetWidth) return;
+    const sizeFit = Math.min(1, (window.innerWidth - 32) / Math.max(1, clock.offsetWidth), (window.innerHeight - 120) / Math.max(1, clock.offsetHeight));
+    const nextScale = Math.max(0.5, preferredClockScale * sizeFit);
+    applyClockScale(nextScale, false, false, true);
+    if (floatPos) {
+      const rect = clock.getBoundingClientRect();
+      const home = { width: rect.width / currentClockScale * preferredClockScale, height: rect.height / currentClockScale * preferredClockScale, ...floatPos };
+      const pos = fitHomePosition(home, { width: innerWidth, height: innerHeight }, rect, 168);
+      clock.style.left = `${pos.left}px`;
+      clock.style.top = `${pos.top}px`;
+    }
+  };
+  let clockRefitRaf = 0;
+  refitFloatingPixelClock = refitClockToViewport;
+  window.addEventListener("resize", () => {
+    cancelAnimationFrame(clockRefitRaf);
+    clockRefitRaf = requestAnimationFrame(() => requestAnimationFrame(refitClockToViewport));
+  }, { passive: true });
 
   function save() {
     const side = dockedSide();
@@ -4507,13 +4555,13 @@ function initFloatingPixelClock() {
       ...(floatPos || {}),
       dockedSide: side,
       dockedIndex: side && clock.parentElement ? Array.from(clock.parentElement.children).indexOf(clock) : -1,
-      scale: currentClockScale,
+      scale: preferredClockScale,
     };
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     } catch (_) {}
     try {
-      localStorage.setItem("ika_clock_scale", currentClockScale.toString());
+      localStorage.setItem("ika_clock_scale", preferredClockScale.toString());
     } catch (_) {}
     saveHomeLayoutFile();
   }
@@ -4557,16 +4605,16 @@ function initFloatingPixelClock() {
     // If coordinates were saved outside viewport, reset to safe position
     let left = saved.left;
     let top = saved.top;
-    if (left < 10 || left > (window.innerWidth || 1920) - 100 || top < 20 || top > (window.innerHeight || 1080) - 100) {
+    if (!Number.isFinite(left) || !Number.isFinite(top) || left < 0 || top < 0) {
       left = 229;
       top = 134;
     }
-    floatPos = { left, top };
+    floatPos = { left, top, viewportWidth: saved.viewportWidth, viewportHeight: saved.viewportHeight, ...(saved.width ? { width: saved.width, height: saved.height } : {}) };
     clock.style.left = `${floatPos.left}px`;
     clock.style.top = `${floatPos.top}px`;
     clock.style.right = "auto";
   } else {
-    floatPos = { left: 229, top: 134 };
+    floatPos = { left: 229, top: 134, viewportWidth: innerWidth, viewportHeight: innerHeight };
     clock.style.left = "229px";
     clock.style.top = "134px";
     clock.style.right = "auto";
@@ -4862,7 +4910,10 @@ function initFloatingPixelClock() {
         } else {
           const curLeft = parseInt(clock.style.left, 10);
           const curTop = parseInt(clock.style.top, 10);
-          if (!isNaN(curLeft) && !isNaN(curTop)) floatPos = { left: curLeft, top: curTop };
+          if (!isNaN(curLeft) && !isNaN(curTop)) {
+            const rect = clock.getBoundingClientRect();
+            floatPos = { left: curLeft, top: curTop, viewportWidth: innerWidth, viewportHeight: innerHeight, width: rect.width, height: rect.height };
+          }
         }
       }
       save();
@@ -4880,8 +4931,9 @@ function initFloatingPixelClock() {
   const clockScaleVal = document.getElementById("setting-ui-clock-scale-val");
   const btnResetClockScale = document.getElementById("btn-reset-clock-scale");
 
-  function applyClockScale(scale, saveToStorage = true, clampViewport = false) {
+  function applyClockScale(scale, saveToStorage = true, clampViewport = false, preservePreferred = false) {
     currentClockScale = Math.round(Math.max(0.5, Math.min(2.5, scale)) * 100) / 100;
+    if (!preservePreferred) preferredClockScale = currentClockScale;
     clock.style.setProperty("--clock-scale", currentClockScale);
     const innerEl = clock.querySelector(".pixel-clock-inner");
     if (innerEl) {
@@ -4924,6 +4976,7 @@ function initFloatingPixelClock() {
 
   // Apply initial scale without moving or clamping
   applyClockScale(currentClockScale, false, false);
+  requestAnimationFrame(() => requestAnimationFrame(refitClockToViewport));
 
   if (clockScaleSlider) {
     clockScaleSlider.addEventListener("input", (e) => {
@@ -5448,6 +5501,18 @@ function openLauncherSettingsModal() {
 
   modal.classList.remove("hidden", "is-closing");
   modal.classList.add("is-opening");
+  if (modalBox) {
+    // Saved desktop coordinates are preferences, not permission to open offscreen.
+    // Clamp only the displayed window; keep the saved desktop arrangement intact.
+    const width = modalBox.offsetWidth;
+    const height = modalBox.offsetHeight;
+    const left = parseFloat(modalBox.style.left);
+    const top = parseFloat(modalBox.style.top);
+    if (Number.isFinite(left) && Number.isFinite(top)) {
+      modalBox.style.left = `${Math.max(16, Math.min(left, innerWidth - width - 16))}px`;
+      modalBox.style.top = `${Math.max(90, Math.min(top, innerHeight - height - 146))}px`;
+    }
+  }
   void modal.offsetWidth;
 }
 
@@ -5710,20 +5775,6 @@ function initSettingsModals() {
   };
 
   const modalBoxEl = modalLauncher ? (document.getElementById("modal-settings-box") || modalLauncher.querySelector(".modal-settings-box")) : null;
-  let modalCurrentX = parseFloat(localStorage.getItem("ika_pref_pos_x") || "0") || 0;
-  let modalCurrentY = parseFloat(localStorage.getItem("ika_pref_pos_y") || "0") || 0;
-  let modalHasBeenDragged = false;
-
-  function setModalBoxPosition(x, y, animate = false) {
-    if (!modalBoxEl) return;
-    modalCurrentX = x;
-    modalCurrentY = y;
-    if (animate) {
-      modalBoxEl.style.transition = "transform 0.35s cubic-bezier(0.16, 1, 0.3, 1)";
-      setTimeout(() => { if (modalBoxEl) modalBoxEl.style.transition = ""; }, 350);
-    }
-    modalBoxEl.style.transform = `translate(${x}px, ${y}px)`;
-  }
 
   // Draggable settings modal window
   if (modalBoxEl) {
@@ -5732,6 +5783,18 @@ function initSettingsModals() {
     let startMouseY = 0;
     let startBoxX = 0;
     let startBoxY = 0;
+    let maxLeft = 6;
+    let maxTop = 6;
+    let nextLeft = 0;
+    let nextTop = 0;
+    let dragFrame = 0;
+    let pointerId = null;
+    let savedUserSelect = "";
+
+    const paintDrag = () => {
+      dragFrame = 0;
+      modalBoxEl.style.translate = `${nextLeft - startBoxX}px ${nextTop - startBoxY}px`;
+    };
 
     const isDraggableTarget = (e) => {
       if (e.target.closest("button, input, select, textarea, a, .profile-avatar-overlay, .profile-avatar-ring, .profile-cover-edit-btn, .theme-card, .profile-account-dropdown")) {
@@ -5740,18 +5803,24 @@ function initSettingsModals() {
       return !!e.target.closest(".modal-drag-grip, .profile-settings-header, .profile-settings-topbar, .settings-subview-nav-bar, .profile-settings-subhero");
     };
 
-    modalBoxEl.addEventListener("mousedown", (e) => {
-      if (e.button !== 0) return;
+    modalBoxEl.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0 || isDragging) return;
       if (!isDraggableTarget(e)) return;
-      isDragging = true;
-      modalHasBeenDragged = true;
-      modalBoxEl.classList.add("is-dragging");
+      e.preventDefault();
+      window.getSelection()?.removeAllRanges();
       startMouseX = e.clientX;
       startMouseY = e.clientY;
 
       const container = modalBoxEl.offsetParent || document.body;
       const containerRect = container.getBoundingClientRect();
       const elemRect = modalBoxEl.getBoundingClientRect();
+      // Read bounds once, before any style writes. Movement only updates a composited translate.
+      maxLeft = Math.max(6, (container.clientWidth || window.innerWidth) - modalBoxEl.offsetWidth - 6);
+      maxTop = Math.max(6, (container.clientHeight || window.innerHeight) - modalBoxEl.offsetHeight - 6);
+      isDragging = true;
+      pointerId = e.pointerId;
+      modalBoxEl.classList.add("is-dragging");
+      try { modalBoxEl.setPointerCapture(pointerId); } catch {}
 
       modalBoxEl.style.position = "absolute";
       modalBoxEl.style.right = "auto";
@@ -5766,43 +5835,44 @@ function initSettingsModals() {
 
       startBoxX = currentLeft;
       startBoxY = currentTop;
+      nextLeft = currentLeft;
+      nextTop = currentTop;
+      savedUserSelect = document.body.style.userSelect;
       document.body.style.userSelect = "none";
     });
 
-    window.addEventListener("mousemove", (e) => {
-      if (!isDragging) return;
+    window.addEventListener("pointermove", (e) => {
+      if (!isDragging || e.pointerId !== pointerId) return;
       const dx = e.clientX - startMouseX;
       const dy = e.clientY - startMouseY;
-      const container = modalBoxEl.offsetParent || document.body;
-      const cWidth = container.clientWidth || window.innerWidth;
-      const cHeight = container.clientHeight || window.innerHeight;
-      const eWidth = modalBoxEl.offsetWidth;
-      const eHeight = modalBoxEl.offsetHeight;
-
-      const minLeft = 6;
-      const maxLeft = Math.max(minLeft, cWidth - eWidth - 6);
-      const minTop = 6;
-      const maxTop = Math.max(minTop, cHeight - eHeight - 6);
-
-      let newLeft = Math.max(minLeft, Math.min(startBoxX + dx, maxLeft));
-      let newTop = Math.max(minTop, Math.min(startBoxY + dy, maxTop));
-
-      modalBoxEl.style.left = `${newLeft}px`;
-      modalBoxEl.style.top = `${newTop}px`;
+      nextLeft = Math.max(6, Math.min(startBoxX + dx, maxLeft));
+      nextTop = Math.max(6, Math.min(startBoxY + dy, maxTop));
+      if (!dragFrame) dragFrame = requestAnimationFrame(paintDrag);
     });
 
-    const stopDragging = () => {
+    const stopDragging = (e) => {
+      if (e?.pointerId != null && e.pointerId !== pointerId) return;
       if (isDragging) {
         isDragging = false;
-        if (modalBoxEl) modalBoxEl.classList.remove("is-dragging");
-        document.body.style.userSelect = "";
-        if (modalBoxEl && modalBoxEl.style.left) {
-          localStorage.setItem("ika_pref_pos_left", modalBoxEl.style.left.replace("px", ""));
-          localStorage.setItem("ika_pref_pos_top", modalBoxEl.style.top.replace("px", ""));
-        }
+        if (dragFrame) cancelAnimationFrame(dragFrame);
+        dragFrame = 0;
+        modalBoxEl.style.left = `${nextLeft}px`;
+        modalBoxEl.style.top = `${nextTop}px`;
+        modalBoxEl.style.translate = "";
+        modalBoxEl.classList.remove("is-dragging");
+        document.body.style.userSelect = savedUserSelect;
+        try { modalBoxEl.releasePointerCapture(pointerId); } catch {}
+        pointerId = null;
+        try {
+          localStorage.setItem("ika_pref_pos_left", String(nextLeft));
+          localStorage.setItem("ika_pref_pos_top", String(nextTop));
+        } catch {}
       }
     };
-    window.addEventListener("mouseup", stopDragging);
+    window.addEventListener("pointerup", stopDragging);
+    window.addEventListener("pointercancel", stopDragging);
+    window.addEventListener("blur", stopDragging);
+    modalBoxEl.addEventListener("lostpointercapture", stopDragging);
   }
 
   let currentAppearanceSec = null;
@@ -6027,19 +6097,18 @@ function initSettingsModals() {
   const applyConsoleBlurEffect = (enabled) => {
     const consoleDock = document.getElementById("home-console-preview-dock");
     const consoleView = document.getElementById("view-consola");
-    const consoleBlurBg = document.getElementById("hcp-we-blur-bg");
     if (consoleDock) consoleDock.classList.toggle("no-blur", !enabled);
     if (consoleView) consoleView.classList.toggle("no-blur", !enabled);
     document.body.classList.toggle("no-console-blur", !enabled);
-    if (consoleBlurBg) {
+    document.querySelectorAll(".hcp-we-blur-bg").forEach((bg) => {
       if (enabled) {
-        consoleBlurBg.style.display = "";
-        consoleBlurBg.style.opacity = document.body.classList.contains("has-we-active") ? "1" : "0";
+        bg.style.display = "";
+        bg.style.opacity = document.body.classList.contains("has-we-active") ? "1" : "0";
       } else {
-        consoleBlurBg.style.opacity = "0";
-        consoleBlurBg.style.display = "none";
+        bg.style.opacity = "0";
+        bg.style.display = "none";
       }
-    }
+    });
     const extrasCb = document.getElementById("setting-extras-console-blur");
     if (extrasCb && extrasCb.checked !== enabled) {
       extrasCb.checked = enabled;
@@ -6260,10 +6329,11 @@ function initSettingsModals() {
 
   function getCoverViewportSize() {
     if (!coverViewport) return { w: 480, h: 180 };
-    const rect = coverViewport.getBoundingClientRect();
     return {
-      w: rect.width || 480,
-      h: rect.height || 180
+      // Use layout dimensions: getBoundingClientRect includes the modal's entrance scale,
+      // which can otherwise make the initial crop smaller than the visible viewport.
+      w: coverViewport.clientWidth || 480,
+      h: coverViewport.clientHeight || 180
     };
   }
 
@@ -7823,317 +7893,11 @@ const ikaThrottle = (() => {
   }, 250);
 })();
 
-// =========================================================
-// TYPING EFFECT in every window: what is typed in a text field pops in letter by letter, like in
-// Exportar. The field's own text is made transparent (its caret, selection and placeholder
-// stay) and the letters are drawn on a layer over it, laid out like the field.
-// =========================================================
-(function initTypingFx() {
-  const SKIP_TYPES = new Set(["password", "number", "range", "checkbox", "radio", "file", "color", "date", "time", "hidden", "submit", "button"]);
-  const attached = new Set();
-  const COPY = ["fontFamily", "fontSize", "fontWeight", "fontStyle", "letterSpacing", "textTransform", "lineHeight", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth", "borderTopStyle", "borderRightStyle", "borderBottomStyle", "borderLeftStyle", "boxSizing"];
 
-  function place(input, layer) {
-    const cs = getComputedStyle(input);
-    for (const k of COPY) layer.style[k] = cs[k];
-    layer.style.borderColor = "transparent";
-    layer.style.left = `${input.offsetLeft}px`;
-    layer.style.top = `${input.offsetTop}px`;
-    layer.style.width = `${input.offsetWidth}px`;
-    layer.style.height = `${input.offsetHeight}px`;
-    layer.style.justifyContent = cs.textAlign === "center" ? "center" : cs.textAlign === "right" || cs.textAlign === "end" ? "flex-end" : "flex-start";
-    layer.style.color = input.dataset.typeColor || "";
-    layer.style.borderRadius = cs.borderRadius;
-  }
 
-  function render(input, layer, prev) {
-    const val = input.value;
-    if (val === prev.value) return;
-    if (!val) layer.textContent = "";
-    else if (val.startsWith(prev.value)) {
-      const added = val.slice(prev.value.length);
-      [...added].forEach((ch, i) => {
-        const span = document.createElement("span");
-        span.className = "share-char-glyph share-char-new";
-        span.textContent = ch === " " ? "\u00A0" : ch;
-        if (added.length > 1) span.style.animationDelay = `${Math.min(i * 18, 120)}ms`;
-        layer.appendChild(span);
-      });
-    } else if (prev.value.startsWith(val)) {
-      for (let i = prev.value.length - val.length; i > 0 && layer.lastChild; i--) layer.removeChild(layer.lastChild);
-    } else {
-      layer.replaceChildren(
-        ...[...val].map((ch, i) => {
-          const span = document.createElement("span");
-          const fresh = i >= prev.value.length || ch !== prev.value[i];
-          span.className = fresh ? "share-char-glyph share-char-new" : "share-char-glyph";
-          span.textContent = ch === " " ? "\u00A0" : ch;
-          if (fresh && val.length > 1) span.style.animationDelay = `${Math.min(i * 18, 120)}ms`;
-          return span;
-        })
-      );
-    }
-    prev.value = val;
-    layer.scrollLeft = input.scrollLeft;
-  }
 
-  function attach(input) {
-    if (attached.has(input) || input.dataset.typeFx === "off" || input.id === "input-share-target-user") return;
-    if (input.tagName !== "INPUT" || SKIP_TYPES.has((input.type || "text").toLowerCase())) return;
-    const parent = input.parentElement;
-    if (!parent) return;
-    attached.add(input);
-    if (getComputedStyle(parent).position === "static") parent.style.position = "relative";
-    const layer = document.createElement("div");
-    layer.className = "ika-type-layer";
-    layer.setAttribute("aria-hidden", "true");
-    input.after(layer);
-    // the letters' color is the field's; the field itself goes transparent over its own caret
-    input.dataset.typeColor = getComputedStyle(input).color;
-    input.style.setProperty("color", "transparent", "important");
-    input.style.setProperty("-webkit-text-fill-color", "transparent", "important");
-    if (!input.style.caretColor) input.style.setProperty("caret-color", input.dataset.typeColor, "important");
-    input.style.setProperty("position", getComputedStyle(input).position === "static" ? "relative" : getComputedStyle(input).position);
-    const prev = { value: "" };
-    const update = () => {
-      place(input, layer);
-      render(input, layer, prev);
-    };
-    input.addEventListener("input", update);
-    input.addEventListener("focus", update);
-    input.addEventListener("scroll", () => (layer.scrollLeft = input.scrollLeft));
-    input._typeFx = update;
-    if (typeof ResizeObserver !== "undefined") new ResizeObserver(() => place(input, layer)).observe(input);
-    update();
-  }
 
-  // fields inside windows, also those added later
-  const scan = (root) => root.querySelectorAll?.(".modal-overlay input").forEach(attach);
-  scan(document);
-  new MutationObserver((records) => {
-    for (const r of records) for (const n of r.addedNodes) if (n.nodeType === 1) n.matches?.(".modal-overlay input") ? attach(n) : scan(n);
-  }).observe(document.body, { childList: true, subtree: true });
 
-  // values set from code (a field emptied after sending) don't fire "input": looked at while
-  // a window is open
-  setInterval(() => {
-    for (const input of attached) {
-      if (!input.isConnected) {
-        attached.delete(input);
-        continue;
-      }
-      if (input.offsetParent) input._typeFx?.();
-    }
-  }, 250);
-})();
-
-// =========================================================
-// TYPING EFFECT in every window: what is typed in a text field pops in letter by letter, like in
-// Exportar. The field's own text is made transparent (its caret, selection and placeholder
-// stay) and the letters are drawn on a layer over it, laid out like the field.
-// =========================================================
-(function initTypingFx() {
-  const SKIP_TYPES = new Set(["password", "number", "range", "checkbox", "radio", "file", "color", "date", "time", "hidden", "submit", "button"]);
-  const attached = new Set();
-  const COPY = ["fontFamily", "fontSize", "fontWeight", "fontStyle", "letterSpacing", "textTransform", "lineHeight", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth", "borderTopStyle", "borderRightStyle", "borderBottomStyle", "borderLeftStyle", "boxSizing"];
-
-  function place(input, layer) {
-    const cs = getComputedStyle(input);
-    for (const k of COPY) layer.style[k] = cs[k];
-    layer.style.borderColor = "transparent";
-    layer.style.left = `${input.offsetLeft}px`;
-    layer.style.top = `${input.offsetTop}px`;
-    layer.style.width = `${input.offsetWidth}px`;
-    layer.style.height = `${input.offsetHeight}px`;
-    layer.style.justifyContent = cs.textAlign === "center" ? "center" : cs.textAlign === "right" || cs.textAlign === "end" ? "flex-end" : "flex-start";
-    layer.style.color = input.dataset.typeColor || "";
-    layer.style.borderRadius = cs.borderRadius;
-  }
-
-  function render(input, layer, prev) {
-    const val = input.value;
-    if (val === prev.value) return;
-    if (!val) layer.textContent = "";
-    else if (val.startsWith(prev.value)) {
-      const added = val.slice(prev.value.length);
-      [...added].forEach((ch, i) => {
-        const span = document.createElement("span");
-        span.className = "share-char-glyph share-char-new";
-        span.textContent = ch === " " ? "\u00A0" : ch;
-        if (added.length > 1) span.style.animationDelay = `${Math.min(i * 18, 120)}ms`;
-        layer.appendChild(span);
-      });
-    } else if (prev.value.startsWith(val)) {
-      for (let i = prev.value.length - val.length; i > 0 && layer.lastChild; i--) layer.removeChild(layer.lastChild);
-    } else {
-      layer.replaceChildren(
-        ...[...val].map((ch, i) => {
-          const span = document.createElement("span");
-          const fresh = i >= prev.value.length || ch !== prev.value[i];
-          span.className = fresh ? "share-char-glyph share-char-new" : "share-char-glyph";
-          span.textContent = ch === " " ? "\u00A0" : ch;
-          if (fresh && val.length > 1) span.style.animationDelay = `${Math.min(i * 18, 120)}ms`;
-          return span;
-        })
-      );
-    }
-    prev.value = val;
-    layer.scrollLeft = input.scrollLeft;
-  }
-
-  function attach(input) {
-    if (attached.has(input) || input.dataset.typeFx === "off" || input.id === "input-share-target-user") return;
-    if (input.tagName !== "INPUT" || SKIP_TYPES.has((input.type || "text").toLowerCase())) return;
-    const parent = input.parentElement;
-    if (!parent) return;
-    attached.add(input);
-    if (getComputedStyle(parent).position === "static") parent.style.position = "relative";
-    const layer = document.createElement("div");
-    layer.className = "ika-type-layer";
-    layer.setAttribute("aria-hidden", "true");
-    input.after(layer);
-    // the letters' color is the field's; the field itself goes transparent over its own caret
-    input.dataset.typeColor = getComputedStyle(input).color;
-    input.style.setProperty("color", "transparent", "important");
-    input.style.setProperty("-webkit-text-fill-color", "transparent", "important");
-    if (!input.style.caretColor) input.style.setProperty("caret-color", input.dataset.typeColor, "important");
-    input.style.setProperty("position", getComputedStyle(input).position === "static" ? "relative" : getComputedStyle(input).position);
-    const prev = { value: "" };
-    const update = () => {
-      place(input, layer);
-      render(input, layer, prev);
-    };
-    input.addEventListener("input", update);
-    input.addEventListener("focus", update);
-    input.addEventListener("scroll", () => (layer.scrollLeft = input.scrollLeft));
-    input._typeFx = update;
-    if (typeof ResizeObserver !== "undefined") new ResizeObserver(() => place(input, layer)).observe(input);
-    update();
-  }
-
-  // fields inside windows, also those added later
-  const scan = (root) => root.querySelectorAll?.(".modal-overlay input").forEach(attach);
-  scan(document);
-  new MutationObserver((records) => {
-    for (const r of records) for (const n of r.addedNodes) if (n.nodeType === 1) n.matches?.(".modal-overlay input") ? attach(n) : scan(n);
-  }).observe(document.body, { childList: true, subtree: true });
-
-  // values set from code (a field emptied after sending) don't fire "input": looked at while
-  // a window is open
-  setInterval(() => {
-    for (const input of attached) {
-      if (!input.isConnected) {
-        attached.delete(input);
-        continue;
-      }
-      if (input.offsetParent) input._typeFx?.();
-    }
-  }, 250);
-})();
-
-// =========================================================
-// TYPING EFFECT in every window: what is typed in a text field pops in letter by letter, like in
-// Exportar. The field's own text is made transparent (its caret, selection and placeholder
-// stay) and the letters are drawn on a layer over it, laid out like the field.
-// =========================================================
-(function initTypingFx() {
-  const SKIP_TYPES = new Set(["password", "number", "range", "checkbox", "radio", "file", "color", "date", "time", "hidden", "submit", "button"]);
-  const attached = new Set();
-  const COPY = ["fontFamily", "fontSize", "fontWeight", "fontStyle", "letterSpacing", "textTransform", "lineHeight", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth", "borderTopStyle", "borderRightStyle", "borderBottomStyle", "borderLeftStyle", "boxSizing"];
-
-  function place(input, layer) {
-    const cs = getComputedStyle(input);
-    for (const k of COPY) layer.style[k] = cs[k];
-    layer.style.borderColor = "transparent";
-    layer.style.left = `${input.offsetLeft}px`;
-    layer.style.top = `${input.offsetTop}px`;
-    layer.style.width = `${input.offsetWidth}px`;
-    layer.style.height = `${input.offsetHeight}px`;
-    layer.style.justifyContent = cs.textAlign === "center" ? "center" : cs.textAlign === "right" || cs.textAlign === "end" ? "flex-end" : "flex-start";
-    layer.style.color = input.dataset.typeColor || "";
-    layer.style.borderRadius = cs.borderRadius;
-  }
-
-  function render(input, layer, prev) {
-    const val = input.value;
-    if (val === prev.value) return;
-    if (!val) layer.textContent = "";
-    else if (val.startsWith(prev.value)) {
-      const added = val.slice(prev.value.length);
-      [...added].forEach((ch, i) => {
-        const span = document.createElement("span");
-        span.className = "share-char-glyph share-char-new";
-        span.textContent = ch === " " ? "\u00A0" : ch;
-        if (added.length > 1) span.style.animationDelay = `${Math.min(i * 18, 120)}ms`;
-        layer.appendChild(span);
-      });
-    } else if (prev.value.startsWith(val)) {
-      for (let i = prev.value.length - val.length; i > 0 && layer.lastChild; i--) layer.removeChild(layer.lastChild);
-    } else {
-      layer.replaceChildren(
-        ...[...val].map((ch, i) => {
-          const span = document.createElement("span");
-          const fresh = i >= prev.value.length || ch !== prev.value[i];
-          span.className = fresh ? "share-char-glyph share-char-new" : "share-char-glyph";
-          span.textContent = ch === " " ? "\u00A0" : ch;
-          if (fresh && val.length > 1) span.style.animationDelay = `${Math.min(i * 18, 120)}ms`;
-          return span;
-        })
-      );
-    }
-    prev.value = val;
-    layer.scrollLeft = input.scrollLeft;
-  }
-
-  function attach(input) {
-    if (attached.has(input) || input.dataset.typeFx === "off" || input.id === "input-share-target-user") return;
-    if (input.tagName !== "INPUT" || SKIP_TYPES.has((input.type || "text").toLowerCase())) return;
-    const parent = input.parentElement;
-    if (!parent) return;
-    attached.add(input);
-    if (getComputedStyle(parent).position === "static") parent.style.position = "relative";
-    const layer = document.createElement("div");
-    layer.className = "ika-type-layer";
-    layer.setAttribute("aria-hidden", "true");
-    input.after(layer);
-    // the letters' color is the field's; the field itself goes transparent over its own caret
-    input.dataset.typeColor = getComputedStyle(input).color;
-    input.style.setProperty("color", "transparent", "important");
-    input.style.setProperty("-webkit-text-fill-color", "transparent", "important");
-    if (!input.style.caretColor) input.style.setProperty("caret-color", input.dataset.typeColor, "important");
-    input.style.setProperty("position", getComputedStyle(input).position === "static" ? "relative" : getComputedStyle(input).position);
-    const prev = { value: "" };
-    const update = () => {
-      place(input, layer);
-      render(input, layer, prev);
-    };
-    input.addEventListener("input", update);
-    input.addEventListener("focus", update);
-    input.addEventListener("scroll", () => (layer.scrollLeft = input.scrollLeft));
-    input._typeFx = update;
-    if (typeof ResizeObserver !== "undefined") new ResizeObserver(() => place(input, layer)).observe(input);
-    update();
-  }
-
-  // fields inside windows, also those added later
-  const scan = (root) => root.querySelectorAll?.(".modal-overlay input").forEach(attach);
-  scan(document);
-  new MutationObserver((records) => {
-    for (const r of records) for (const n of r.addedNodes) if (n.nodeType === 1) n.matches?.(".modal-overlay input") ? attach(n) : scan(n);
-  }).observe(document.body, { childList: true, subtree: true });
-
-  // values set from code (a field emptied after sending) don't fire "input": looked at while
-  // a window is open
-  setInterval(() => {
-    for (const input of attached) {
-      if (!input.isConnected) {
-        attached.delete(input);
-        continue;
-      }
-      if (input.offsetParent) input._typeFx?.();
-    }
-  }, 250);
-})();
 
 // Things appearing: up a little and in, one after another.
 function animateIn(nodes, { y = 14, scale = 0.97, stagger = 45, duration = 460, delay = 0 } = {}) {
@@ -10791,9 +10555,12 @@ async function initHomeInstanceSwitcher() {
   const createInstJavaRec = document.getElementById("create-inst-java-rec");
   const btnJavaBrowse = document.getElementById("btn-java-browse");
   const btnJavaRescan = document.getElementById("btn-java-rescan");
-  const inputCreateInstRam = document.getElementById("input-create-inst-ram");
-  const createInstRamValue = document.getElementById("create-inst-ram-value");
-  const createInstRamMax = document.getElementById("create-inst-ram-max");
+  const inputCreateInstRamMin = document.getElementById("input-create-inst-ram-min");
+  const inputCreateInstRam = document.getElementById("input-create-inst-ram-max");
+  const createInstRamMinValue = document.getElementById("create-inst-ram-min-value");
+  const createInstRamValue = document.getElementById("create-inst-ram-max-value");
+  const createInstRamMinLimit = document.getElementById("create-inst-ram-min-limit");
+  const createInstRamMaxLimit = document.getElementById("create-inst-ram-max-limit");
   const createInstRamHint = document.getElementById("create-inst-ram-hint");
   const inputCreateInstJvmArgs = document.getElementById("input-create-inst-jvm-args");
 
@@ -13305,19 +13072,30 @@ async function initHomeInstanceSwitcher() {
     return `${Number.isInteger(gb) ? gb : gb.toFixed(1)} GB`;
   };
 
-  const updateRamLabel = () => {
-    if (!inputCreateInstRam || !createInstRamValue) return;
-    const mb = parseInt(inputCreateInstRam.value, 10);
-    createInstRamValue.textContent = formatRamMb(mb);
+  const updateRamLabel = (changed = "") => {
+    if (!inputCreateInstRam || !inputCreateInstRamMin || !createInstRamValue || !createInstRamMinValue) return;
+    let minMb = parseInt(inputCreateInstRamMin.value, 10);
+    let maxMb = parseInt(inputCreateInstRam.value, 10);
+    if (changed === "min" && minMb > maxMb) maxMb = minMb;
+    if (changed === "max" && maxMb < minMb) minMb = maxMb;
+    inputCreateInstRamMin.value = String(minMb);
+    inputCreateInstRam.value = String(maxMb);
+    inputCreateInstRamMin.max = String(maxMb);
+    if (createInstRamMinLimit) createInstRamMinLimit.textContent = `Hasta: ${formatRamMb(maxMb)}`;
+    createInstRamMinValue.textContent = formatRamMb(minMb);
+    createInstRamValue.textContent = formatRamMb(maxMb);
     // Warn when leaving less than ~2 GB for the system
-    const tooHigh = systemMemoryMb > 0 && mb > systemMemoryMb - 2048;
+    const tooHigh = systemMemoryMb > 0 && maxMb > systemMemoryMb - 2048;
     createInstRamValue.classList.toggle("is-warn", tooHigh);
-    const pct = ((mb - inputCreateInstRam.min) / (inputCreateInstRam.max - inputCreateInstRam.min)) * 100;
-    inputCreateInstRam.style.setProperty("--ram-pct", `${pct}%`);
+    const pct = (input) => Number(input.max) === Number(input.min)
+      ? 100
+      : ((Number(input.value) - Number(input.min)) / (Number(input.max) - Number(input.min))) * 100;
+    inputCreateInstRamMin.style.setProperty("--ram-pct", `${pct(inputCreateInstRamMin)}%`);
+    inputCreateInstRam.style.setProperty("--ram-pct", `${pct(inputCreateInstRam)}%`);
   };
 
   const initRamSlider = async () => {
-    if (!inputCreateInstRam) return;
+    if (!inputCreateInstRam || !inputCreateInstRamMin) return;
     if (!systemMemoryMb) {
       try {
         systemMemoryMb = await invoke("get_system_memory_mb");
@@ -13326,13 +13104,16 @@ async function initHomeInstanceSwitcher() {
       }
       const maxMb = systemMemoryMb > 0 ? Math.max(2048, Math.floor(systemMemoryMb / 512) * 512) : 16384;
       inputCreateInstRam.max = String(maxMb);
-      if (createInstRamMax) createInstRamMax.textContent = formatRamMb(maxMb);
-      if (createInstRamHint) createInstRamHint.textContent = systemMemoryMb > 0 ? `Sistema: ${formatRamMb(Math.round(systemMemoryMb / 512) * 512)}` : "";
+      inputCreateInstRamMin.max = String(maxMb);
+      if (createInstRamMaxLimit) createInstRamMaxLimit.textContent = formatRamMb(maxMb);
+      if (createInstRamHint) createInstRamHint.textContent = systemMemoryMb > 0 ? `RAM del sistema: ${formatRamMb(Math.round(systemMemoryMb / 512) * 512)}` : "";
     }
+    if (createInstRamMinLimit) createInstRamMinLimit.textContent = `Hasta: ${formatRamMb(Number(inputCreateInstRam.value))}`;
     updateRamLabel();
   };
 
-  if (inputCreateInstRam) inputCreateInstRam.addEventListener("input", updateRamLabel);
+  if (inputCreateInstRamMin) inputCreateInstRamMin.addEventListener("input", () => updateRamLabel("min"));
+  if (inputCreateInstRam) inputCreateInstRam.addEventListener("input", () => updateRamLabel("max"));
 
   const resetCustomJavaSettings = () => {
     selectedJava = null;
@@ -13342,10 +13123,11 @@ async function initHomeInstanceSwitcher() {
     selectedJavaBuildId = null;
     if (checkboxJavaRecommended) checkboxJavaRecommended.checked = true;
     renderJavaSelector();
-    if (inputCreateInstRam) {
+    if (inputCreateInstRam && inputCreateInstRamMin) {
       // Default: 8 GB (8192 MB)
       const def = 8192;
       inputCreateInstRam.value = String(def);
+      inputCreateInstRamMin.value = "512";
       updateRamLabel();
     }
     if (inputCreateInstJvmArgs) {
@@ -13440,13 +13222,14 @@ async function initHomeInstanceSwitcher() {
     }
     if (isClosingCreateInstModal) return;
     isClosingCreateInstModal = true;
+    const box = el.modalCreateInstance.querySelector(".modal-create-inst-modern");
+    box?.classList.remove("has-saved-success");
     el.modalCreateInstance.classList.add("is-closing");
     el.modalCreateInstance.classList.remove("is-opening");
 
-    setTimeout(() => {
+    return new Promise((resolve) => setTimeout(() => {
       el.modalCreateInstance.classList.add("hidden");
       el.modalCreateInstance.classList.remove("is-closing", "has-saved-success");
-      const box = el.modalCreateInstance.querySelector(".modal-create-inst-modern");
       if (box) {
         box.style.left = "";
         box.style.top = "";
@@ -13456,7 +13239,8 @@ async function initHomeInstanceSwitcher() {
       }
       exitInstEditMode();
       isClosingCreateInstModal = false;
-    }, 260);
+      resolve();
+    }, 280));
   };
 
   const openCreateInstModalWithMotion = () => {
@@ -13475,7 +13259,6 @@ async function initHomeInstanceSwitcher() {
     void el.modalCreateInstance.offsetWidth;
   };
 
-  if (el.btnCloseModalCreateInst) el.btnCloseModalCreateInst.addEventListener("click", () => closeCreateInstModal());
   if (el.btnCancelCreateInst) el.btnCancelCreateInst.addEventListener("click", () => closeCreateInstModal());
 
   if (el.modalCreateInstance) {
@@ -13545,7 +13328,7 @@ async function initHomeInstanceSwitcher() {
       openCreateInstModalWithMotion();
 
       if (inputNewInstName) {
-        inputNewInstName.value = "Mi nueva instancia";
+        inputNewInstName.value = "Mi instancia";
         if (createInstCharLimit) createInstCharLimit.textContent = `${inputNewInstName.value.length}/50`;
         setTimeout(() => {
           inputNewInstName.focus();
@@ -13591,7 +13374,8 @@ async function initHomeInstanceSwitcher() {
       mc: currentSelectedMcVersion,
       loader: currentSelectedLoader,
       loaderVersion: currentSelectedLoader === "Vanilla" ? null : currentSelectedLoaderVersion,
-      ram: inputCreateInstRam ? parseInt(inputCreateInstRam.value, 10) : o.ram,
+      minRam: inputCreateInstRamMin ? parseInt(inputCreateInstRamMin.value, 10) : o.minRam,
+      maxRam: inputCreateInstRam ? parseInt(inputCreateInstRam.value, 10) : o.maxRam,
       jvm: (inputCreateInstJvmArgs?.value || "").trim(),
     };
   }
@@ -13620,7 +13404,9 @@ async function initHomeInstanceSwitcher() {
     if (instEditMode.javaTouched && editJavaDiffers(o) && o.javaLabel !== javaTo) {
       out.push({ key: "java", label: "Java", from: o.javaLabel, to: javaTo });
     }
-    if (c.ram !== o.ram) out.push({ key: "ram", label: "RAM", from: formatRamMb(o.ram), to: formatRamMb(c.ram) });
+    if (c.minRam !== o.minRam || c.maxRam !== o.maxRam) {
+      out.push({ key: "ram", label: "RAM (Xms / Xmx)", from: `${formatRamMb(o.minRam)} / ${formatRamMb(o.maxRam)}`, to: `${formatRamMb(c.minRam)} / ${formatRamMb(c.maxRam)}` });
+    }
     if (c.jvm !== o.jvm) out.push({ key: "jvm", label: "Argumentos", from: o.jvm || "(ninguno)", to: c.jvm || "(ninguno)" });
     return out;
   }
@@ -13645,7 +13431,7 @@ async function initHomeInstanceSwitcher() {
         chip = document.createElement("span");
         chip.className = "edit-diff-chip";
         chip.dataset.key = key;
-        if (key === "ram") header.insertBefore(chip, header.querySelector("#create-inst-ram-value"));
+        if (key === "ram") header.insertBefore(chip, header.querySelector("#create-inst-ram-min-value"));
         else if (key === "java") header.after(chip); // its own row under the Java header
         else header.appendChild(chip);
       }
@@ -13663,7 +13449,7 @@ async function initHomeInstanceSwitcher() {
       mc: o.mc,
       loader: editLoaderLabel(o.loader, o.loaderVersion),
       java: o.javaLabel,
-      ram: formatRamMb(o.ram),
+      ram: `${formatRamMb(o.minRam)} / ${formatRamMb(o.maxRam)} (Xms / Xmx)`,
       jvm: o.jvm ? "personalizados" : "ninguno",
     };
     for (const [key, { chip, card }] of Object.entries(instEditMode.chips)) {
@@ -13699,12 +13485,10 @@ async function initHomeInstanceSwitcher() {
           (javaTooOld ? `<span class="edit-summary-warn">Java ${javaMajorNow} no sirve para Minecraft ${currentSelectedMcVersion}: elige Java ${neededJava} o superior</span>` : "");
       }
     }
-    const undo = document.getElementById("btn-edit-inst-undo");
-    if (undo) undo.classList.toggle("is-visible", edits.length > 0);
     if (btnSubmitCreateInst) {
       btnSubmitCreateInst.disabled = edits.length === 0;
       const span = btnSubmitCreateInst.querySelector("span");
-      if (span) span.textContent = edits.length ? `Guardar ${edits.length === 1 ? "cambio" : `${edits.length} cambios`}` : "Guardar cambios";
+      if (span) span.textContent = "Guardar cambios";
     }
   }
 
@@ -13728,9 +13512,9 @@ async function initHomeInstanceSwitcher() {
     el.modalCreateInstance?.classList.remove("is-edit-mode");
     el.modalCreateInstance?.querySelectorAll(".is-edited").forEach((n) => n.classList.remove("is-edited"));
     const title = el.modalCreateInstance?.querySelector(".create-inst-title");
-    const sub = el.modalCreateInstance?.querySelector(".create-inst-sub");
-    if (title) title.textContent = "Crear nueva instancia";
-    if (sub) sub.textContent = "Configura los detalles de tu nueva instancia de Minecraft.";
+    const editName = el.modalCreateInstance?.querySelector("#create-inst-edit-name");
+    if (title) title.textContent = "Crear instancia";
+    if (editName) editName.textContent = "";
     if (btnSubmitCreateInst) btnSubmitCreateInst.disabled = false;
     updateSubmitButtonText();
   }
@@ -13754,8 +13538,9 @@ async function initHomeInstanceSwitcher() {
     selectedJavaMajor = o.javaMajorGuess || getRecommendedJavaMajor();
     javaOnlyRecommended = false;
     if (checkboxJavaRecommended) checkboxJavaRecommended.checked = false;
-    if (inputCreateInstRam) {
-      inputCreateInstRam.value = String(o.ram);
+    if (inputCreateInstRam && inputCreateInstRamMin) {
+      inputCreateInstRamMin.value = String(o.minRam);
+      inputCreateInstRam.value = String(o.maxRam);
       updateRamLabel();
     }
     if (inputCreateInstJvmArgs) inputCreateInstJvmArgs.value = o.jvm;
@@ -13796,7 +13581,8 @@ async function initHomeInstanceSwitcher() {
         mc: d.mc_version,
         loader: d.loader,
         loaderVersion: d.loader_version || null,
-        ram: d.max_mem_mb || 8192,
+        minRam: d.min_mem_mb || 512,
+        maxRam: d.max_mem_mb || 8192,
         jvm: (d.jvm_args || "").trim(),
         javaPath: d.java_path || null,
         javaRuntime: d.java_runtime || null,
@@ -13810,11 +13596,9 @@ async function initHomeInstanceSwitcher() {
     modal.classList.add("is-edit-mode");
     openCreateInstModalWithMotion();
     const title = modal.querySelector(".create-inst-title");
-    const sub = modal.querySelector(".create-inst-sub");
-    if (title) title.textContent = `Editar ${d.name}`;
-    if (sub) {
-      sub.textContent = `Minecraft ${d.mc_version} · ${editLoaderLabel(d.loader, d.loader_version)} · ${d.mods_count} ${d.mods_count === 1 ? "mod" : "mods"}`;
-    }
+    const editName = modal.querySelector("#create-inst-edit-name");
+    if (title) title.textContent = "Editar Instancia";
+    if (editName) editName.textContent = d.name;
     const covers = getCustomInstanceCoversMap();
     const icons = getCustomInstanceIconsMap();
     currentInstCover = covers[d.name] || null;
@@ -13825,27 +13609,18 @@ async function initHomeInstanceSwitcher() {
     applyInstEditOriginal();
     setInstanceType("custom");
     await initRamSlider();
-    if (inputCreateInstRam) {
-      inputCreateInstRam.value = String(instEditMode.original.ram);
+    if (inputCreateInstRam && inputCreateInstRamMin) {
+      inputCreateInstRamMin.value = String(instEditMode.original.minRam);
+      inputCreateInstRam.value = String(instEditMode.original.maxRam);
       updateRamLabel();
       // Mark where the current RAM is on the slider.
       const min = Number(inputCreateInstRam.min), max = Number(inputCreateInstRam.max);
-      inputCreateInstRam.parentElement?.style.setProperty("--ram-orig-pct", `${((instEditMode.original.ram - min) / (max - min)) * 100}%`);
+      inputCreateInstRam.parentElement?.style.setProperty("--ram-orig-pct", `${((instEditMode.original.maxRam - min) / (max - min)) * 100}%`);
     }
     ensureInstEditChips();
     refreshInstEditUi();
   }
   window.ikaOpenEditInstance = openEditInstance;
-
-  document.getElementById("btn-edit-inst-undo")?.addEventListener("click", () => {
-    if (!instEditMode) return;
-    applyInstEditOriginal();
-    renderCreateInstVersionList();
-    renderLoaderSection();
-    renderJavaSelector();
-    refreshInstEditUi();
-    showToast("Cambios deshechos");
-  });
 
   async function submitInstEdit() {
     const edits = computeInstEdits();
@@ -13860,7 +13635,10 @@ async function initHomeInstanceSwitcher() {
         changes.loader = c.loader;
         changes.loaderVersion = c.loaderVersion;
       }
-      if (e.key === "ram") changes.maxMemMb = c.ram;
+      if (e.key === "ram") {
+        changes.minMemMb = c.minRam;
+        changes.maxMemMb = c.maxRam;
+      }
       if (e.key === "jvm") changes.jvmArgs = c.jvm;
       if (e.key === "java") {
         if (selectedJava.path) changes.javaPath = selectedJava.path;
@@ -13883,8 +13661,7 @@ async function initHomeInstanceSwitcher() {
       if (currentInstCover) saveCustomInstanceCover(newName, currentInstCover);
       if (currentInstIcon) saveCustomInstanceIcon(newName, currentInstIcon);
       showToast(`"${newName}" actualizada: ${edits.map((e) => e.label.toLowerCase()).join(", ")}`);
-      await triggerModalVictorySweep(el.modalCreateInstance);
-      closeCreateInstModal();
+      await closeCreateInstModal();
       await reloadAllHomeInstances(newName);
     } catch (err) {
       showToast(`No se pudo guardar: ${err}`);
@@ -13975,7 +13752,7 @@ async function initHomeInstanceSwitcher() {
             progress: null
           });
           // Cerrar modal automáticamente para no bloquear al usuario mientras descarga
-          closeCreateInstModal();
+          await closeCreateInstModal();
           setNotifyPanelOpen(true);
           try {
             unlistenModpackProgress = await listen("modpack-install-progress", (ev) => {
@@ -14000,7 +13777,7 @@ async function initHomeInstanceSwitcher() {
           javaPath,
           javaRuntime,
           jvmArgs: isCustom ? (inputCreateInstJvmArgs?.value || "").trim() || null : null,
-          minMemMb: isCustom ? 512 : null,
+          minMemMb: isCustom && inputCreateInstRamMin ? parseInt(inputCreateInstRamMin.value, 10) : null,
           maxMemMb: isCustom && inputCreateInstRam ? parseInt(inputCreateInstRam.value, 10) : null,
           modpack,
         });
@@ -14019,7 +13796,7 @@ async function initHomeInstanceSwitcher() {
 
         if (!modpack) {
           await triggerModalVictorySweep(el.modalCreateInstance);
-          closeCreateInstModal();
+          await closeCreateInstModal();
         }
         if (modpack && createdInst && typeof createdInst.mod_count === "number") {
           showToast(`¡Modpack "${name}" instalado (${createdInst.mod_count} mods)! ⭐`);
@@ -14663,7 +14440,9 @@ function renderHomeInstanceCarousel() {
     img.alt = displayName;
     img.loading = "eager";
     img.onerror = () => {
-      img.src = COZY_COVERS_POOL[0];
+      img.onerror = null;
+      const fallback = COZY_COVERS_POOL[Math.max(0, homeInstancesAll.indexOf(inst)) % COZY_COVERS_POOL.length];
+      if (coverUrl !== fallback) img.src = fallback;
     };
     coverContainer.appendChild(img);
     contentWrap.appendChild(coverContainer);
@@ -14896,11 +14675,11 @@ function applyActiveHomeInstance(index) {
   localStorage.setItem("modcomparer_path1", inst.mods_path);
   updateConsoleBadge();
   syncPlayButtonLock();
-  logToConsole("INST", `Instancia seleccionada: ${displayName} [${inst.mc_version || "1.20.1"}] - ${count} mods`, "info");
   updateHomeConsolePreview();
   updateInstanceSpecsBar(inst);
   updateColeccionSelectedFooter(inst);
   window.ikaManager?.syncFromHome?.(inst.path);
+  window.ikaConsoleCenter?.refresh?.();
 }
 
 function syncHomeInstanceByPath(instancePath) {
@@ -15349,6 +15128,29 @@ function parseStackTraceLine(str) {
   return null;
 }
 
+// Inserts <wbr> break opportunities after path, package and identifier delimiters (:, /, \, ., -, _)
+// so long tokens (e.g. "minecraft:textures/atlas/blocks.png-atlas") can wrap naturally at punctuation
+// to fill the line completely without leaving large empty spaces, while keeping copied text 100% clean.
+function renderBreakableLogMessage(container, text) {
+  const str = String(text || "");
+  if (!str) return;
+  if (!/[:/\\._\-]/.test(str)) {
+    container.textContent = str;
+    return;
+  }
+  const parts = str.split(/([:/\\._\-]+)/);
+  const frag = document.createDocumentFragment();
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    if (!part) continue;
+    frag.appendChild(document.createTextNode(part));
+    if (i % 2 === 1 && i < parts.length - 1 && parts[i + 1] && !/^\s/.test(parts[i + 1])) {
+      frag.appendChild(document.createElement("wbr"));
+    }
+  }
+  container.appendChild(frag);
+}
+
 // One log entry: dim time, colored level badge, thread in small grey, then the message.
 // Stack traces are rendered cleanly without repeating badges or timestamps on every frame.
 function hcpLineElement(text, level, ts) {
@@ -15359,8 +15161,11 @@ function hcpLineElement(text, level, ts) {
   let time = ts ? new Date(ts).toTimeString().split(" ")[0] : "";
   const tm = rest.match(/^\[(\d{2}:\d{2}:\d{2})\]\s*/);
   if (tm) {
-    if (!time) time = tm[1];
+    time = tm[1];
     rest = rest.slice(tm[0].length);
+  }
+  if (!time) {
+    time = new Date().toTimeString().split(" ")[0];
   }
 
   let thread = "";
@@ -15396,7 +15201,7 @@ function hcpLineElement(text, level, ts) {
 
       const callSpan = document.createElement("span");
       callSpan.className = "hcp-trace-call";
-      callSpan.textContent = trace.call;
+      renderBreakableLogMessage(callSpan, trace.call);
 
       line.append(bullet, atSpan, " ", callSpan);
       if (trace.loc) {
@@ -15476,7 +15281,7 @@ function hcpLineElement(text, level, ts) {
 
   const msg = document.createElement("span");
   msg.className = "hcp-msg";
-  msg.textContent = rest.trimStart();
+  renderBreakableLogMessage(msg, rest.trimStart());
   line.appendChild(msg);
   return line;
 }
@@ -15609,14 +15414,23 @@ function startHcpDinoGame(container) {
   let width = 480;
   let height = 180;
   let dpr = 1;
+  let obstacles = [];
+  let resizePending = false;
 
   function resize() {
+    const previousHeight = height;
     const rect = wrap.getBoundingClientRect();
     width = Math.max(280, Math.floor(rect.width || container.clientWidth || 480));
     height = Math.max(120, Math.floor(rect.height || container.clientHeight || 180));
+    // Obstacles share the dinosaur's ground, including birds at their flight
+    // height. Keep existing obstacles anchored when the panel grows/shrinks.
+    for (const ob of obstacles) ob.y += height - previousHeight;
     dpr = Math.min(window.devicePixelRatio || 1, 2);
-    canvas.width = Math.floor(width * dpr);
-    canvas.height = Math.floor(height * dpr);
+    // Assigning either backing dimension clears the canvas, even if unchanged.
+    const pixelWidth = Math.floor(width * dpr);
+    const pixelHeight = Math.floor(height * dpr);
+    if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
+    if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
     canvas.style.width = `${width}px`;
     canvas.style.height = `${height}px`;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -15657,13 +15471,13 @@ function startHcpDinoGame(container) {
   let isGrounded = true;
   let isDucking = false;
   let isJumpHeld = false;
+  let jumpQueued = false;
   let stepTimer = 0;
   let stepFrame = 0;
   let blinkTimer = 0;
   let isBlinking = false;
   let flashTimer = 0;
 
-  let obstacles = [];
   let nextObstacleDistance = 280;
 
   let clouds = [
@@ -15726,6 +15540,7 @@ function startHcpDinoGame(container) {
     dinoVY = 0;
     isGrounded = true;
     isDucking = false;
+    jumpQueued = false;
     flashTimer = 0;
     stepTimer = 0;
     stepFrame = 0;
@@ -15770,10 +15585,11 @@ function startHcpDinoGame(container) {
   function jump() {
     if (gameState === "idle" || gameState === "gameover") {
       restart();
-      playSound("jump");
-      return;
     }
+    // A press in mid-air is consumed on landing, even if released before then.
+    jumpQueued = true;
     if (isGrounded) {
+      jumpQueued = false;
       isDucking = false;
       dinoVY = JUMP_IMPULSE - Math.min(0.6, (speed - BASE_SPEED) * 0.25);
       isGrounded = false;
@@ -15781,42 +15597,74 @@ function startHcpDinoGame(container) {
     }
   }
 
+  const jumpPointers = new Set();
+  const duckPointers = new Set();
+  const keysPressed = new Set();
+  const syncJumpHeld = () => {
+    isJumpHeld = jumpPointers.size > 0 || ["Space", "ArrowUp", "KeyW"].some((key) => keysPressed.has(key));
+  };
+
   const onPointerDown = (e) => {
+    if (e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
+    if (e.button !== 0 && e.button !== 2) return;
     e.preventDefault();
     queueMicrotask(wake);
-    const rect = canvas.getBoundingClientRect();
-    const yRatio = (e.clientY - rect.top) / Math.max(1, rect.height);
-    if (e.button === 2 || yRatio > 0.65) {
+    wrap.setPointerCapture?.(e.pointerId);
+    if (e.button === 2) {
+      duckPointers.add(e.pointerId);
       isDucking = true;
       if (!isGrounded) {
         dinoVY = Math.max(dinoVY, 5.0);
       }
     } else {
-      isJumpHeld = true;
+      // Primary press jumps everywhere, including the ground at the bottom.
+      jumpPointers.add(e.pointerId);
+      syncJumpHeld();
       jump();
     }
   };
 
-  const onPointerUp = () => {
-    isJumpHeld = false;
+  const onPointerUp = (e) => {
+    const releasedJump = jumpPointers.delete(e.pointerId);
+    const releasedDuck = duckPointers.delete(e.pointerId);
+    if (!releasedJump && !releasedDuck) return;
+    syncJumpHeld();
     queueMicrotask(wake);
-    if (isDucking && !keysPressed.has("ArrowDown") && !keysPressed.has("KeyS")) {
+    if (!duckPointers.size && !keysPressed.has("ArrowDown") && !keysPressed.has("KeyS")) {
       isDucking = false;
     }
-    if (!isGrounded && dinoVY < -2.2) {
+    if (releasedJump && !isJumpHeld && !isGrounded && dinoVY < -2.2) {
       dinoVY = -2.2;
     }
+  };
+
+  const clearInput = () => {
+    jumpPointers.clear();
+    duckPointers.clear();
+    keysPressed.clear();
+    isJumpHeld = false;
+    jumpQueued = false;
+    isDucking = false;
+  };
+  const onPointerCancel = (e) => {
+    if (jumpPointers.has(e.pointerId)) jumpQueued = false;
+    onPointerUp(e);
+  };
+  const onVisibilityChange = () => {
+    if (document.hidden) clearInput();
   };
 
   const onContextMenu = (e) => {
     e.preventDefault();
   };
 
-  const keysPressed = new Set();
-
   const onKeyDown = (e) => {
     if (!hcpDinoActive) return;
-    if (document.activeElement && /input|textarea|select/i.test(document.activeElement.tagName)) {
+    // Ctrl+arrows/wheel belong to wallpaper controls, not to the minigame.
+    // Unrelated keys must not even wake the idle game's animation clock.
+    if (e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
+    if (!["Space", "ArrowUp", "KeyW", "ArrowDown", "KeyS"].includes(e.code)) return;
+    if (document.activeElement && (/input|textarea|select/i.test(document.activeElement.tagName) || document.activeElement.isContentEditable)) {
       return;
     }
     const dock = el.homeConsolePreviewDock;
@@ -15827,7 +15675,7 @@ function startHcpDinoGame(container) {
     if (e.code === "Space" || e.code === "ArrowUp" || e.code === "KeyW") {
       e.preventDefault();
       keysPressed.add(e.code);
-      isJumpHeld = true;
+      syncJumpHeld();
       jump();
     } else if (e.code === "ArrowDown" || e.code === "KeyS") {
       e.preventDefault();
@@ -15841,15 +15689,17 @@ function startHcpDinoGame(container) {
 
   const onKeyUp = (e) => {
     if (!hcpDinoActive) return;
-    keysPressed.delete(e.code);
+    // Still release keys accepted before Ctrl was pressed, but ignore releases
+    // of wallpaper shortcuts that never belonged to this game.
+    if (!keysPressed.delete(e.code)) return;
     queueMicrotask(wake);
     if (e.code === "Space" || e.code === "ArrowUp" || e.code === "KeyW") {
-      isJumpHeld = false;
-      if (!isGrounded && dinoVY < -2.2) {
+      syncJumpHeld();
+      if (!isJumpHeld && !isGrounded && dinoVY < -2.2) {
         dinoVY = -2.2;
       }
     } else if (e.code === "ArrowDown" || e.code === "KeyS") {
-      if (!keysPressed.has("ArrowDown") && !keysPressed.has("KeyS")) {
+      if (!duckPointers.size && !keysPressed.has("ArrowDown") && !keysPressed.has("KeyS")) {
         isDucking = false;
       }
     }
@@ -15857,13 +15707,18 @@ function startHcpDinoGame(container) {
 
   wrap.addEventListener("pointerdown", onPointerDown);
   window.addEventListener("pointerup", onPointerUp);
+  window.addEventListener("pointercancel", onPointerCancel);
+  window.addEventListener("blur", clearInput);
+  document.addEventListener("visibilitychange", onVisibilityChange);
   wrap.addEventListener("contextmenu", onContextMenu);
   window.addEventListener("keydown", onKeyDown);
   window.addEventListener("keyup", onKeyUp);
 
   const ro = new ResizeObserver(() => {
     if (!hcpDinoActive) return;
-    resize();
+    // ResizeObserver runs after rAF: clearing here could display a blank canvas
+    // until the next frame. Resize and repaint together in loop instead.
+    resizePending = true;
     wake();
   });
   ro.observe(wrap);
@@ -15872,6 +15727,9 @@ function startHcpDinoGame(container) {
     stopIdleClock();
     wrap.removeEventListener("pointerdown", onPointerDown);
     window.removeEventListener("pointerup", onPointerUp);
+    window.removeEventListener("pointercancel", onPointerCancel);
+    window.removeEventListener("blur", clearInput);
+    document.removeEventListener("visibilitychange", onVisibilityChange);
     wrap.removeEventListener("contextmenu", onContextMenu);
     window.removeEventListener("keydown", onKeyDown);
     window.removeEventListener("keyup", onKeyUp);
@@ -15937,6 +15795,10 @@ function startHcpDinoGame(container) {
   function loop(timestamp) {
     hcpDinoAnimId = null;
     if (!hcpDinoActive) return;
+    if (resizePending) {
+      resizePending = false;
+      resize();
+    }
 
     if (!lastTime) lastTime = timestamp;
     let deltaMs = timestamp - lastTime;
@@ -15978,6 +15840,7 @@ function startHcpDinoGame(container) {
           dinoY = 0;
           dinoVY = 0;
           isGrounded = true;
+          if (jumpQueued || (isJumpHeld && !isDucking)) jump();
         }
 
         stepTimer += speed * dt;
@@ -16807,14 +16670,16 @@ function startHcpDinoGame(container) {
       ctx.fillText(scoreStr, width - 14, 18);
     }
 
-    // Game Over Overlay (Clean in upper sky, no text on ground)
+    // A sky band below the clouds (roughly y=14..43), independent of panel
+    // height: a tall console must not push the message down to the ground.
     if (gameState === "gameover") {
       ctx.font = "bold 15px 'Silkscreen', 'Press Start 2P', monospace";
       ctx.textAlign = "center";
       ctx.fillStyle = "#ff2a85";
       ctx.shadowColor = "rgba(255, 42, 133, 0.7)";
       ctx.shadowBlur = 10;
-      ctx.fillText("G A M E   O V E R", width / 2, Math.max(34, groundY - 60));
+      const gameOverY = Math.round(Math.min(96, Math.max(64, groundY * 0.4)));
+      ctx.fillText("G A M E   O V E R", width / 2, gameOverY);
       ctx.shadowBlur = 0;
     }
 
@@ -17379,11 +17244,15 @@ function initServidoresViewEvents() {
   });
 }
 
+let renderedServersKey = null;
 function renderServersView() {
   initServidoresViewEvents();
   if (!el.servidoresCardsGrid) return;
   const servers = getServersList();
   const q = (el.inputSearchServers?.value || "").toLowerCase().trim();
+  const key = JSON.stringify([servers, q, srvCurrentCategoryFilter]);
+  if (renderedServersKey === key) return;
+  renderedServersKey = key;
 
   const filtered = servers.filter((s) => {
     // Text search query
@@ -17750,6 +17619,7 @@ let bgPlaylistTransition = "crossfade"; // 'crossfade', 'fade-black', 'slide', '
 let bgPlaylistIndex = 0;
 let bgPlaylistTimer = null;
 let currentActiveVideoSlot = "primary"; // 'primary' (homeBgVideo) or 'secondary' (homeBgVideoNext)
+let wallpaperVideoTransition = 0;
 
 // Seamless Crossfade Video Loop Engine State
 let seamlessLoopInProgress = false;
@@ -17772,6 +17642,7 @@ function cancelSeamlessLoop() {
 }
 
 function preloadInactivePlayer(activeEl) {
+  if (wallpaperVideoTransition && wallpaperVideoTransition === sceneSwitchCounter) return;
   if (!activeEl || !activeEl.src) return;
   const primaryVid = el.homeBgVideo;
   const secondaryVid = el.homeBgVideoNext;
@@ -17790,7 +17661,7 @@ function preloadInactivePlayer(activeEl) {
 }
 
 function triggerSeamlessVideoLoop(customFadeSec = null) {
-  if (seamlessLoopInProgress) return;
+  if (seamlessLoopInProgress || (wallpaperVideoTransition && wallpaperVideoTransition === sceneSwitchCounter)) return;
 
   const primaryVid = el.homeBgVideo;
   const secondaryVid = el.homeBgVideoNext;
@@ -17896,6 +17767,27 @@ let downloadedMp4CycleList = [];
 let downloadedMp4CycleIndex = 0;
 let miniCycleTimer = null;
 let currentMiniSlot = "primary"; // 'primary' -> btnWallpaperMiniVideo, 'secondary' -> btnWallpaperMiniVideoNext
+const getButtonPreview = createButtonPreviewCache(invoke, convertFileSrc);
+let miniHoverGeneration = 0;
+let miniHoverTimer = 0;
+
+function resolveMiniPreview(streamUrl) {
+  const item = downloadedMp4CycleList.find(w => convertFileSrc(w.video_path) === streamUrl);
+  const localPath = localStorage.getItem("modcomparer_wallpaper_local_path");
+  return getButtonPreview(item?.video_path || (localPath && convertFileSrc(localPath) === streamUrl ? localPath : null));
+}
+
+async function playMiniPreview(vid, streamUrl, generation) {
+  const preview = await resolveMiniPreview(streamUrl);
+  if (!preview || !miniHovered || generation !== miniHoverGeneration) return;
+  const activeVid = currentMiniSlot === "primary" ? el.btnWallpaperMiniVideo : el.btnWallpaperMiniVideoNext;
+  if (activeVid !== vid || vid.dataset.currentSrc !== streamUrl) return;
+  vid.src = preview;
+  vid.play().catch(() => {});
+  whenMiniVideoShows(vid, () => {
+    if (miniHovered && generation === miniHoverGeneration) el.btnWallpaperMiniPreview?.classList.add("is-live");
+  });
+}
 
 function isMp4Url(url) {
   if (!url || typeof url !== "string") return false;
@@ -18039,8 +17931,7 @@ function setInitialButtonMiniVideo(streamUrl, previewUrl = null) {
   vid.muted = true;
   vid.loop = true;
   vid.playsInline = true;
-  vid.preload = "auto";
-  vid.src = streamUrl;
+  vid.preload = "metadata";
   vid.classList.add("active");
   if (el.btnWallpaperMiniVideoNext) {
     el.btnWallpaperMiniVideoNext.classList.remove("active");
@@ -18050,16 +17941,22 @@ function setInitialButtonMiniVideo(streamUrl, previewUrl = null) {
   const onFrameReady = () => {
     if (!isMiniPreviewLive() && vid.videoWidth > 0) {
       paintMiniPoster(vid);
+      unloadMiniVideo(vid);
     }
   };
   vid.addEventListener("loadeddata", onFrameReady, { once: true });
-  vid.addEventListener("canplay", onFrameReady, { once: true });
+  resolveMiniPreview(streamUrl).then(preview => {
+    if (preview && miniRest?.streamUrl === streamUrl && !miniHovered) {
+      vid.preload = "auto";
+      vid.src = preview;
+    }
+  });
 }
 
 let miniIncoming = null; // the preview video that is opening, to be shown when it can be seen
 let miniReleaseTimer = 0; // releases the videos once the still has faded in over them
 let miniRestFrame = null; // the still shown before the pointer came over the card
-function cycleToNextMiniVideo(autoplay = true) {
+async function cycleToNextMiniVideo(autoplay = true) {
   if (!downloadedMp4CycleList || downloadedMp4CycleList.length === 0) return;
   if (miniIncoming) return; // the one before is still opening
 
@@ -18077,22 +17974,32 @@ function cycleToNextMiniVideo(autoplay = true) {
 
   if (!incomingVid) return;
 
+  const generation = miniHoverGeneration;
+  miniIncoming = incomingVid;
+  const preview = await getButtonPreview(nextItem.video_path);
+  if (generation !== miniHoverGeneration || miniIncoming !== incomingVid) return;
+  if (!preview) { miniIncoming = null; return; }
+
   incomingVid.dataset.currentSrc = streamUrl;
   incomingVid.muted = true;
   incomingVid.loop = true;
   incomingVid.playsInline = true;
-  incomingVid.src = streamUrl;
+  incomingVid.src = preview;
 
   // It takes the place of the one on screen when it has a picture. Swapped at once, a file that
   // took over a second to open never got to be seen: the preview stayed empty while hovering.
   const show = () => {
-    if (miniIncoming !== incomingVid) return;
+    if (miniIncoming !== incomingVid || generation !== miniHoverGeneration) return;
     miniIncoming = null;
     currentMiniSlot = toSecondary ? "secondary" : "primary";
     incomingVid.classList.add("active");
+    if (miniHovered) el.btnWallpaperMiniPreview?.classList.add("is-live");
     if (outgoingVid) {
       outgoingVid.classList.remove("active");
-      setTimeout(() => unloadMiniVideo(outgoingVid), 350);
+      const outgoingSrc = outgoingVid.getAttribute("src");
+      setTimeout(() => {
+        if (!outgoingVid.classList.contains("active") && outgoingVid.getAttribute("src") === outgoingSrc) unloadMiniVideo(outgoingVid);
+      }, 350);
     }
   };
   miniIncoming = incomingVid;
@@ -18189,19 +18096,10 @@ async function initWallpaperEngine() {
     });
 
     el.btnQuickWallpaper.addEventListener("mouseenter", () => {
-      // 1. Play current active video
-      const activeVid = currentMiniSlot === "primary" ? el.btnWallpaperMiniVideo : el.btnWallpaperMiniVideoNext;
       miniHovered = true;
-      if (activeVid && !activeVid.getAttribute("src") && activeVid.dataset.currentSrc) {
-        activeVid.src = activeVid.dataset.currentSrc;
-      }
-      if (activeVid && activeVid.getAttribute("src")) {
-        activeVid.play().catch(() => {});
-        // the still frame gives way to the video when the video has something to show
-        whenMiniVideoShows(activeVid, () => {
-          if (miniHovered && el.btnWallpaperMiniPreview) el.btnWallpaperMiniPreview.classList.add("is-live");
-        });
-      }
+      const generation = ++miniHoverGeneration;
+      clearTimeout(miniReleaseTimer);
+      clearTimeout(miniHoverTimer);
 
       // 2. Ensure downloaded list is up-to-date
       if (!downloadedMp4CycleList || downloadedMp4CycleList.length === 0) {
@@ -18212,16 +18110,21 @@ async function initWallpaperEngine() {
         });
       }
 
-      // 3. Cycle every 1 second while hovered
+      // Ignore pointer transit. Mini decoders only open cached, low-resolution clips.
       if (miniCycleTimer) clearInterval(miniCycleTimer);
-      miniCycleTimer = setInterval(() => {
-        if (downloadedMp4CycleList && downloadedMp4CycleList.length > 1) {
-          cycleToNextMiniVideo(true);
-        }
-      }, 1000);
+      miniHoverTimer = setTimeout(() => {
+        if (!miniHovered || generation !== miniHoverGeneration) return;
+        const activeVid = currentMiniSlot === "primary" ? el.btnWallpaperMiniVideo : el.btnWallpaperMiniVideoNext;
+        if (activeVid?.dataset.currentSrc) playMiniPreview(activeVid, activeVid.dataset.currentSrc, generation);
+        miniCycleTimer = setInterval(() => {
+          if (downloadedMp4CycleList?.length > 1) cycleToNextMiniVideo(true);
+        }, 1000);
+      }, 150);
     });
 
     el.btnQuickWallpaper.addEventListener("mouseleave", () => {
+      clearTimeout(miniHoverTimer);
+      ++miniHoverGeneration;
       if (miniCycleTimer) {
         clearInterval(miniCycleTimer);
         miniCycleTimer = null;
@@ -18233,9 +18136,7 @@ async function initWallpaperEngine() {
       miniHovered = false;
       miniIncoming = null;
 
-      const currentItem = (downloadedMp4CycleList && downloadedMp4CycleList.length > 0)
-        ? downloadedMp4CycleList[downloadedMp4CycleIndex]
-        : null;
+      const currentItem = downloadedMp4CycleList.find(w => convertFileSrc(w.video_path) === activeVid?.dataset.currentSrc);
 
       let painted = false;
       if (activeVid && activeVid.videoWidth > 0) {
@@ -18274,9 +18175,7 @@ async function initWallpaperEngine() {
       miniReleaseTimer = setTimeout(() => {
         if (miniHovered) return;
         if (inactiveVid) unloadMiniVideo(inactiveVid);
-        if (activeVid) {
-          try { activeVid.pause(); } catch (_) {}
-        }
+        if (activeVid) unloadMiniVideo(activeVid);
       }, 320);
     });
   }
@@ -18752,6 +18651,7 @@ let wallpaperTransform = {
   panY: 0,
   fit: "cover", // "cover" or "contain"
 };
+let appliedWeTransform = { scale: 1, panX: 0, panY: 0 };
 let hudHideTimeout = null;
 let saveTransformTimeout = null;
 
@@ -18813,9 +18713,6 @@ function loadActiveWallpaperTransform(showHud = false) {
     wallpaperTransform.panX = typeof saved.panX === "number" ? saved.panX : 0;
     wallpaperTransform.panY = typeof saved.panY === "number" ? saved.panY : 0;
     wallpaperTransform.fit = saved.fit === "contain" ? "contain" : "cover";
-    if (wallpaperTransform.scale <= 1.0 && wallpaperTransform.panY > 0) {
-      wallpaperTransform.panY = 0;
-    }
   } else {
     // Si este fondo aún no ha sido personalizado, usa 1.0 (original) y centrado (0, 0)
     wallpaperTransform.scale = 1.0;
@@ -18853,6 +18750,29 @@ function applySpecsBarZoom(nextZoom, persist = true) {
 
 function initWallpaperInteractiveControls() {
   loadActiveWallpaperTransform(false);
+
+  // Follow viewport/DPI changes before the next paint, preserving the user's transform.
+  // A frozen frame from the previous viewport must never be stretched over the live source.
+  let viewportResizeFrame = 0;
+  const syncWallpaperViewport = () => {
+    if (viewportResizeFrame) cancelAnimationFrame(viewportResizeFrame);
+    const snapshot = el.homeBgSnapshot;
+    if (snapshot && snapshot.style.display !== "none") discardSnapshotForViewportChange(snapshot);
+    viewportResizeFrame = requestAnimationFrame(() => {
+      viewportResizeFrame = 0;
+      applyWallpaperTransform(false, false, true);
+      if (document.body.classList.contains("has-we-active")) {
+        invoke("sync_we_window_rect", { visible: viewShowsBackground() }).catch(() => {});
+      }
+    });
+  };
+
+  window.addEventListener("resize", syncWallpaperViewport, { passive: true });
+  window.visualViewport?.addEventListener("resize", syncWallpaperViewport, { passive: true });
+  const homeBgLayer = document.getElementById("home-bg-layer");
+  if (homeBgLayer && typeof ResizeObserver !== "undefined") {
+    new ResizeObserver(syncWallpaperViewport).observe(homeBgLayer);
+  }
 
   try {
     const savedSpecsZoom = parseFloat(localStorage.getItem(SPECS_BAR_ZOOM_KEY));
@@ -18987,12 +18907,31 @@ function initWallpaperInteractiveControls() {
 
 let weTransformRafId = null;
 let pendingWeTransform = null;
+let weTransformRequest = 0;
+let weTransformErrorShown = false;
+
+async function applyWeTransform({ cssTransform, ...nativeTransform }) {
+  const request = ++weTransformRequest;
+  try {
+    await invoke("update_we_transform", nativeTransform);
+    if (request === weTransformRequest && document.body.classList.contains("has-we-active")) {
+      appliedWeTransform = cssTransform;
+      weTransformErrorShown = false;
+    }
+  } catch (error) {
+    console.error("No se pudo mover el fondo de Wallpaper Engine:", error);
+    if (!weTransformErrorShown) {
+      weTransformErrorShown = true;
+      showToast("No se pudo ajustar el fondo de Wallpaper Engine.");
+    }
+  }
+}
 
 function sendWeTransformThrottled(scale, panX, panY, immediate = false) {
   // the pan is kept in the page's pixels; the native side moves the wallpaper in screen pixels
   // (they differ when the page is zoomed for the screen, see apply_ui_zoom in lib.rs)
   const toScreen = window.devicePixelRatio || 1;
-  pendingWeTransform = { scale, panX: panX * toScreen, panY: panY * toScreen };
+  pendingWeTransform = { scale, panX: panX * toScreen, panY: panY * toScreen, cssTransform: { scale, panX, panY } };
 
   if (immediate) {
     if (weTransformRafId) {
@@ -19000,7 +18939,7 @@ function sendWeTransformThrottled(scale, panX, panY, immediate = false) {
       weTransformRafId = null;
     }
     if (document.body.classList.contains("has-we-active")) {
-      invoke("update_we_transform", pendingWeTransform).catch(() => {});
+      applyWeTransform(pendingWeTransform);
       pendingWeTransform = null;
     }
     return;
@@ -19012,13 +18951,14 @@ function sendWeTransformThrottled(scale, panX, panY, immediate = false) {
       if (pendingWeTransform && document.body.classList.contains("has-we-active")) {
         const toSend = pendingWeTransform;
         pendingWeTransform = null;
-        invoke("update_we_transform", toSend).catch(() => {});
+        applyWeTransform(toSend);
       }
     });
   }
 }
 
 function applyWallpaperTransform(showHud = true, persist = true, immediate = false) {
+  Object.assign(wallpaperTransform, normalizeWallpaperTransform(wallpaperTransform));
   const isWe = document.body.classList.contains("has-we-active");
   const isContain = wallpaperTransform.fit === "contain";
 
@@ -19035,11 +18975,10 @@ function applyWallpaperTransform(showHud = true, persist = true, immediate = fal
   if (!isWe) {
     const canvas = document.getElementById("home-bg-canvas");
     if (canvas) {
+      // This element owns the transform. Publishing the same values as inherited
+      // variables on :root invalidated every panel and retriggered titlebar layout.
       canvas.style.transform = `translate(${wallpaperTransform.panX}px, ${wallpaperTransform.panY}px) scale(${wallpaperTransform.scale})`;
     }
-    document.documentElement.style.setProperty("--wallpaper-scale", `${wallpaperTransform.scale}`);
-    document.documentElement.style.setProperty("--wallpaper-pan-x", `${wallpaperTransform.panX}px`);
-    document.documentElement.style.setProperty("--wallpaper-pan-y", `${wallpaperTransform.panY}px`);
   } else {
     sendWeTransformThrottled(wallpaperTransform.scale, wallpaperTransform.panX, wallpaperTransform.panY, immediate);
   }
@@ -19093,9 +19032,6 @@ function panWallpaper(key, isFast = false) {
   if (key === "ArrowDown") wallpaperTransform.panY += step;
   if (key === "ArrowLeft") wallpaperTransform.panX -= step;
   if (key === "ArrowRight") wallpaperTransform.panX += step;
-
-  wallpaperTransform.panX = Math.max(-1600, Math.min(1600, wallpaperTransform.panX));
-  wallpaperTransform.panY = Math.max(-1600, Math.min(1600, wallpaperTransform.panY));
 
   applyWallpaperTransform(true, true, true);
 }
@@ -19251,7 +19187,7 @@ function updateCyberDockHairlines() {
 
 function updateTitlebarHairlines() {
   const rootStyle = getComputedStyle(document.documentElement);
-  const tbH = parseFloat(rootStyle.getPropertyValue("--titlebar-height")) || 52;
+  const titlebarHeight = parseFloat(rootStyle.getPropertyValue("--titlebar-height")) || 52;
   const notchH = 102;
 
   const bloom = document.getElementById("titlebar-hairline-bloom");
@@ -19264,6 +19200,7 @@ function updateTitlebarHairlines() {
   const svg = document.getElementById("notch-shape");
   const r = svg && svg.getBoundingClientRect();
   const unit = r && r.width > 0 ? r.width / 940 : 1;
+  const tbH = titlebarHeight / unit;
   const left = r && r.width > 0 ? Math.min(0, Math.floor(-r.left / unit) - 40) : -3500;
   const right = r && r.width > 0 ? Math.max(940, Math.ceil((window.innerWidth - r.left) / unit) + 40) : 4440;
   const path = `M ${left},${tbH} L 0,${tbH} C 40,${tbH} 50,${notchH} 90,${notchH} L 850,${notchH} C 890,${notchH} 900,${tbH} 940,${tbH} L ${right},${tbH}`;
@@ -19382,7 +19319,7 @@ function initThrottledSvgGradientAnimations() {
       if (href && href[0] === "#") add(href.slice(1), el);
     }
     yield;
-    for (const [sel, ids] of cssRefs) {
+    for (const [sel, ids] of cssRefs || []) {
       try {
         for (const el of document.querySelectorAll(sel)) for (const id of ids) add(id, el);
       } catch (_) {}
@@ -19414,14 +19351,21 @@ function initThrottledSvgGradientAnimations() {
     if (!indexed) return;
     for (const a of anims) a.active = isUsed(a.target.id);
   };
+  let indexScheduled = false;
+  let indexDirty = false;
   const scheduleIndex = () => {
+    indexDirty = true;
+    if (indexScheduled) return;
+    indexScheduled = true;
+    indexDirty = false;
     const work = buildIndex();
     const step = (deadline) => {
       const end = performance.now() + 3; // short slices: input never waits behind this
       while (deadline.timeRemaining() > 1 && performance.now() < end) {
         if (work.next().done) {
           indexed = true;
-          setTimeout(scheduleIndex, 1500);
+          indexScheduled = false;
+          if (indexDirty) scheduleIndex();
           return;
         }
       }
@@ -19429,7 +19373,25 @@ function initThrottledSvgGradientAnimations() {
     };
     requestIdleCallback(step);
   };
-  if (window.requestIdleCallback) scheduleIndex();
+  if (window.requestIdleCallback) {
+    scheduleIndex();
+    // Reindex only when references can change. Rewalking the whole DOM and CSS
+    // every 1.5 seconds caused recurring work even with a stationary launcher.
+    const referenceNode = 'svg,[fill],[stroke],[mask],[filter],[clip-path],[style*="url("],use,linearGradient,radialGradient';
+    const affectsReferences = node => node.nodeType === 1 &&
+      (node.matches(referenceNode) || node.querySelector(referenceNode));
+    const observer = new MutationObserver((records) => {
+      const cssChanged = records.some(record => document.head?.contains(record.target));
+      if (!cssChanged && !records.some(record => record.type === "attributes"
+        ? record.attributeName !== "class" || affectsReferences(record.target)
+        : [...record.addedNodes, ...record.removedNodes].some(affectsReferences))) return;
+      if (cssChanged) cssRefs = null;
+      scheduleIndex();
+    });
+    observer.observe(document.body, { childList: true, subtree: true,
+      attributes: true, attributeFilter: ["class", "fill", "stroke", "href", "xlink:href", "mask", "filter", "clip-path"] });
+    if (document.head) observer.observe(document.head, { childList: true, subtree: true });
+  }
   else indexed = false; // no idle callbacks: every gradient keeps moving, as before
   for (const a of anims) a.active = true;
 
@@ -19464,28 +19426,73 @@ function initThrottledSvgGradientAnimations() {
 function initCyberDockHairlines() {
   checkCyberDockHairlinesVars();
   updateTitlebarHairlines();
+  syncEdgePanelsHeight();
   let resizeRaf = 0;
-  window.addEventListener("resize", () => {
+  const scheduleHairlineLayout = () => {
     if (!resizeRaf) resizeRaf = requestAnimationFrame(() => {
       resizeRaf = 0;
       updateTitlebarHairlines();
+      syncEdgePanelsHeight();
     });
-  });
-
-  // Watch for any changes in real-time (Vite HMR, stylesheet edits, devtools).
-  // Only needed while developing: in a build the CSS variables never change on their own.
-  if (import.meta.env.DEV) {
-    setInterval(checkCyberDockHairlinesVars, 100);
-  }
+  };
+  window.addEventListener("resize", scheduleHairlineLayout);
+  window.addEventListener("ika:monitor-changed", scheduleHairlineLayout);
+  // Rebuild the border after the notch has its final layout, including zoom and CSS reloads.
+  const notch = document.getElementById("titlebar-notch");
+  if (notch) new ResizeObserver(scheduleHairlineLayout).observe(notch);
 
   try {
-    const observer = new MutationObserver(() => checkCyberDockHairlinesVars());
+    let checkFrame = 0;
+    const scheduleCheck = () => {
+      if (checkFrame) return;
+      checkFrame = requestAnimationFrame(() => {
+        checkFrame = 0;
+        checkCyberDockHairlinesVars();
+        updateTitlebarHairlines();
+      });
+    };
+    const observer = new MutationObserver(scheduleCheck);
     observer.observe(document.documentElement, { attributes: true, attributeFilter: ["style"] });
     if (document.head) {
       observer.observe(document.head, { childList: true, subtree: true });
     }
+    if (import.meta.hot) import.meta.hot.on("vite:afterUpdate", scheduleCheck);
+    const dock = document.querySelector(".bottom-bar-center-zone");
+    // Dock and window changes share one complete update. A dock-only callback could
+    // otherwise consume the pending frame and leave the border at an intermediate size.
+    if (dock) new ResizeObserver(scheduleHairlineLayout).observe(dock);
+    scheduleCheck();
   } catch (err) {
     console.warn("Could not attach MutationObserver for cyber dock hairlines:", err);
+  }
+}
+
+function updateWallpaperTabUnderline(instant = false) {
+  const header = document.querySelector("#modal-wallpapers .mbg-tabs-header");
+  const active = header?.querySelector(".mbg-tab-nav-btn.active");
+  const underline = header?.querySelector(".mbg-tab-underline");
+  if (!active || !underline || !active.offsetWidth) return;
+  if (instant) header.classList.remove("has-tab-underline");
+  underline.style.width = `${active.offsetWidth}px`;
+  underline.style.transform = `translateX(${active.offsetLeft - header.scrollLeft}px)`;
+  if (!header.classList.contains("has-tab-underline")) {
+    requestAnimationFrame(() => header.classList.add("has-tab-underline"));
+  }
+  if (!header._underlineObserver && typeof ResizeObserver !== "undefined") {
+    let queued = false;
+    const refresh = () => {
+      if (queued) return;
+      queued = true;
+      requestAnimationFrame(() => {
+        queued = false;
+        updateWallpaperTabUnderline();
+      });
+    };
+    header._underlineObserver = new ResizeObserver(refresh);
+    header._underlineObserver.observe(header);
+    header.querySelectorAll(".mbg-tab-nav-btn").forEach((button) => header._underlineObserver.observe(button));
+    header.addEventListener("scroll", refresh, { passive: true });
+    document.fonts?.ready.then(refresh);
   }
 }
 
@@ -19539,6 +19546,7 @@ function switchWallpaperTab(tab) {
     if (el.panelMbgPlaylist) el.panelMbgPlaylist.classList.remove("hidden");
     renderPlaylistItems();
   }
+  updateWallpaperTabUnderline();
 }
 
 function setPlaylistActive(active, playImmediately = false) {
@@ -19862,9 +19870,51 @@ function hasWeCustomProperties(item) {
   });
 }
 
+let wePropertiesRequest = 0;
+let wePropertiesResizeAnimation = null;
+function setWePropertiesPanelOpen(open) {
+  const box = el.modalWallpapersBox;
+  const panel = el.wePropertiesPanel;
+  if (!box || !panel) return Promise.resolve();
+  const visible = !el.modalWallpapers?.classList.contains("hidden") && !el.modalWallpapers?.classList.contains("is-closing");
+  // These are the same constraints as .modal-wallpapers-box. The window stays
+  // centred and its height is unchanged, so FLIP needs no synchronous layout.
+  const baseWidth = Math.min(1260, window.innerWidth * 0.95);
+  const expandedWidth = Math.min(baseWidth + 360, 1620, window.innerWidth * 0.97);
+  const afterWidth = open ? expandedWidth : baseWidth;
+  let beforeWidth = panel.classList.contains("hidden") ? baseWidth : expandedWidth;
+  const previous = wePropertiesResizeAnimation;
+  if (previous) {
+    const progress = previous.effect.getComputedTiming().progress ?? 0;
+    beforeWidth = previous._fromWidth + (previous._toWidth - previous._fromWidth) * progress;
+  }
+  wePropertiesResizeAnimation?.cancel();
+  wePropertiesResizeAnimation = null;
+  panel.classList.toggle("hidden", !open);
+  panel.inert = !open;
+  box.classList.toggle("has-we-props-open", open);
+  // Apply final width once. Animate its composited surface instead of reflowing every card per frame.
+  if (!visible || window.matchMedia("(prefers-reduced-motion: reduce)").matches ||
+      box.getAnimations().some((animation) => animation.id === "crt" && animation.playState === "running")) return Promise.resolve();
+  if (!afterWidth || Math.abs(beforeWidth - afterWidth) < 0.5) return Promise.resolve();
+  const animation = box.animate([
+    { transform: `scaleX(${beforeWidth / afterWidth})`, transformOrigin: "center" },
+    { transform: "none", transformOrigin: "center" },
+  ], { duration: 150, easing: "cubic-bezier(0.16, 1, 0.3, 1)", fill: "both" });
+  animation.id = "wallpaper-options-resize";
+  animation._fromWidth = beforeWidth;
+  animation._toWidth = afterWidth;
+  wePropertiesResizeAnimation = animation;
+  return animation.finished.catch(() => {}).then(() => {
+    if (wePropertiesResizeAnimation !== animation) return;
+    wePropertiesResizeAnimation = null;
+    animation.cancel();
+  });
+}
+
 function closeWePropertiesPanel() {
-  if (el.wePropertiesPanel) el.wePropertiesPanel.classList.add("hidden");
-  if (el.modalWallpapersBox) el.modalWallpapersBox.classList.remove("has-we-props-open");
+  ++wePropertiesRequest;
+  setWePropertiesPanelOpen(false);
   currentWePropertiesItem = null;
 }
 
@@ -20073,8 +20123,52 @@ async function translateWePanel(list) {
   }
 }
 
+const wePropertiesPanels = new Map();
+let wePropertiesPrepareTimer = 0;
+function prepareWePropertiesPanel(item) {
+  const key = getWallpaperStorageKey(item);
+  const values = JSON.stringify(getSavedWeProperties(item));
+  const previous = wePropertiesPanels.get(key);
+  if (previous && previous.values === values && previous.properties === item.properties) return previous.promise;
+  const entry = { values, properties: item.properties, promise: null };
+  entry.promise = buildWePropertiesPanel(item).then((nodes) => {
+    entry.properties = item.properties;
+    return nodes;
+  }).catch((error) => {
+    if (wePropertiesPanels.get(key) === entry) wePropertiesPanels.delete(key);
+    throw error;
+  });
+  wePropertiesPanels.delete(key);
+  wePropertiesPanels.set(key, entry);
+  while (wePropertiesPanels.size > 8) wePropertiesPanels.delete(wePropertiesPanels.keys().next().value);
+  return entry.promise;
+}
+
+function prepareVisibleWallpaperOptions() {
+  clearTimeout(wePropertiesPrepareTimer);
+  // Prepare detached controls after the entrance, never on tab/card hover.
+  wePropertiesPrepareTimer = setTimeout(async () => {
+    if (el.modalWallpapers?.classList.contains("hidden")) return;
+    const items = [...el.modalWallpapers.querySelectorAll(".mbg-card")]
+      .filter((card) => card._weOptionsItem && card.checkVisibility())
+      .slice(0, 3).map((card) => card._weOptionsItem);
+    for (const [index, item] of items.entries()) {
+      if (el.modalWallpapers.classList.contains("hidden")) break;
+      const nodes = await prepareWePropertiesPanel(item).catch(() => null);
+      if (index === 0 && nodes && el.wePropertiesPanel?.classList.contains("hidden") && !el.modalWallpapers.classList.contains("hidden")) {
+        // Prepare layout outside flex flow, fully transparent and without input.
+        el.wePropertiesPanel.inert = true;
+        el.wePropertiesList.replaceChildren(...nodes);
+        el.wePropertiesPanel.classList.add("is-prepared");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  }, 1100);
+}
+
 async function openWePropertiesPanel(item) {
   if (!el.wePropertiesPanel || !el.wePropertiesList) return;
+  const request = ++wePropertiesRequest;
   currentWePropertiesItem = item;
 
   if (el.wePropPanelTitle) {
@@ -20084,6 +20178,16 @@ async function openWePropertiesPanel(item) {
     el.wePropPanelSub.textContent = `Personalizar (${item.id || "Wallpaper Engine"})`;
   }
 
+  const nodes = await prepareWePropertiesPanel(item);
+  if (request !== wePropertiesRequest) return;
+  currentWePropertiesValues = getSavedWeProperties(item);
+  if (el.wePropertiesList.firstChild !== nodes[0]) el.wePropertiesList.replaceChildren(...nodes);
+  setWePropertiesPanelOpen(true).then(() => {
+    if (request === wePropertiesRequest) translateWePanel(el.wePropertiesList);
+  });
+}
+
+async function buildWePropertiesPanel(item) {
   if (!item.properties || Object.keys(item.properties).length === 0) {
     const targetPath = item.project_path || item.video_path || item.local_video_path;
     if (targetPath) {
@@ -20098,11 +20202,16 @@ async function openWePropertiesPanel(item) {
     }
   }
 
-  currentWePropertiesValues = getSavedWeProperties(item);
+  const values = getSavedWeProperties(item);
 
   const validProps = [];
   if (item.properties && typeof item.properties === "object") {
+    let sliceStarted = performance.now();
     for (const [key, prop] of Object.entries(item.properties)) {
+      if (performance.now() - sliceStarted >= 2) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        sliceStarted = performance.now();
+      }
       if (key === "schemecolor") continue;
       if (!prop || typeof prop !== "object") continue;
       const text = (prop.text || "").trim();
@@ -20123,12 +20232,20 @@ async function openWePropertiesPanel(item) {
 
   validProps.sort((a, b) => a.order - b.order);
 
-  el.wePropertiesList.innerHTML = "";
+  const fragment = document.createDocumentFragment();
 
   if (validProps.length === 0) {
-    el.wePropertiesList.innerHTML = `<div class="we-prop-empty-state">Este fondo no contiene opciones configurables adicionales.</div>`;
+    const empty = document.createElement("div");
+    empty.className = "we-prop-empty-state";
+    empty.textContent = "Este fondo no contiene opciones configurables adicionales.";
+    fragment.appendChild(empty);
   } else {
-    validProps.forEach((prop) => {
+    let sliceStarted = performance.now();
+    for (const prop of validProps) {
+      if (performance.now() - sliceStarted >= 2) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        sliceStarted = performance.now();
+      }
       const row = document.createElement("div");
       row.className = "we-prop-row";
       row.dataset.propKey = prop.key;
@@ -20141,8 +20258,8 @@ async function openWePropertiesPanel(item) {
         t.className = propKind === "group" ? "we-prop-group-title" : "we-prop-note";
         t.textContent = prop.label || prop.key;
         row.appendChild(t);
-        el.wePropertiesList.appendChild(row);
-        return;
+        fragment.appendChild(row);
+        continue;
       }
 
       const label = document.createElement("span");
@@ -20154,8 +20271,8 @@ async function openWePropertiesPanel(item) {
       const controlWrap = document.createElement("div");
       controlWrap.className = "we-prop-control";
 
-      const curVal = currentWePropertiesValues[prop.key] !== undefined
-        ? currentWePropertiesValues[prop.key]
+      const curVal = values[prop.key] !== undefined
+        ? values[prop.key]
         : prop.value;
 
       const propType = (prop.type || "").toLowerCase();
@@ -20288,15 +20405,11 @@ async function openWePropertiesPanel(item) {
       }
 
       row.appendChild(controlWrap);
-      el.wePropertiesList.appendChild(row);
-    });
+      fragment.appendChild(row);
+    }
   }
 
-  el.wePropertiesPanel.classList.remove("hidden");
-  if (el.modalWallpapersBox) {
-    el.modalWallpapersBox.classList.add("has-we-props-open");
-  }
-  translateWePanel(el.wePropertiesList);
+  return [...fragment.childNodes];
 }
 
 let currentSceneBlobUrl = null;
@@ -20352,10 +20465,10 @@ function showSnapshotCanvas(canvas) {
   canvas.style.transition = "none";
   // Force reflow
   void canvas.offsetHeight;
-  canvas.style.transition = "opacity 0.6s cubic-bezier(0.16, 1, 0.3, 1)";
+  canvas.style.transition = "opacity 0.18s cubic-bezier(0.16, 1, 0.3, 1)";
 }
 
-async function captureCurrentWallpaperSnapshot() {
+async function captureCurrentWallpaperSnapshot({ waitForPresentation = true } = {}) {
   const canvas = el.homeBgSnapshot || document.getElementById("home-bg-snapshot");
   if (!canvas) return false;
 
@@ -20371,30 +20484,17 @@ async function captureCurrentWallpaperSnapshot() {
         const w = view.getUint32(0, true);
         const h = view.getUint32(4, true);
         if (w > 0 && h > 0 && bytes.length >= 8 + w * h * 4) {
-          const img = new ImageData(w, h);
-          const dst = img.data;
-          // BGRA -> RGBA; GDI leaves alpha at 0, force it opaque.
-          for (let s = 8, d = 0, n = w * h * 4; d < n; s += 4, d += 4) {
-            dst[d] = bytes[s + 2];
-            dst[d + 1] = bytes[s + 1];
-            dst[d + 2] = bytes[s];
-            dst[d + 3] = 255;
-          }
-          const ctx = prepareSnapshotCanvas(canvas);
-          if (ctx) {
-            if (canvas.width === w && canvas.height === h) {
-              ctx.putImageData(img, -(canvas._shift?.x || 0), -(canvas._shift?.y || 0));
-            } else {
-              const bmp = await createImageBitmap(img);
-              ctx.drawImage(bmp, 0, 0, window.innerWidth, window.innerHeight);
-              bmp.close();
+          const bitmap = await decodeSnapshotBitmap(bytes);
+          try {
+            const ctx = prepareSnapshotCanvas(canvas);
+            if (ctx) {
+              ctx.drawImage(bitmap, 0, 0, window.innerWidth, window.innerHeight);
+              showSnapshotCanvas(canvas);
+              // Present the freeze-frame before the native scene is hidden.
+              if (waitForPresentation) await waitForPaint();
+              return true;
             }
-            showSnapshotCanvas(canvas);
-            // The old scene is hidden right after this returns: make sure the frozen
-            // frame is already on screen so no black frame slips through.
-            await waitForPaint();
-            return true;
-          }
+          } finally { bitmap.close(); }
         }
       }
     } catch (e) {
@@ -20428,7 +20528,7 @@ async function captureCurrentWallpaperSnapshot() {
         ctx.drawImage(activeVid, r.left + (r.width - dw) / 2, r.top + (r.height - dh) / 2, dw, dh);
         ctx.restore();
         showSnapshotCanvas(canvas);
-        await waitForPaint();
+        if (waitForPresentation) await waitForPaint();
         return true;
       }
     } catch (e) {
@@ -20441,7 +20541,7 @@ async function captureCurrentWallpaperSnapshot() {
 let snapshotFadeTimeout = null;
 let snapshotHideTimeout = null;
 
-function fadeOutSnapshot(delayMs = 100) {
+function fadeOutSnapshot(delayMs = 0) {
   const canvas = el.homeBgSnapshot || document.getElementById("home-bg-snapshot");
   if (!canvas || canvas.style.display === "none") return;
 
@@ -20454,20 +20554,61 @@ function fadeOutSnapshot(delayMs = 100) {
       if (canvas.style.opacity === "0") {
         canvas.style.display = "none";
       }
-    }, 650);
+    }, 220);
   }, delayMs);
+}
+
+function discardSnapshotForViewportChange(canvas) {
+  if (snapshotFadeTimeout) clearTimeout(snapshotFadeTimeout);
+  if (snapshotHideTimeout) clearTimeout(snapshotHideTimeout);
+  snapshotFadeTimeout = null;
+  snapshotHideTimeout = null;
+  canvas.style.transition = "none";
+  canvas.style.opacity = "0";
+  canvas.style.display = "none";
 }
 
 let weCanvasStreamRunning = false;
 let weMiniOffCanvas = null;
 let weMiniOffCtx = null;
+let weGlassScreenCanvas = null;
+let weGlassScreenCtx = null;
 let weLiveBlurInFlight = false;
 
 let weCanvasStreamUntick = null;
 let weCanvasStreamGen = 0;
+let weGlassPendingSwitch = 0;
+let weGlassFirstFrameUntil = 0;
+let weGlassPaintedSwitch = 0;
 
-function stopWeCanvasStream() {
+// Use the same frozen frame and opacity as the wallpaper during its cross-fade. Otherwise
+// the new wallpaper and the glass can each finish switching on a different capture tick.
+function compositeWallpaperSnapshot(ctx, winW, winH) {
+  const snapshot = document.getElementById("home-bg-snapshot");
+  if (!snapshot || !snapshot.width || snapshot.style.display === "none") return;
+  const cs = getComputedStyle(snapshot);
+  const alpha = parseFloat(cs.opacity) || 0;
+  if (cs.display === "none" || alpha <= 0) return;
+  const rect = snapshot.getBoundingClientRect();
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.drawImage(snapshot, rect.left * ctx.canvas.width / winW, rect.top * ctx.canvas.height / winH,
+    rect.width * ctx.canvas.width / winW, rect.height * ctx.canvas.height / winH);
+  ctx.restore();
+}
+
+function isBlankWeGlassFrame(bytes) {
+  // A newly opened DirectX surface can publish an opaque black frame before its scene.
+  // Sample the whole image, including alpha, without treating a transparent clear as ready.
+  for (let i = 8; i + 3 < bytes.length; i += 64) {
+    if (bytes[i + 3] > 0 && Math.max(bytes[i], bytes[i + 1], bytes[i + 2]) > 8) return false;
+  }
+  return true;
+}
+
+function stopWeCanvasStream({ preserveGlass = false } = {}) {
   weCanvasStreamRunning = false;
+  ++weCanvasStreamGen;
   weCanvasStreamUntick?.();
   weCanvasStreamUntick = null;
   weLiveBlurInFlight = false;
@@ -20475,6 +20616,7 @@ function stopWeCanvasStream() {
   if (canvas) {
     canvas.style.display = "none";
   }
+  if (preserveGlass) return;
   document.querySelectorAll(".has-live-glass").forEach((el) => el.classList.remove("has-live-glass"));
   document.querySelectorAll(".we-live-glass-canvas").forEach((c) => {
     c.style.display = "none";
@@ -20491,16 +20633,16 @@ function startWeCanvasStream() {
     weMiniOffCanvas.width = 256;
     weMiniOffCanvas.height = 144;
     weMiniOffCtx = weMiniOffCanvas.getContext("2d", { willReadFrequently: false });
+    weGlassScreenCanvas = document.createElement("canvas");
+    weGlassScreenCanvas.width = 256;
+    weGlassScreenCanvas.height = 144;
+    weGlassScreenCtx = weGlassScreenCanvas.getContext("2d");
   }
 
-  // On the shared animation clock (frame-clock.js, 30 fps): each tick paints the capture that
-  // arrived since the previous one and asks for the next, so the glass changes in the same
-  // display frames as the launcher's other animations. (It used to ask for a frame on every
-  // display refresh, 240 a second, just to check the time, plus another one to paint.)
-  let pending = null;
+  // Interactive glass follows display frames, separately from 30 fps decorative animations.
   // checkVisibility, not offsetParent: a section that is not open is hidden with
   // content-visibility, which keeps its elements laid out.
-  const shown = (el) => !!el && el.checkVisibility();
+  const shown = isLiveGlassVisible;
   const anyGlassVisible = () =>
     shown(document.getElementById("inst-pill-we-blur-bg")) ||
     shown(document.getElementById("inst-search-we-blur-bg")) ||
@@ -20512,41 +20654,67 @@ function startWeCanvasStream() {
 
     const winW = window.innerWidth || 1;
     const winH = window.innerHeight || 1;
+    weGlassScreenCtx.fillStyle = "#000";
+    weGlassScreenCtx.fillRect(0, 0, 256, 144);
+    const t = appliedWeTransform;
+    weGlassScreenCtx.save();
+    weGlassScreenCtx.translate(128 + t.panX * 256 / winW, 72 + t.panY * 144 / winH);
+    weGlassScreenCtx.scale(t.scale, t.scale);
+    weGlassScreenCtx.drawImage(weMiniOffCanvas, -128, -72);
+    weGlassScreenCtx.restore();
+    compositeWallpaperSnapshot(weGlassScreenCtx, winW, winH);
+
+    // Native captures do not include the launcher's dim overlay. Match the visible wallpaper
+    // before blurring it, without increasing its saturation or brightness.
+    const dim = document.getElementById("home-bg-dim-overlay");
+    const dimAlpha = dim ? parseFloat(getComputedStyle(dim).opacity) || 0 : 0;
+    if (dimAlpha > 0) {
+      weGlassScreenCtx.fillStyle = `rgba(0, 0, 0, ${dimAlpha})`;
+      weGlassScreenCtx.fillRect(0, 0, 256, 144);
+    }
+    weGlassScreenCanvas._glassFrameVersion = (weGlassScreenCanvas._glassFrameVersion || 0) + 1;
 
     // Render live wallpaper blur slice to each glass panel
     // the bar's pieces blurred like the console window (28px), not by their slim height
-    renderLiveSliceToGlass("inst-pill-we-blur-bg", weMiniOffCanvas, winW, winH, { blur: 28 });
-    renderLiveSliceToGlass("inst-search-we-blur-bg", weMiniOffCanvas, winW, winH, { blur: 28 });
+    const glassLook = { exact: true, screenSpace: true, colour: "saturate(1)" };
+    renderLiveSliceToGlass("inst-pill-we-blur-bg", weGlassScreenCanvas, winW, winH, { ...glassLook, blur: 28 });
+    renderLiveSliceToGlass("inst-search-we-blur-bg", weGlassScreenCanvas, winW, winH, { ...glassLook, blur: 28 });
     document.querySelectorAll(".hcp-we-blur-bg").forEach((el) => {
-      renderLiveSliceToGlass(el, weMiniOffCanvas, winW, winH);
+      renderLiveSliceToGlass(el, weGlassScreenCanvas, winW, winH, glassLook);
     });
+    weGlassPaintedSwitch = sceneSwitchCounter;
   };
   const capture = async () => {
     weLiveBlurInFlight = true;
+    const switchId = sceneSwitchCounter;
     try {
       const buf = await invoke("capture_we_mini_thumb");
       const bytes = buf instanceof ArrayBuffer ? new Uint8Array(buf) : new Uint8Array(buf || []);
-      if (gen === weCanvasStreamGen && bytes.length >= 8 + 256 * 144 * 4) pending = bytes;
+      if (gen === weCanvasStreamGen && switchId === sceneSwitchCounter && !weGlassPendingSwitch && bytes.length >= 8 + 256 * 144 * 4) {
+        if (weGlassFirstFrameUntil && performance.now() < weGlassFirstFrameUntil && isBlankWeGlassFrame(bytes)) return;
+        weGlassFirstFrameUntil = 0;
+        return { bytes, switchId };
+      }
     } catch (_) {
       // Ignored if window is minimized or switching
     } finally {
       if (gen === weCanvasStreamGen) weLiveBlurInFlight = false;
     }
   };
-  weCanvasStreamUntick = onTick(() => {
-    if (gen !== weCanvasStreamGen) return;
-    if (!weCanvasStreamRunning || !document.body.classList.contains("has-we-active")) {
-      stopWeCanvasStream();
-      return;
-    }
-    if (pending) {
-      paint(pending);
-      pending = null;
-    }
-    // No glass panel on screen (another section, panels hidden): no capture. The capture
-    // itself stops after a second without requests (wallpaper_capture.rs).
-    if (document.hidden || weLiveBlurInFlight || !anyGlassVisible()) return;
-    capture();
+  weCanvasStreamUntick = startLatestFrameLoop({
+    capture,
+    paint: (frame) => {
+      if (gen === weCanvasStreamGen && frame.switchId === sceneSwitchCounter && !weGlassPendingSwitch) paint(frame.bytes);
+    },
+    isActive: () => {
+      if (gen !== weCanvasStreamGen) return false;
+      if (!weCanvasStreamRunning || !document.body.classList.contains("has-we-active")) {
+        stopWeCanvasStream();
+        return false;
+      }
+      return !document.hidden && !weGlassPendingSwitch &&
+        ((weGlassFirstFrameUntil > performance.now() && weGlassPaintedSwitch !== sceneSwitchCounter) || anyGlassVisible());
+    },
   });
 }
 
@@ -20554,6 +20722,7 @@ function startWeCanvasStream() {
 // panel's height); `opts.colour`: the filters after the blur (saturation, brightness);
 // `opts.exact`: the frame is drawn exactly over the screen instead of slightly enlarged at the
 // borders (which keeps the screen's edges filled, at the cost of a small shift).
+// `opts.screenSpace`: the source already includes the wallpaper's on-screen zoom and position.
 // How light the wallpaper is behind a glass piece (0 black .. 1 white): its part of the frame,
 // averaged on a tiny canvas. Measured about once a second per piece.
 let glassLumaCanvas = null;
@@ -20626,11 +20795,77 @@ function glassColourFor(luma) {
   return `brightness(${down.toFixed(2)}) saturate(1.85) brightness(1.08)`;
 }
 
+function measureLiveGlassPosition(container, canvas, winW, winH) {
+  const rect = container.getBoundingClientRect();
+  if (rect.width <= 20 || rect.height <= 20) return null;
+  const sx = container.offsetWidth ? rect.width / container.offsetWidth : 1;
+  const sy = container.offsetHeight ? rect.height / container.offsetHeight : 1;
+  return { container, canvas, panelHeight: rect.height, x: `${rect.left / sx}px`, y: `${rect.top / sy}px`,
+    width: Math.abs(sx - 1) > 0.001 ? `${winW / sx}px` : "",
+    height: Math.abs(sy - 1) > 0.001 ? `${winH / sy}px` : "" };
+}
+
+function applyLiveGlassPosition(position) {
+  if (!position) return;
+  const { container, canvas, x, y, width, height } = position;
+  if (container.style.getPropertyValue("--dock-x") !== x) container.style.setProperty("--dock-x", x);
+  if (container.style.getPropertyValue("--dock-y") !== y) container.style.setProperty("--dock-y", y);
+  if (canvas.style.width !== width) canvas.style.width = width;
+  if (canvas.style.height !== height) canvas.style.height = height;
+}
+
+// Position follows display frames during any panel drag, independently of 30 fps wallpaper capture.
+let glassAlignmentFrame = 0;
+function queueLiveGlassAlignment() {
+  if (glassAlignmentFrame) return;
+  glassAlignmentFrame = requestAnimationFrame(() => {
+    glassAlignmentFrame = 0;
+    const positions = [...document.querySelectorAll(".has-live-glass")]
+      .filter((layer) => layer.checkVisibility())
+      .map((layer) => {
+        const canvas = layer.querySelector(".we-live-glass-canvas");
+        return canvas && measureLiveGlassPosition(layer, canvas, window.innerWidth, window.innerHeight);
+      });
+    // Read all geometry before changing any styles.
+    positions.forEach(applyLiveGlassPosition);
+  });
+}
+window.addEventListener("pointermove", (event) => {
+  if (event.buttons & 1) queueLiveGlassAlignment();
+}, { passive: true });
+window.addEventListener("pointerup", queueLiveGlassAlignment, { passive: true });
+window.addEventListener("pointercancel", queueLiveGlassAlignment, { passive: true });
+
+function getBlurredGlassFrame(sourceCanvas, filter) {
+  const cache = sourceCanvas._glassBlurCache || (sourceCanvas._glassBlurCache = new Map());
+  let entry = cache.get(filter);
+  if (!entry) {
+    if (cache.size >= 8) cache.delete(cache.keys().next().value);
+    const canvas = document.createElement("canvas");
+    entry = { canvas, ctx: canvas.getContext("2d"), version: -1 };
+    if (!entry.ctx) return null;
+    cache.set(filter, entry);
+  }
+  if (entry.canvas.width !== sourceCanvas.width || entry.canvas.height !== sourceCanvas.height) {
+    entry.canvas.width = sourceCanvas.width;
+    entry.canvas.height = sourceCanvas.height;
+    entry.version = -1;
+  }
+  if (entry.version !== sourceCanvas._glassFrameVersion) {
+    entry.ctx.clearRect(0, 0, entry.canvas.width, entry.canvas.height);
+    entry.ctx.filter = filter;
+    entry.ctx.drawImage(sourceCanvas, 0, 0);
+    entry.ctx.filter = "none";
+    entry.version = sourceCanvas._glassFrameVersion;
+  }
+  return entry.canvas;
+}
+
 function renderLiveSliceToGlass(containerOrId, sourceCanvas, winW, winH, opts = {}) {
   const container = typeof containerOrId === "string" ? document.getElementById(containerOrId) : containerOrId;
-  if (!container || !container.checkVisibility()) return;
+  if (!isLiveGlassVisible(container)) return;
 
-  container.classList.add("has-live-glass");
+  if (!container.classList.contains("has-live-glass")) container.classList.add("has-live-glass");
   // the glass has the size of the frame it is made from (256x144 from Wallpaper Engine's
   // capture, more from a video)
   const sw = sourceCanvas.width;
@@ -20644,7 +20879,7 @@ function renderLiveSliceToGlass(containerOrId, sourceCanvas, winW, winH, opts = 
     canvas.height = sh;
     container.appendChild(canvas);
   } else {
-    canvas.style.display = "";
+    if (canvas.style.display) canvas.style.display = "";
   }
 
   if (canvas.width !== sw || canvas.height !== sh) {
@@ -20652,18 +20887,23 @@ function renderLiveSliceToGlass(containerOrId, sourceCanvas, winW, winH, opts = 
     canvas.height = sh;
   }
 
+  const position = measureLiveGlassPosition(container, canvas, winW, winH);
   // Draw the full wallpaper frame onto the canvas (no slicing, 100% viewport mapped).
   // The blur runs here, at the frame's small size, instead of as a CSS filter on the
   // viewport-sized layer: a full-screen 28px blur had to be re-rasterised on every tick.
   const ctx = canvas._ctx || (canvas._ctx = canvas.getContext("2d", { willReadFrequently: false }));
   if (ctx) {
     ctx.clearRect(0, 0, sw, sh);
+    if (opts.transform) {
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, sw, sh);
+    }
     const scaleX = Math.max(1, (winW || 1) / sw);
     const scaleY = Math.max(1, (winH || 1) / sh);
     // Frosted glass spreads what is behind by 15% of the panel's height (6 to 28 screen px): a
     // big window gets the full 28px, while in a slim bar 28px would wash out everything behind
     // it into one flat colour (a dark line behind would leave no trace instead of a soft band).
-    const panelH = container.getBoundingClientRect().height || 0;
+    const panelH = position?.panelHeight || 0;
     const screenBlur = opts.blur || Math.min(28, Math.max(6, panelH * 0.15));
     const canvasBlur = Math.max(0.5, screenBlur / ((scaleX + scaleY) / 2));
     // the glass's colour: from the whole wallpaper (the same wherever the piece is moved)
@@ -20680,43 +20920,31 @@ function renderLiveSliceToGlass(containerOrId, sourceCanvas, winW, winH, opts = 
         else if (on && luma < 0.48) bar.classList.remove("is-over-light");
       }
     }
-    ctx.filter = `blur(${canvasBlur.toFixed(2)}px) ${colour}`;
+    const filter = `blur(${canvasBlur.toFixed(2)}px) ${colour}`;
+    // Most panels use the same blur. Filter each source frame once per look, then copy it.
+    const sharedFrame = opts.exact && opts.screenSpace && !opts.transform && sourceCanvas._glassFrameVersion !== undefined
+      ? getBlurredGlassFrame(sourceCanvas, filter) : null;
+    ctx.filter = sharedFrame ? "none" : filter;
     // Bleed outward slightly to prevent Gaussian blur from sampling transparent pixels at borders
     const bleed = opts.exact ? 0 : Math.ceil(canvasBlur * 1.5);
     // the wallpaper as it is on screen: zoomed and moved (Ctrl + wheel, arrows), scaled about the
     // middle of the window and then shifted, as the wallpaper itself is. The frame the glass is
     // made from is the wallpaper as it comes, without that.
-    const t = wallpaperTransform;
-    const zoom = Math.max(0.5, Math.min(5, t?.scale || 1));
-    const moved = zoom !== 1 || t?.panX || t?.panY;
+    const t = opts.transform || wallpaperTransform;
+    const zoom = Math.max(0.4, Math.min(4, t?.scale || 1));
+    const moved = !opts.screenSpace && (zoom !== 1 || t?.panX || t?.panY);
     if (moved) {
       ctx.save();
       ctx.translate(sw / 2 + (t.panX || 0) * (sw / (winW || 1)), sh / 2 + (t.panY || 0) * (sh / (winH || 1)));
       ctx.scale(zoom, zoom);
       ctx.translate(-sw / 2, -sh / 2);
     }
-    ctx.drawImage(sourceCanvas, -bleed, -bleed, sw + bleed * 2, sh + bleed * 2);
+    ctx.drawImage(sharedFrame || sourceCanvas, -bleed, -bleed, sw + bleed * 2, sh + bleed * 2);
     if (moved) ctx.restore();
     ctx.filter = "none";
   }
 
-  // Only update screen alignment variable if not actively being dragged or resized
-  const parentWin = container.closest(".home-cyber-window, .home-console-preview-dock");
-  const isManipulated = parentWin && (parentWin.classList.contains("is-dragging") || parentWin.classList.contains("is-resizing"));
-  if (!isManipulated) {
-    const rect = container.getBoundingClientRect();
-    if (rect.width > 20 && rect.height > 20 && (rect.left !== 0 || rect.top !== 0)) {
-      // The glass is the whole wallpaper laid over the screen, of which the container shows its
-      // part. Inside a scaled ancestor (the bar above the carousel is) it would be scaled too and
-      // show some other part: its size and offset are given in the container's own units.
-      const sx = container.offsetWidth ? rect.width / container.offsetWidth : 1;
-      const sy = container.offsetHeight ? rect.height / container.offsetHeight : 1;
-      container.style.setProperty("--dock-x", `${rect.left / sx}px`);
-      container.style.setProperty("--dock-y", `${rect.top / sy}px`);
-      canvas.style.width = Math.abs(sx - 1) > 0.001 ? `${winW / sx}px` : "";
-      canvas.style.height = Math.abs(sy - 1) > 0.001 ? `${winH / sy}px` : "";
-    }
-  }
+  applyLiveGlassPosition(position);
 }
 
 // Glass of the bar above the carousel with a video wallpaper. That bar used the browser's own
@@ -20726,10 +20954,10 @@ function renderLiveSliceToGlass(containerOrId, sourceCanvas, winW, winH, opts = 
 // (renderLiveSliceToGlass), the glass that never flickered. The console window keeps the
 // browser's blur, which looks right there.
 const VIDEO_GLASS_TARGETS = ["inst-pill-we-blur-bg", "inst-search-we-blur-bg"];
-// The frame is drawn from the video itself (no capture to pass around), so it can be sharper
-// than Wallpaper Engine's 256x144: a quarter of a 2560px screen.
-const VIDEO_GLASS_W = 640;
-const VIDEO_GLASS_H = 360;
+// Only the blurred glass uses this small frame; the wallpaper keeps its original
+// resolution. 320x180 avoids filtering four times as many pixels at each video frame.
+const VIDEO_GLASS_W = 320;
+const VIDEO_GLASS_H = 180;
 // what the bar had with the browser's blur: 28px, under each piece's own dark tint
 const VIDEO_GLASS_BLUR = 28;
 let videoGlassOn = false;
@@ -20761,6 +20989,7 @@ function drawVideoWallpaperFrame(ctx, winW, winH) {
     ctx.globalAlpha = parseFloat(cs.opacity);
     ctx.drawImage(v, (r.left + (r.width - dw) / 2) * kx, (r.top + (r.height - dh) / 2) * ky, dw * kx, dh * ky);
   }
+  compositeWallpaperSnapshot(ctx, winW, winH);
   const dim = document.getElementById("home-bg-dim-overlay");
   const dimAlpha = dim ? parseFloat(getComputedStyle(dim).opacity) || 0 : 0;
   if (dimAlpha > 0) {
@@ -20771,55 +21000,48 @@ function drawVideoWallpaperFrame(ctx, winW, winH) {
   ctx.globalAlpha = 1;
 }
 
-// On the launcher's shared animation clock (frame-clock.js, 30 fps, the pace of the videos): it
-// used to wake the page on every display refresh to check the time, and kept drawing while the bar
-// was hidden in another section (a parked section keeps its layout, so offsetParent says visible).
+function isLiveGlassVisible(container) {
+  return !!container && !container.closest("[inert]") &&
+    container.checkVisibility({ opacityProperty: true, visibilityProperty: true });
+}
+
+// Follow decoded video frames, rather than sampling 60 fps video on a separate 30 fps timer.
 function videoGlassTick() {
   if (!videoGlassOn || document.hidden) return;
   const bar = document.getElementById("instance-filter-search-bar");
-  if (!bar || !bar.checkVisibility()) return;
+  if (!isLiveGlassVisible(bar)) return;
   const winW = window.innerWidth || 1;
   const winH = window.innerHeight || 1;
   drawVideoWallpaperFrame(videoGlassCtx, winW, winH);
+  videoGlassCanvas._glassFrameVersion = (videoGlassCanvas._glassFrameVersion || 0) + 1;
   for (const id of VIDEO_GLASS_TARGETS) {
-    const look = videoGlassLooks.get(id) || { blur: VIDEO_GLASS_BLUR, colour: "saturate(1.8)" };
-    renderLiveSliceToGlass(id, videoGlassCanvas, winW, winH, { ...look, exact: true, ...(/^inst-/.test(id) ? { blur: 28 } : {}) });
+    renderLiveSliceToGlass(id, videoGlassCanvas, winW, winH, { blur: VIDEO_GLASS_BLUR, colour: "saturate(1)", exact: true, screenSpace: true });
   }
 }
 
-// The blur each piece had with the browser's own (from its theme: the bar 28px or 36px with
-// "Difuminado", the search box 16px), read before it is switched off, so the glass looks the same.
-const videoGlassLooks = new Map();
-function readBrowserBlur(el) {
-  const f = getComputedStyle(el).backdropFilter || "";
-  const blur = f.match(/blur\(([\d.]+)px\)/);
-  if (!blur) return null;
-  return { blur: parseFloat(blur[1]), colour: f.replace(blur[0], "").trim() };
-}
-
-// Each piece keeps its own dark tint (from the theme: the bar's gradient, the search box's
-// near-black), now painted over the glass by its top layer: the piece itself goes transparent,
-// since a dark fill under the glass showed as a fine ring along the rounded edges.
+// The bar takes its colours from the video. Only the search field keeps a neutral dark fill;
+// copying the theme's gradient here introduced purple even over red wallpapers.
 function applyVideoGlassTints(on) {
-  for (const id of VIDEO_GLASS_TARGETS) {
+  const pieces = VIDEO_GLASS_TARGETS.map((id) => {
     const layer = document.getElementById(id);
     const piece = layer?.parentElement;
-    if (!piece) continue;
+    return piece ? { id, layer, piece } : null;
+  }).filter(Boolean);
+  // The renderer uses a fixed 28px blur and neutral saturation for both targets.
+  // Reading their old backdrop-filter was unused and forced a global style pass
+  // between removing native mode and enabling video mode (35ms in the trace).
+  for (const { piece } of pieces) piece.style.removeProperty("background");
+  for (const { id, layer, piece } of pieces) {
     if (!on) {
-      piece.style.removeProperty("background");
       layer.style.removeProperty("--video-glass-tint");
       continue;
     }
-    piece.style.removeProperty("background");
-    const cs = getComputedStyle(piece);
-    const tint = cs.backgroundImage && cs.backgroundImage !== "none" ? cs.backgroundImage : cs.backgroundColor;
-    videoGlassLooks.set(id, readBrowserBlur(layer) || readBrowserBlur(piece) || { blur: VIDEO_GLASS_BLUR, colour: "saturate(1.8)" });
-    layer.style.setProperty("--video-glass-tint", tint);
+    layer.style.setProperty("--video-glass-tint", id === "inst-pill-we-blur-bg" ? "none" : "rgba(8, 8, 14, 0.84)");
     piece.style.setProperty("background", "transparent", "important");
   }
 }
 
-function setVideoGlass(on) {
+function setVideoGlass(on, { preserveGlass = false } = {}) {
   if (on === videoGlassOn) return;
   videoGlassOn = on;
   applyVideoGlassTints(on);
@@ -20836,11 +21058,19 @@ function setVideoGlass(on) {
       const el = document.getElementById(id);
       if (el) el.style.opacity = "";
     }
-    if (!videoGlassUntick) videoGlassUntick = onTick(videoGlassTick);
+    // Paint before the snapshot starts fading, rather than waiting for the next timer tick.
+    videoGlassTick();
+    if (!videoGlassUntick) videoGlassUntick = startVideoFrameLoop({
+      videos: [el.homeBgVideo, el.homeBgVideoNext].filter(Boolean),
+      paint: videoGlassTick,
+      isActive: () => videoGlassOn && !document.hidden && isLiveGlassVisible(document.getElementById("instance-filter-search-bar")),
+    });
     return;
   }
   videoGlassUntick?.();
   videoGlassUntick = null;
+  // Wallpaper Engine may already be drawing into these shared canvases.
+  if (preserveGlass || document.body.classList.contains("has-we-active")) return;
   for (const id of VIDEO_GLASS_TARGETS) {
     const el = document.getElementById(id);
     if (!el) continue;
@@ -20852,6 +21082,7 @@ function setVideoGlass(on) {
 
 // On while a video is the wallpaper (not a Wallpaper Engine scene, which has its own glass).
 setInterval(() => {
+  if (weGlassPendingSwitch) return;
   const video = !document.body.classList.contains("has-we-active") && [...document.querySelectorAll(".home-bg-video.is-active")].some((v) => v.currentSrc);
   setVideoGlass(video);
 }, 1000);
@@ -20922,17 +21153,9 @@ async function captureWeSnapshotAsDataUrl() {
         offCanvas.height = scaleH;
         const ctx = offCanvas.getContext("2d");
         if (ctx) {
-          const rawImg = new ImageData(w, h);
-          const dst = rawImg.data;
-          for (let s = 8, d = 0, n = w * h * 4; d < n; s += 4, d += 4) {
-            dst[d] = bytes[s + 2];     // R
-            dst[d + 1] = bytes[s + 1]; // G
-            dst[d + 2] = bytes[s];     // B
-            dst[d + 3] = 255;          // A
-          }
-          const bmp = await createImageBitmap(rawImg);
-          ctx.drawImage(bmp, 0, 0, scaleW, scaleH);
-          bmp.close();
+          const bmp = await decodeSnapshotBitmap(bytes);
+          try { ctx.drawImage(bmp, 0, 0, scaleW, scaleH); }
+          finally { bmp.close(); }
           return offCanvas.toDataURL("image/jpeg", 0.85);
         }
       }
@@ -20943,7 +21166,10 @@ async function captureWeSnapshotAsDataUrl() {
   return null;
 }
 
+let weBackdropRequest = 0;
 async function updateWePillsBlurBackdrop(explicitPath = null) {
+  const request = ++weBackdropRequest;
+  const switchId = sceneSwitchCounter;
   const isWe = document.body.classList.contains("has-we-active") || Boolean(explicitPath);
   const blurBg = document.getElementById("inst-pill-we-blur-bg");
   const searchBlurBg = document.getElementById("inst-search-we-blur-bg");
@@ -20961,7 +21187,8 @@ async function updateWePillsBlurBackdrop(explicitPath = null) {
       consoleBlurBg.style.opacity = "0";
       consoleBlurBg.style.display = "none";
     }
-    document.documentElement.style.removeProperty("--we-blur-preview-url");
+    document.querySelectorAll(".inst-pill-we-blur-bg, .inst-search-we-blur-bg, .hcp-we-blur-bg")
+      .forEach(layer => layer.style.removeProperty("--we-blur-preview-url"));
     return;
   }
 
@@ -20972,9 +21199,9 @@ async function updateWePillsBlurBackdrop(explicitPath = null) {
     || "";
 
   if (!rawPath) {
-    if (blurBg) blurBg.style.opacity = "0";
-    if (searchBlurBg) searchBlurBg.style.opacity = "0";
-    if (consoleBlurBg) {
+    if (blurBg && !blurBg.classList.contains("has-live-glass")) blurBg.style.opacity = "0";
+    if (searchBlurBg && !searchBlurBg.classList.contains("has-live-glass")) searchBlurBg.style.opacity = "0";
+    if (consoleBlurBg && !consoleBlurBg.classList.contains("has-live-glass")) {
       consoleBlurBg.style.opacity = "0";
       consoleBlurBg.style.display = "none";
     }
@@ -21019,6 +21246,7 @@ async function updateWePillsBlurBackdrop(explicitPath = null) {
     } catch (_) {}
   }
 
+  if (request !== weBackdropRequest || switchId !== sceneSwitchCounter) return;
   if (previewDiskPath) {
     const assetUrl = previewDiskPath.startsWith("http") || previewDiskPath.startsWith("asset") || previewDiskPath.startsWith("data:")
       ? previewDiskPath
@@ -21029,7 +21257,8 @@ async function updateWePillsBlurBackdrop(explicitPath = null) {
       ? previewDiskPath
       : ((await freezeWallpaperImageFrame(assetUrl)) || assetUrl);
 
-    document.documentElement.style.setProperty("--we-blur-preview-url", `url("${finalUrl}")`);
+    if (request !== weBackdropRequest || switchId !== sceneSwitchCounter) return;
+
     if (blurBg) {
       blurBg.style.setProperty("--we-blur-preview-url", `url("${finalUrl}")`);
       blurBg.style.opacity = "1";
@@ -21044,9 +21273,10 @@ async function updateWePillsBlurBackdrop(explicitPath = null) {
       bg.style.opacity = consoleBlurEnabled ? "1" : "0";
     });
   } else {
-    if (blurBg) blurBg.style.opacity = "0";
-    if (searchBlurBg) searchBlurBg.style.opacity = "0";
+    if (blurBg && !blurBg.classList.contains("has-live-glass")) blurBg.style.opacity = "0";
+    if (searchBlurBg && !searchBlurBg.classList.contains("has-live-glass")) searchBlurBg.style.opacity = "0";
     document.querySelectorAll(".hcp-we-blur-bg").forEach((bg) => {
+      if (bg.classList.contains("has-live-glass")) return;
       bg.style.opacity = "0";
       bg.style.display = "none";
     });
@@ -21056,6 +21286,7 @@ async function updateWePillsBlurBackdrop(explicitPath = null) {
 async function playSceneWallpaper(pkgPath, title, projectPath = null, item = null) {
   cancelSeamlessLoop();
   const switchId = ++sceneSwitchCounter;
+  weGlassPendingSwitch = switchId;
   lastSceneArgs = { pkgPath, title, projectPath, item };
   weSceneSuspended = false;
   weSceneFrozen = false;
@@ -21063,7 +21294,10 @@ async function playSceneWallpaper(pkgPath, title, projectPath = null, item = nul
   sceneSwitchesInFlight++;
   try {
     // 1. Capture snapshot of current wallpaper (video or Wallpaper Engine) so it freezes smoothly on screen without any black gap
-    await captureCurrentWallpaperSnapshot();
+    // A native scene must remain visible until WebView2 has presented its snapshot.
+    // DwmFlush in Rust alone cannot guarantee that WebView2 submitted that frame.
+    await captureCurrentWallpaperSnapshot({ waitForPresentation: document.body.classList.contains("has-we-active") });
+    if (switchId !== sceneSwitchCounter) return;
 
     const target = projectPath || pkgPath;
     const isWeb = (pkgPath && pkgPath.toLowerCase().endsWith(".html")) ||
@@ -21084,47 +21318,46 @@ async function playSceneWallpaper(pkgPath, title, projectPath = null, item = nul
       projectPath: target,
       properties: Object.keys(cleanProps).length > 0 ? cleanProps : undefined,
     });
+    if (switchId !== sceneSwitchCounter) return;
 
     if (weOk) {
-      saveActiveWallpaperState({
-        type: "steam_scene",
-        title: title || (item && item.title) || "Wallpaper Engine",
-        projectPath: projectPath || (item && item.project_path) || null,
-        steamPath: pkgPath || (item && item.video_path) || null,
-        activeId: (item && item.id) || null,
-      });
-      document.documentElement.classList.add("has-we-active");
       document.body.classList.add("has-we-active");
-      updateWePillsBlurBackdrop(target);
+      // Transfer ownership of the shared glass canvases without clearing their last image.
+      setVideoGlass(false, { preserveGlass: true });
       lastSentBlurRect = null;
       syncConsoleBlurRect(true, true);
     } else {
-      console.warn("Wallpaper Engine no devolvió confirmación de ventana.");
+      if (weGlassPendingSwitch === switchId) weGlassPendingSwitch = 0;
+      // Keep the previous video/state when native opening fails. Continuing here
+      // hid the video and persisted a scene that never opened, leaving black.
+      throw new Error("Wallpaper Engine no pudo abrir la ventana del fondo. El fondo anterior se conserva.");
     }
 
+    // The capture stream already validates the first scene frame. Follow its display-frame
+    // notification instead of repeatedly capturing the screen through DWM while WE loads.
+    weGlassFirstFrameUntil = performance.now() + 5000;
+    weGlassPendingSwitch = 0;
+    startWeCanvasStream();
     (async () => {
       if (weOk) {
         const deadline = Date.now() + 5000;
         while (switchId === sceneSwitchCounter && Date.now() < deadline) {
-          let ready = false;
-          try {
-            ready = await invoke("is_we_scene_rendering");
-          } catch (_) {
-            break;
-          }
-          if (ready) break;
-          await new Promise((r) => setTimeout(r, 120));
+          if (weGlassPaintedSwitch === switchId) break;
+          await new Promise((r) => setTimeout(r, 16));
         }
         if (switchId === sceneSwitchCounter) {
-          startWeCanvasStream();
-          updateWePillsBlurBackdrop(projectPath || pkgPath || target);
+          const glassDeadline = performance.now() + 1500;
+          while (switchId === sceneSwitchCounter && weGlassPaintedSwitch !== switchId && performance.now() < glassDeadline) {
+            await new Promise((resolve) => setTimeout(resolve, 16));
+          }
         }
       }
-      if (switchId === sceneSwitchCounter) fadeOutSnapshot(80);
+      if (switchId === sceneSwitchCounter) fadeOutSnapshot(0);
     })();
 
     // Pause background videos cleanly after transition begins
     setTimeout(() => {
+      if (switchId !== sceneSwitchCounter) return;
       if (el.homeBgVideo) {
         el.homeBgVideo.pause();
         el.homeBgVideo.classList.remove("is-active");
@@ -21163,9 +21396,11 @@ async function playSceneWallpaper(pkgPath, title, projectPath = null, item = nul
     updateActiveDownloadedCards();
   } catch (err) {
     console.error("Error playing Scene with Wallpaper Engine:", err);
+    if (weGlassPendingSwitch === switchId) weGlassPendingSwitch = 0;
     fadeOutSnapshot(0);
     showToast(`Error al reproducir con Wallpaper Engine: ${err}`);
   } finally {
+    if (weGlassPendingSwitch === switchId && !document.body.classList.contains("has-we-active")) weGlassPendingSwitch = 0;
     sceneSwitchesInFlight--;
     // The user may have left while the scene was opening: pause it now.
     if (sceneSwitchesInFlight === 0 && !isBackgroundLive()) onLauncherActivityChange();
@@ -21177,153 +21412,178 @@ async function transitionBackground(targetUrl, targetTitle, transitionType = nul
   if (!targetUrl) return;
   cancelSeamlessLoop();
   // Cancel a pending scene fade-out: this transition manages the snapshot now.
-  sceneSwitchCounter++;
+  const switchId = ++sceneSwitchCounter;
+  wallpaperVideoTransition = switchId;
+  let cleanupScheduled = false;
+  try {
+    weGlassPendingSwitch = 0;
 
-  const trans = transitionType || bgPlaylistTransition || "crossfade";
-  const primaryVid = el.homeBgVideo;
-  const secondaryVid = el.homeBgVideoNext;
+    const trans = transitionType || bgPlaylistTransition || "crossfade";
+    const primaryVid = el.homeBgVideo;
+    const secondaryVid = el.homeBgVideoNext;
+    const currentVid = currentActiveVideoSlot === "primary" ? primaryVid : secondaryVid;
+    const nextVid = currentActiveVideoSlot === "primary" ? secondaryVid : primaryVid;
+    // Buffer the incoming video while DWM presents the frozen outgoing frame.
+    // The loop preloader is suspended above, so it cannot overwrite this source.
+    if (primaryVid && secondaryVid &&
+        ((trans !== "cut" && trans !== "fade-black") || document.body.classList.contains("has-we-active"))) {
+      nextVid.preload = "auto";
+      if (nextVid.getAttribute("src") !== targetUrl) nextVid.src = targetUrl;
+      nextVid.play().catch(() => {});
+    }
 
-  // 1. Capture snapshot of currently playing wallpaper so it freezes seamlessly on screen
-  await captureCurrentWallpaperSnapshot();
+    // Video-to-video stays in one compositor: the snapshot and incoming frame can be
+    // presented together. Only a native underlay needs the extra DWM presentation barrier.
+    await captureCurrentWallpaperSnapshot({ waitForPresentation: document.body.classList.contains("has-we-active") });
+    if (switchId !== sceneSwitchCounter) return;
 
-  const wasWeActive = document.body.classList.contains("has-we-active");
+    const wasWeActive = document.body.classList.contains("has-we-active");
 
-  activeWallpaperUrl = targetUrl;
-  activeWallpaperTitle = targetTitle || "Fondo Animado";
-  if (el.mbgActiveTitle) el.mbgActiveTitle.textContent = activeWallpaperTitle;
-  if (el.playlistCurrentTitle) el.playlistCurrentTitle.textContent = activeWallpaperTitle;
+    activeWallpaperUrl = targetUrl;
+    activeWallpaperTitle = targetTitle || "Fondo Animado";
+    if (el.mbgActiveTitle) el.mbgActiveTitle.textContent = activeWallpaperTitle;
+    if (el.playlistCurrentTitle) el.playlistCurrentTitle.textContent = activeWallpaperTitle;
 
-  loadActiveWallpaperTransform(false);
+    loadActiveWallpaperTransform(false);
 
-  if (wallpaperType) {
-    localStorage.setItem("modcomparer_wallpaper_type", wallpaperType);
-    if (wallpaperType === "motionbgs" && targetUrl && !targetUrl.startsWith("http://asset.localhost") && !targetUrl.startsWith("blob:")) {
+    if (wallpaperType) {
+      localStorage.setItem("modcomparer_wallpaper_type", wallpaperType);
+      if (wallpaperType === "motionbgs" && targetUrl && !targetUrl.startsWith("http://asset.localhost") && !targetUrl.startsWith("blob:")) {
+        localStorage.setItem("modcomparer_wallpaper_url", targetUrl);
+      }
+    } else if (!targetUrl.startsWith("http://asset.localhost") && !targetUrl.startsWith("blob:")) {
+      localStorage.setItem("modcomparer_wallpaper_type", "motionbgs");
       localStorage.setItem("modcomparer_wallpaper_url", targetUrl);
     }
-  } else if (!targetUrl.startsWith("http://asset.localhost") && !targetUrl.startsWith("blob:")) {
-    localStorage.setItem("modcomparer_wallpaper_type", "motionbgs");
-    localStorage.setItem("modcomparer_wallpaper_url", targetUrl);
-  }
-  localStorage.setItem("modcomparer_wallpaper_title", activeWallpaperTitle);
+    localStorage.setItem("modcomparer_wallpaper_title", activeWallpaperTitle);
 
-  if (isMp4Url(targetUrl)) {
-    updateButtonWallpaperPreview(targetUrl);
-  }
-
-  // If only one video element exists, direct swap
-  if (!secondaryVid || !primaryVid) {
-    if (primaryVid) {
-      primaryVid.src = targetUrl;
-      primaryVid.play().catch(() => {});
-      fadeOutSnapshot(150);
+    if (isMp4Url(targetUrl)) {
+      updateButtonWallpaperPreview(targetUrl);
     }
-    updateActiveCatalogCards();
-    return;
-  }
 
-  const currentVid = currentActiveVideoSlot === "primary" ? primaryVid : secondaryVid;
-  const nextVid = currentActiveVideoSlot === "primary" ? secondaryVid : primaryVid;
+    // If only one video element exists, direct swap
+    if (!secondaryVid || !primaryVid) {
+      if (primaryVid) {
+        primaryVid.src = targetUrl;
+        primaryVid.play().catch(() => {});
+        fadeOutSnapshot(150);
+      }
+      updateActiveCatalogCards();
+      return;
+    }
 
-  if (trans === "cut") {
-    currentVid.src = targetUrl;
-    currentVid.play().catch(() => {});
-    fadeOutSnapshot(100);
+    if (trans === "cut" && !wasWeActive) {
+      currentVid.src = targetUrl;
+      currentVid.play().catch(() => {});
+      fadeOutSnapshot(100);
+      updateActiveCatalogCards();
+      return;
+    }
+
+    if (trans === "fade-black" && !wasWeActive) {
+      if (el.homeBgOverlay) el.homeBgOverlay.classList.add("fade-black-active");
+      setTimeout(() => {
+        currentVid.src = targetUrl;
+        currentVid.play().catch(() => {});
+        setTimeout(() => {
+          if (el.homeBgOverlay) el.homeBgOverlay.classList.remove("fade-black-active");
+        }, 400);
+      }, 450);
+      updateActiveCatalogCards();
+      return;
+    }
+
+    // Crossfade / Slide Transition with Freeze-Frame Snapshot:
+    // Clean opacities so videos are ready
+    if (primaryVid) primaryVid.style.opacity = "";
+    if (secondaryVid) secondaryVid.style.opacity = "";
+
+    // Assign the new video source to nextVid
+    if (nextVid.getAttribute("src") !== targetUrl) nextVid.src = targetUrl;
+
+    // Wait for nextVid to actually decode and start playing before removing previous video or snapshot!
+    await new Promise((resolve) => {
+      let resolved = false;
+      let readyTimeout;
+      const onReady = () => {
+        if (!resolved) {
+          resolved = true;
+          cleanup();
+          resolve();
+        }
+      };
+      const cleanup = () => {
+        clearTimeout(readyTimeout);
+        nextVid.removeEventListener("playing", onReady);
+        nextVid.removeEventListener("loadeddata", onReady);
+        nextVid.removeEventListener("error", onReady);
+      };
+      nextVid.addEventListener("playing", onReady, { once: true });
+      nextVid.addEventListener("loadeddata", onReady, { once: true });
+      nextVid.addEventListener("error", onReady, { once: true });
+      nextVid.play().catch(() => {});
+      // Fallback: 1800ms max wait
+      readyTimeout = setTimeout(onReady, 1800);
+      if (nextVid.readyState >= 2 && nextVid.videoWidth > 0) onReady();
+    });
+    if (switchId !== sceneSwitchCounter) return;
+
+    if (trans === "slide") {
+      nextVid.classList.add("slide-in");
+    }
+
     if (wasWeActive) {
-      stopWeCanvasStream();
-      document.documentElement.classList.remove("has-we-active");
+      // The frozen PKG frame provides the cross-fade. A second fade on the incoming video
+      // would darken the midpoint and make the glass and the wallpaper finish at different times.
+      nextVid.style.transition = "none";
+      nextVid.style.opacity = "1";
+    }
+    nextVid.classList.add("is-active");
+    currentVid.classList.remove("is-active");
+    currentActiveVideoSlot = nextVid === primaryVid ? "primary" : "secondary";
+
+    // If previous background was Wallpaper Engine, safely stop it now that the video is already active
+    if (wasWeActive) {
+      stopWeCanvasStream({ preserveGlass: true });
       document.body.classList.remove("has-we-active");
+      applyWallpaperTransform(false, false, true);
+      setVideoGlass(true);
       updateWePillsBlurBackdrop(null);
       lastSentBlurRect = null;
       syncConsoleBlurRect(true, true);
       invoke("stop_we_wallpaper").catch(() => {});
     }
-    updateActiveCatalogCards();
-    return;
-  }
 
-  if (trans === "fade-black") {
-    if (el.homeBgOverlay) el.homeBgOverlay.classList.add("fade-black-active");
+    // Both the visible video and its glass now contain the same snapshot blend.
+    fadeOutSnapshot(0);
+
+    if (el.homeBgScene) {
+      el.homeBgScene.style.display = "none";
+      el.homeBgScene.style.opacity = "0";
+      el.homeBgScene.src = "about:blank";
+    }
+    if (currentSceneBlobUrl) {
+      URL.revokeObjectURL(currentSceneBlobUrl);
+      currentSceneBlobUrl = null;
+    }
+
+    cleanupScheduled = true;
     setTimeout(() => {
-      currentVid.src = targetUrl;
-      currentVid.play().catch(() => {});
-      setTimeout(() => {
-        if (el.homeBgOverlay) el.homeBgOverlay.classList.remove("fade-black-active");
-      }, 400);
-    }, 450);
-    updateActiveCatalogCards();
-    return;
-  }
-
-  // Crossfade / Slide Transition with Freeze-Frame Snapshot:
-  // Clean opacities so videos are ready
-  if (primaryVid) primaryVid.style.opacity = "";
-  if (secondaryVid) secondaryVid.style.opacity = "";
-
-  // Assign the new video source to nextVid
-  nextVid.src = targetUrl;
-
-  // Wait for nextVid to actually decode and start playing before removing previous video or snapshot!
-  await new Promise((resolve) => {
-    let resolved = false;
-    const onReady = () => {
-      if (!resolved) {
-        resolved = true;
-        cleanup();
-        resolve();
+      if (switchId !== sceneSwitchCounter) return;
+      if (wasWeActive) {
+        nextVid.style.removeProperty("transition");
+        nextVid.style.removeProperty("opacity");
       }
-    };
-    const cleanup = () => {
-      nextVid.removeEventListener("playing", onReady);
-      nextVid.removeEventListener("loadeddata", onReady);
-      nextVid.removeEventListener("error", onReady);
-    };
-    nextVid.addEventListener("playing", onReady, { once: true });
-    nextVid.addEventListener("loadeddata", onReady, { once: true });
-    nextVid.addEventListener("error", onReady, { once: true });
-    nextVid.play().catch(() => {});
-    // Fallback: 1800ms max wait
-    setTimeout(onReady, 1800);
-  });
+      currentVid.pause();
+      currentVid.classList.remove("slide-in");
+      if (wallpaperVideoTransition === switchId) wallpaperVideoTransition = 0;
+      preloadInactivePlayer(nextVid);
+    }, 250);
 
-  if (trans === "slide") {
-    nextVid.classList.add("slide-in");
+    updateActiveCatalogCards();
+  } finally {
+    if (!cleanupScheduled && wallpaperVideoTransition === switchId) wallpaperVideoTransition = 0;
   }
-
-  nextVid.classList.add("is-active");
-  currentVid.classList.remove("is-active");
-
-  // Fade out the freeze-frame snapshot smoothly over the already playing video!
-  fadeOutSnapshot(100);
-
-  // If previous background was Wallpaper Engine, safely stop it now that the video is already active
-  if (wasWeActive) {
-    stopWeCanvasStream();
-    document.documentElement.classList.remove("has-we-active");
-    document.body.classList.remove("has-we-active");
-    updateWePillsBlurBackdrop(null);
-    lastSentBlurRect = null;
-    syncConsoleBlurRect(true, true);
-    invoke("stop_we_wallpaper").catch(() => {});
-  }
-
-  if (el.homeBgScene) {
-    el.homeBgScene.style.display = "none";
-    el.homeBgScene.style.opacity = "0";
-    el.homeBgScene.src = "about:blank";
-  }
-  if (currentSceneBlobUrl) {
-    URL.revokeObjectURL(currentSceneBlobUrl);
-    currentSceneBlobUrl = null;
-  }
-
-  setTimeout(() => {
-    currentVid.pause();
-    currentVid.classList.remove("slide-in");
-    currentActiveVideoSlot = currentActiveVideoSlot === "primary" ? "secondary" : "primary";
-    preloadInactivePlayer(nextVid);
-  }, 1200);
-
-  updateActiveCatalogCards();
 }
 
 function setMbgActiveTag(tag) {
@@ -21521,7 +21781,9 @@ async function fetchAndRenderMotionBgs(query, tag, page = 1) {
   }
 }
 
-function renderMotionBgsGrid(items) {
+let motionGridGeneration = 0;
+async function renderMotionBgsGrid(items) {
+  const generation = ++motionGridGeneration;
   if (el.mbgLoadingState) el.mbgLoadingState.classList.add("hidden");
 
   if (!el.mbgCatalogGrid) return;
@@ -21534,7 +21796,10 @@ function renderMotionBgsGrid(items) {
 
   if (el.mbgEmptyState) el.mbgEmptyState.classList.add("hidden");
 
-  items.forEach((item) => {
+  const fragment = document.createDocumentFragment();
+  let sliceStarted = performance.now();
+  for (const item of items) {
+    if (generation !== motionGridGeneration) return;
     const card = document.createElement("div");
     let selectedRes = "1080p"; // default resolution
     const isActive = activeWallpaperUrl.includes(item.file_slug);
@@ -21829,8 +22094,14 @@ function renderMotionBgsGrid(items) {
       }
     });
 
-    el.mbgCatalogGrid.appendChild(card);
-  });
+    fragment.appendChild(card);
+    if (performance.now() - sliceStarted >= 5) {
+      el.mbgCatalogGrid.appendChild(fragment);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      sliceStarted = performance.now();
+    }
+  }
+  if (generation === motionGridGeneration) el.mbgCatalogGrid.appendChild(fragment);
 }
 
 function updateActiveCatalogCards() {
@@ -21857,7 +22128,13 @@ function updateActiveCatalogCards() {
     if (btnPl) {
       const inPl = bgPlaylist.some((p) => p.url.includes(slug));
       btnPl.classList.toggle("in-playlist", inPl);
-      btnPl.innerHTML = inPl ? "<span>✓ Playlist</span>" : "<span>+ Playlist</span>";
+      const text = inPl ? "✓ Playlist" : "+ Playlist";
+      const label = btnPl.querySelector("span");
+      if (label) {
+        if (label.textContent !== text) label.textContent = text;
+      } else {
+        btnPl.innerHTML = `<span>${text}</span>`;
+      }
     }
   });
 }
@@ -21963,7 +22240,6 @@ async function loadAndApplySavedWallpaper() {
   // Ensure any previous scene or WE instance is deactivated when playing video
   if (document.body.classList.contains("has-we-active")) {
     stopWeCanvasStream();
-    document.documentElement.classList.remove("has-we-active");
     document.body.classList.remove("has-we-active");
     updateWePillsBlurBackdrop(null);
     invoke("stop_we_wallpaper").catch(() => {});
@@ -22108,6 +22384,8 @@ function openWallpapersModal() {
 
   const savedTab = localStorage.getItem("modcomparer_last_wallpaper_tab") || "downloaded";
   switchWallpaperTab(savedTab);
+  updateWallpaperTabUnderline(true);
+  prepareVisibleWallpaperOptions();
 }
 
 function closeWallpapersModal() {
@@ -22123,8 +22401,10 @@ function closeWallpapersModal() {
   }
   if (el.modalWallpapers && !el.modalWallpapers.classList.contains("hidden")) {
     const modal = el.modalWallpapers;
-    modal.classList.add("is-closing");
+    // CRT reads the open window's geometry. Do that before the closing state
+    // changes inherited pointer-events and invalidates the entire catalog.
     crtClose(modal.querySelector(".modal-wallpapers-box"), WALLPAPERS_CLOSE_MS);
+    modal.classList.add("is-closing");
     clearTimeout(wallpapersCloseTimer);
     wallpapersCloseTimer = setTimeout(() => {
       modal.classList.add("hidden");
@@ -22132,14 +22412,8 @@ function closeWallpapersModal() {
       closeWePropertiesPanel();
     }, WALLPAPERS_CLOSE_MS);
   }
-  if (el.mbgCatalogGrid) {
-    el.mbgCatalogGrid.querySelectorAll("video").forEach((v) => {
-      v.pause();
-      v.classList.remove("is-playing");
-    });
-  }
-  if (el.steamCatalogGrid) {
-    el.steamCatalogGrid.querySelectorAll("video").forEach((v) => {
+  for (const grid of [el.mbgCatalogGrid, el.steamCatalogGrid, el.downloadedCatalogGrid]) {
+    grid?.querySelectorAll("video").forEach((v) => {
       v.pause();
       v.classList.remove("is-playing");
     });
@@ -22476,6 +22750,7 @@ function renderSteamLocalCards(wallpapers) {
 
       const btnWeOptions = card.querySelector(".btn-we-options");
       if (btnWeOptions) {
+        card._weOptionsItem = item;
         btnWeOptions.addEventListener("click", async (e) => {
           e.stopPropagation();
           try {
@@ -22926,6 +23201,12 @@ async function applySteamWallpaper(item) {
       return;
     }
 
+    if (!sceneSwitchesInFlight && !wallpaperVideoTransition && isWallpaperItemActive(item)) {
+      if (hasWeCustomProperties(item)) openWePropertiesPanel(item);
+      else closeWallpapersModal();
+      return;
+    }
+
     const isScene = item.is_scene || (videoPath && (videoPath.toLowerCase().endsWith(".pkg") || videoPath.toLowerCase().endsWith(".json") || videoPath.toLowerCase().endsWith(".html")));
     if (isScene) {
       await playSceneWallpaper(videoPath, item.title, item.project_path, item);
@@ -22937,7 +23218,7 @@ async function applySteamWallpaper(item) {
       return;
     }
 
-    const streamUrl = convertFileSrc(videoPath) + "?t=" + Date.now();
+    const streamUrl = convertFileSrc(videoPath);
     await transitionBackground(streamUrl, item.title, "crossfade", "steam_workshop");
 
     saveActiveWallpaperState({
@@ -23012,7 +23293,13 @@ function updateActiveSteamCards() {
     if (btnPl) {
       const inPl = bgPlaylist.some((p) => p.url === vpath);
       btnPl.classList.toggle("in-playlist", inPl);
-      btnPl.innerHTML = inPl ? "<span>✓ Playlist</span>" : "<span>+ Playlist</span>";
+      const text = inPl ? "✓ Playlist" : "+ Playlist";
+      const label = btnPl.querySelector("span");
+      if (label) {
+        if (label.textContent !== text) label.textContent = text;
+      } else {
+        btnPl.innerHTML = `<span>${text}</span>`;
+      }
     }
   });
 
@@ -23083,7 +23370,7 @@ function filterAndRenderDownloadedCards() {
   }
 
   if (filtered.length === 0) {
-    el.downloadedCatalogGrid.innerHTML = "";
+    renderDownloadedCards([]);
     if (el.downloadedEmptyState) el.downloadedEmptyState.classList.remove("hidden");
     return;
   }
@@ -23093,8 +23380,13 @@ function filterAndRenderDownloadedCards() {
 }
 
 const videoThumbCache = new Map();
+const queueVideoThumbnail = createVisibleTaskQueue(2);
 
 function captureVideoThumbnail(videoPath, imgElement) {
+  queueVideoThumbnail(imgElement, () => decodeVideoThumbnail(videoPath, imgElement));
+}
+
+async function decodeVideoThumbnail(videoPath, imgElement) {
   if (!videoPath || !imgElement) return;
   const lower = String(videoPath).toLowerCase();
   // Strictly only decode actual video formats — scenes (.pkg, .json) cannot be decoded as video
@@ -23130,6 +23422,9 @@ function captureVideoThumbnail(videoPath, imgElement) {
   };
 
   let captured = false;
+  let finish;
+  let timeout;
+  const completed = new Promise((resolve) => { finish = resolve; });
   const doCapture = async () => {
     if (captured) return;
     try {
@@ -23151,6 +23446,12 @@ function captureVideoThumbnail(videoPath, imgElement) {
       }
     } catch (e) {
       release();
+    } finally {
+      if (captured) {
+        clearTimeout(timeout);
+        release();
+        finish();
+      }
     }
   };
 
@@ -23160,13 +23461,24 @@ function captureVideoThumbnail(videoPath, imgElement) {
   }, { once: true });
   v.addEventListener("canplay", doCapture, { once: true });
 
-  setTimeout(() => {
+  v.addEventListener("error", () => {
+    captured = true;
+    clearTimeout(timeout);
+    release();
+    finish();
+  }, { once: true });
+  timeout = setTimeout(() => {
     if (!captured) {
       doCapture().finally(() => {
-        if (!captured) release();
+        if (!captured) {
+          captured = true;
+          release();
+          finish();
+        }
       });
     }
   }, 1200);
+  await completed;
 }
 
 function clearWallpaperStorageKeys() {
@@ -23290,7 +23602,6 @@ async function restorePreviousWallpaper(deleted) {
         try {
           await invoke("stop_we_wallpaper");
         } catch (_) {}
-        document.documentElement.classList.remove("has-we-active");
         document.body.classList.remove("has-we-active");
         updateWePillsBlurBackdrop(null);
       }
@@ -23383,17 +23694,25 @@ function isWallpaperItemActive(item) {
 // every time the window opened).
 let downloadedCardsSig = "";
 
-function renderDownloadedCards(items) {
+let downloadedGridGeneration = 0;
+async function renderDownloadedCards(items) {
   if (!el.downloadedCatalogGrid) return;
   const sig = (items || [])
-    .map((i) => (i ? `${i.video_path}|${i.title}|${i.preview_path}|${isWallpaperItemActive(i) ? 1 : 0}|${bgPlaylist.some((p) => p.url === i.video_path) ? 1 : 0}|${hasWeCustomProperties(i) ? 1 : 0}` : ""))
+    .map((i) => (i ? `${i.id}|${i.video_path}|${i.project_path}|${i.title}|${i.preview_path}|${i.source}|${i.is_scene}|${i.resolution}|${i.file_size_mb}|${hasWeCustomProperties(i) ? 1 : 0}` : ""))
     .join(";;");
-  if (sig === downloadedCardsSig && el.downloadedCatalogGrid.childElementCount) return;
+  if (sig === downloadedCardsSig && el.downloadedCatalogGrid.childElementCount) {
+    updateActiveDownloadedCards();
+    return;
+  }
+  const generation = ++downloadedGridGeneration;
   downloadedCardsSig = sig;
   el.downloadedCatalogGrid.innerHTML = "";
 
-  (items || []).forEach((item) => {
-    if (!item) return;
+  const fragment = document.createDocumentFragment();
+  let sliceStarted = performance.now();
+  for (const item of items || []) {
+    if (generation !== downloadedGridGeneration) return;
+    if (!item) continue;
     try {
       const card = document.createElement("div");
       const isAct = isWallpaperItemActive(item);
@@ -23418,7 +23737,7 @@ function renderDownloadedCards(items) {
       }
 
       const inPl = bgPlaylist.some((p) => p.url === item.video_path);
-      const videoStreamUrl = convertFileSrc(item.video_path) + "?t=" + Date.now();
+      const videoStreamUrl = convertFileSrc(item.video_path);
       const sizeMb = typeof item.file_size_mb === "number" && !isNaN(item.file_size_mb) ? item.file_size_mb.toFixed(1) : "0.0";
       const itemTitle = item.title || "Fondo Animado";
 
@@ -23503,6 +23822,7 @@ function renderDownloadedCards(items) {
     // Options button handler
     const btnWeOptions = card.querySelector(".btn-we-options");
     if (btnWeOptions) {
+      card._weOptionsItem = item;
       btnWeOptions.addEventListener("click", async (e) => {
         e.stopPropagation();
         try {
@@ -23531,6 +23851,11 @@ function renderDownloadedCards(items) {
       btnApply.addEventListener("click", async () => {
         try {
           if (bgPlaylistActive) setPlaylistActive(false);
+          if (!sceneSwitchesInFlight && !wallpaperVideoTransition && isWallpaperItemActive(item)) {
+            if (hasProps) openWePropertiesPanel(item);
+            else closeWallpapersModal();
+            return;
+          }
           const isScene = item.is_scene || (item.video_path && (item.video_path.toLowerCase().endsWith(".pkg") || item.video_path.toLowerCase().endsWith(".json") || item.video_path.toLowerCase().endsWith(".html")));
           if (isScene) {
             await playSceneWallpaper(item.video_path, item.title, item.project_path, item);
@@ -23553,7 +23878,13 @@ function renderDownloadedCards(items) {
           updateActiveDownloadedCards();
           updateActiveSteamCards();
           updateActiveCatalogCards();
-          closeWallpapersModal();
+          // Let the incoming wallpaper paint before resolving CRT geometry and
+          // closing the catalog. Combining both in one frame caused a 51ms task.
+          const appliedSwitchId = sceneSwitchCounter;
+          await waitForPaint(2);
+          if (appliedSwitchId === sceneSwitchCounter && !el.modalWallpapers?.classList.contains("is-closing")) {
+            closeWallpapersModal();
+          }
         } catch (err) {
           showToast(`Error al aplicar fondo: ${err}`);
         }
@@ -23638,7 +23969,6 @@ function renderDownloadedCards(items) {
             try {
               await invoke("stop_we_wallpaper");
             } catch (_) {}
-            document.documentElement.classList.remove("has-we-active");
             document.body.classList.remove("has-we-active");
             updateWePillsBlurBackdrop(null);
             clearWallpaperStorageKeys();
@@ -23673,11 +24003,17 @@ function renderDownloadedCards(items) {
       });
     }
 
-      el.downloadedCatalogGrid.appendChild(card);
+      fragment.appendChild(card);
     } catch (err) {
       console.warn("Error rendering downloaded card:", err, item);
     }
-  });
+    if (performance.now() - sliceStarted >= 5) {
+      el.downloadedCatalogGrid.appendChild(fragment);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      sliceStarted = performance.now();
+    }
+  }
+  if (generation === downloadedGridGeneration) el.downloadedCatalogGrid.appendChild(fragment);
 }
 
 function updateActiveDownloadedCards() {
@@ -23705,7 +24041,8 @@ function updateActiveDownloadedCards() {
     if (btnApply) {
       const span = btnApply.querySelector("span");
       if (span) {
-        span.textContent = isAct ? "✓ Activo" : "Aplicar";
+        const text = isAct ? "✓ Activo" : "Aplicar";
+        if (span.textContent !== text) span.textContent = text;
       }
     }
 
@@ -23713,7 +24050,9 @@ function updateActiveDownloadedCards() {
     if (btnPl) {
       const inPl = bgPlaylist.some((p) => p.url === vpath);
       btnPl.classList.toggle("in-playlist", inPl);
-      btnPl.innerHTML = inPl ? "<span>✓ Playlist</span>" : "<span>+ Playlist</span>";
+      const span = btnPl.querySelector("span");
+      const text = inPl ? "✓ Playlist" : "+ Playlist";
+      if (span && span.textContent !== text) span.textContent = text;
     }
   });
 }
@@ -23988,16 +24327,9 @@ function syncBgVideoPlayback() {
 // The first opening of Comparador and Gestor paid for everything at once: building the section,
 // its first paint (new GPU shaders, images, text) and, in Gestor, the island's shaders. Measured
 // after a cold start: frames of 300-380 ms in both, plus seconds for the island, right when the
-// user clicked. Shortly after startup each section is opened once while still parked and
-// practically invisible (.is-prewarming in style.css), so the click finds it built and painted.
+// user clicked. Shortly after startup each section is initialized while fully transparent
+// (.is-prewarming in style.css), preparing its layout and the island worker before the click.
 const PREWARM_START_DELAY_MS = 600;
-
-// The same warm-up when the pointer reaches a section's tab: a parked section loses its styles
-// (content-visibility: hidden) and, after a while unused, the browser frees what it had painted,
-// so every opening (not only the first) restyled and repainted it at once: ~40 ms of frames
-// right on the click. Started on hover, that work is done in the moment before the click; if the
-// pointer leaves without clicking, the section is parked again.
-const HOVER_PREWARM_RELEASE_MS = 1500;
 
 // Profile dock icons (Preferencias, Amigos, Grupos): released after a press, the icon springs
 // back from its sunk size (style.css) past its full size and settles, like a rubber button.
@@ -24022,42 +24354,6 @@ function initHexIconBounce() {
   });
 }
 
-function initHoverPrewarm() {
-  if (!el.viewSwitcher) return;
-  const sections = {
-    manager: () => [el.viewManager, window.ikaManager],
-    comparador: () => [el.viewComparador, window.ikaComparer],
-    consola: () => [el.viewConsola, null],
-    servidores: () => [el.viewServidores, null],
-  };
-  let warm = null;
-  let releaseTimer = 0;
-  const release = () => {
-    if (!warm) return;
-    const [name, view, section] = warm;
-    warm = null;
-    view.classList.remove("is-prewarming");
-    if (section && state.currentView !== name) section.onHide();
-  };
-  el.viewSwitcher.addEventListener("pointerover", (e) => {
-    const btn = e.target.closest(".view-btn");
-    if (!btn) return;
-    clearTimeout(releaseTimer);
-    const name = btn.dataset.view;
-    if (warm && warm[0] === name) return;
-    release();
-    if (name === state.currentView || !sections[name]) return;
-    const [view, section] = sections[name]();
-    if (!view) return;
-    warm = [name, view, section];
-    view.classList.add("is-prewarming");
-    section?.prewarm().catch(() => {});
-  });
-  el.viewSwitcher.addEventListener("pointerleave", () => {
-    clearTimeout(releaseTimer);
-    releaseTimer = setTimeout(release, HOVER_PREWARM_RELEASE_MS);
-  });
-}
 const PREWARM_PAINT_MS = 500;
 
 async function prewarmSections() {
@@ -24065,14 +24361,15 @@ async function prewarmSections() {
   const painted = () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   await windowShown;
   await pause(PREWARM_START_DELAY_MS);
-  // both sections show the instance list
-  for (let i = 0; i < 20 && !(homeInstancesList && homeInstancesList.length); i++) await pause(500);
-  // Gestor first: its island keeps compiling in its worker while the Comparador is warmed up.
+  // Prepare graphics even before instance discovery finishes; comparator must not wait for the island.
   const sections = [
-    ["manager", el.viewManager, window.ikaManager],
     ["comparador", el.viewComparador, window.ikaComparer],
+    ["manager", el.viewManager, window.ikaManager],
   ];
   for (const [name, view, section] of sections) {
+    // User interaction has priority over preparing a different section's GPU
+    // surfaces. In particular, do not build the island during options opening.
+    while (state.currentView !== "inicio" || (el.modalWallpapers && !el.modalWallpapers.classList.contains("hidden"))) await pause(200);
     if (!view || !section || state.currentView === name) continue;
     view.classList.add("is-prewarming");
     try {
@@ -24083,6 +24380,10 @@ async function prewarmSections() {
       console.warn("Section warm-up:", name, err);
     }
     view.classList.remove("is-prewarming");
+    // Keep the warmed layout. content-visibility:hidden would discard its style
+    // state and make the first real navigation rebuild thousands of descendants.
+    view.classList.add("is-render-ready");
+    view.inert = state.currentView !== name;
     if (state.currentView !== name) section.onHide();
   }
 }
@@ -24105,12 +24406,24 @@ function updateViewSwitcherGlider(targetBtn = null) {
   }
 }
 
+let sectionShowFrame = 0;
+let sectionShowTask = 0;
+let homeWorkspaceViewport = "";
 function switchView(viewName) {
+  cancelAnimationFrame(sectionShowFrame);
+  clearTimeout(sectionShowTask);
+  const hadBackground = viewShowsBackground();
   state.currentView = viewName;
-  // the layout rules that depend on the open section read it from here (see style.css)
-  document.getElementById("app").dataset.view = viewName;
+  // Keep the shared dock layout stable across the four sections using it.
+  const appRoot = document.getElementById("app");
+  appRoot.dataset.view = viewName;
+  appRoot.classList.toggle("overlay-dock", viewName !== "servidores");
+  if (el.viewComparador) el.viewComparador.inert = viewName !== "comparador";
+  if (el.viewManager) el.viewManager.inert = viewName !== "manager";
   syncBgVideoPlayback();
-  syncConsoleBlurRect(true, true);
+  // Visibility changes already invalidate the native console cache. Forcing
+  // every navigation repeated ShowWindow even when the console stayed hidden.
+  syncConsoleBlurRect(true);
   if (el.viewInicio) el.viewInicio.classList.toggle("active", viewName === "inicio");
   if (el.viewConsola) el.viewConsola.classList.toggle("active", viewName === "consola");
   if (el.viewComparador) el.viewComparador.classList.toggle("active", viewName === "comparador");
@@ -24125,34 +24438,18 @@ function switchView(viewName) {
   if (el.viewComparador) el.viewComparador.classList.toggle("hidden", viewName !== "comparador");
   if (el.viewManager) el.viewManager.classList.toggle("hidden", viewName !== "manager");
   if (el.viewServidores) el.viewServidores.classList.toggle("hidden", viewName !== "servidores");
-  // After the views are shown/hidden, so the sections can measure their layout.
-  if (viewName === "inicio") {
-    const activeInst = homeInstancesList && homeInstancesList[homeCurrentInstanceIndex];
-    if (activeInst) updateInstanceSpecsBar(activeInst);
-    requestAnimationFrame(() => updateInstPillGlider(false));
-    if (document.body.classList.contains("has-we-active")) {
-      updateWePillsBlurBackdrop();
-    }
-  }
-  if (viewName === "consola") window.ikaConsoleCenter?.onShow();
-  else window.ikaConsoleCenter?.onHide();
-  if (viewName === "comparador") window.ikaComparer?.onShow();
-  else window.ikaComparer?.onHide();
-  if (viewName === "manager") window.ikaManager?.onShow();
-  else window.ikaManager?.onHide();
-  if (viewName === "servidores") renderServersView();
 
   if (el.viewSwitcher) {
-    let activeBtn = null;
     el.viewSwitcher.querySelectorAll(".view-btn").forEach((b) => {
       const isAct = b.dataset.view === viewName;
       b.classList.toggle("active", isAct);
-      if (isAct) activeBtn = b;
     });
-    updateViewSwitcherGlider(activeBtn);
+    // Measure after all section/shared-panel class changes, not halfway through
+    // them (the click handler used to force another layout before this one).
+    requestAnimationFrame(() => updateViewSwitcherGlider());
   }
 
-  if (document.body.classList.contains("has-we-active")) {
+  if (document.body.classList.contains("has-we-active") && hadBackground !== viewShowsBackground()) {
     invoke("sync_we_window_rect", {
       visible: viewShowsBackground(),
     }).catch(() => {});
@@ -24189,16 +24486,56 @@ function switchView(viewName) {
     el.bottomInspector.classList.toggle("hidden", viewName === "servidores");
   }
 
-  if (viewName === "consola") {
-    updateConsoleBadge();
-    stopHcpDinoGame();
-  } else if (viewName === "inicio") {
-    updateHomeConsolePreview();
-  } else {
-    stopHcpDinoGame();
-  }
+  // Stop outgoing animation work immediately; let navigation paint before filling the new view.
+  if (viewName !== "consola") window.ikaConsoleCenter?.onHide();
+  if (viewName !== "comparador") window.ikaComparer?.onHide();
+  if (viewName !== "manager") window.ikaManager?.onHide();
+  if (viewName !== "inicio") stopHcpDinoGame();
+  sectionShowFrame = requestAnimationFrame(() => {
+    sectionShowTask = setTimeout(() => {
+      if (state.currentView !== viewName) return;
+      // After the views are shown/hidden, so the sections can measure their layout.
+      if (viewName === "inicio") {
+        const viewport = `${innerWidth}|${innerHeight}`;
+        if (homeWorkspaceViewport !== viewport) {
+          syncEdgePanelsHeight();
+          refitCyberWindows();
+          refitFloatingPixelClock?.();
+          homeWorkspaceViewport = viewport;
+        }
+        const activeInst = homeInstancesList && homeInstancesList[homeCurrentInstanceIndex];
+        if (activeInst) updateInstanceSpecsBar(activeInst);
+        requestAnimationFrame(() => updateInstPillGlider(false));
+        if (document.body.classList.contains("has-we-active")) {
+          updateWePillsBlurBackdrop();
+        }
+      }
+      if (viewName === "consola") {
+        if (document.body.classList.contains("has-we-active")) {
+          updateWePillsBlurBackdrop();
+          startWeCanvasStream();
+        }
+        window.ikaConsoleCenter?.onShow();
+      }
+      if (viewName === "comparador") window.ikaComparer?.onShow();
+      if (viewName === "manager") {
+        window.ikaManager?.onShow();
+        requestAnimationFrame(() => window.ikaManager?.updateGlider?.(false));
+      }
 
-  renderCurrentView();
+
+      if (viewName === "consola") {
+        updateConsoleBadge();
+        stopHcpDinoGame();
+      } else if (viewName === "inicio") {
+        updateHomeConsolePreview();
+      } else {
+        stopHcpDinoGame();
+      }
+
+      renderCurrentView();
+    }, 0);
+  });
 }
 
 function getFormattedTime() {
@@ -24213,20 +24550,37 @@ function logToConsole(tag, msg, type = "info") {
   const isAtBottom = dist <= 16;
   const prevScrollTop = box.scrollTop;
 
+  let badgeText = tag;
+  let badgeType = type;
+  let kind = "launcher";
+  let sev = type === "sys" ? "info" : type;
+  if (tag === "SYS") {
+    badgeText = "IKA";
+    badgeType = "launcher";
+    kind = "launcher";
+  } else if (tag === "WARN") {
+    badgeText = "AVISO";
+    sev = "warn";
+  } else if (tag === "ERROR") {
+    sev = "error";
+  } else if (HCP_LEVEL_LABEL[tag]) {
+    badgeText = HCP_LEVEL_LABEL[tag];
+  }
+
   const line = document.createElement("div");
-  line.className = "console-line";
+  line.className = `console-line kind-${kind} sev-${sev}`;
 
   const timeSpan = document.createElement("span");
   timeSpan.className = "console-line-time";
-  timeSpan.textContent = `[${getFormattedTime()}]`;
+  timeSpan.textContent = getFormattedTime();
 
   const tagSpan = document.createElement("span");
-  tagSpan.className = `console-line-tag tag-${type}`;
-  tagSpan.textContent = tag;
+  tagSpan.className = `console-line-tag tag-${badgeType} badge-${badgeType}${badgeType === "launcher" ? " tag-sys" : ""}`;
+  tagSpan.textContent = badgeText;
 
   const msgSpan = document.createElement("span");
   msgSpan.className = "console-line-msg";
-  msgSpan.textContent = msg;
+  renderBreakableLogMessage(msgSpan, msg);
 
   line.appendChild(timeSpan);
   line.appendChild(tagSpan);
@@ -24304,7 +24658,7 @@ function initConsoleTerminal() {
 
 async function loadDirectory(columnId, dirPath) {
   try {
-    const res = await invoke("scan_directory", { path: dirPath });
+    const res = await scanInstanceDirectory(dirPath);
     if (columnId === 1) {
       state.path1 = res.resolved_dir;
       state.mods1 = res.mods;
@@ -24744,9 +25098,23 @@ function isReliableModMatch(candidateName, candidateSlug, mod) {
 
 const iconQueue = [];
 let isQueueProcessing = false;
+let iconStorageTimer = 0;
+const pendingVisibleIcons = new Map();
+let iconCleanupTimer = 0;
+const modIconVisibility = typeof IntersectionObserver === "undefined" ? null : new IntersectionObserver((entries) => {
+  for (const entry of entries) {
+    if (!entry.isIntersecting) continue;
+    const job = pendingVisibleIcons.get(entry.target);
+    pendingVisibleIcons.delete(entry.target);
+    modIconVisibility.unobserve(entry.target);
+    if (job && job.imgElement.isConnected) iconQueue.push(job);
+  }
+  processIconQueue();
+}, { rootMargin: "160px" });
 
 function applyImageSmoothing(img) {
   if (!img) return;
+  img.decoding = "async";
   img.onload = () => {
     if (img.naturalWidth > 0 && img.naturalWidth <= 48 && img.naturalHeight <= 48) {
       img.style.imageRendering = "pixelated";
@@ -24773,7 +25141,22 @@ function queueModIcon(mod, imgElement, placeholderElement) {
     return;
   }
 
-  iconQueue.push({ mod, imgElement, placeholderElement, key });
+  const job = { mod, imgElement, placeholderElement, key };
+  if (modIconVisibility && imgElement.parentElement) {
+    if (!iconCleanupTimer) iconCleanupTimer = setTimeout(() => {
+      iconCleanupTimer = 0;
+      for (const [target] of pendingVisibleIcons) {
+        if (!target.isConnected) {
+          modIconVisibility.unobserve(target);
+          pendingVisibleIcons.delete(target);
+        }
+      }
+    }, 0);
+    pendingVisibleIcons.set(imgElement.parentElement, job);
+    modIconVisibility.observe(imgElement.parentElement);
+    return;
+  }
+  iconQueue.push(job);
   processIconQueue();
 }
 
@@ -24785,6 +25168,7 @@ async function processIconQueue() {
     const batch = iconQueue.splice(0, 3);
     await Promise.all(
       batch.map(async ({ mod, imgElement, placeholderElement, key }) => {
+        if (!imgElement.isConnected) return;
         applyImageSmoothing(imgElement);
         if (iconCache.has(key)) {
           const u = iconCache.get(key);
@@ -24798,7 +25182,8 @@ async function processIconQueue() {
 
         const iconUrl = await fetchOfficialModIcon(mod);
         iconCache.set(key, iconUrl);
-        saveIconsToStorage();
+        clearTimeout(iconStorageTimer);
+        iconStorageTimer = setTimeout(saveIconsToStorage, 500);
 
         if (iconUrl && imgElement) {
           imgElement.src = iconUrl;
@@ -27507,41 +27892,131 @@ function appendGameLinesToConsole(lines) {
 
   const frag = document.createDocumentFragment();
   for (const l of lines) {
-    const level = String(l.level || "INFO").toUpperCase();
-    const line = document.createElement("div");
-    const trace = parseStackTraceLine(l.text);
+    let lvl = String(l.level || "INFO").toUpperCase();
+    let rest = String(l.text || "");
+    const trace = parseStackTraceLine(rest);
     if (trace) {
-      line.className = "console-line console-line-trace tag-error";
-      const spacer = document.createElement("span");
-      spacer.className = "console-line-time console-trace-spacer";
-      spacer.textContent = "         ";
-      spacer.setAttribute("aria-hidden", "true");
+      const line = document.createElement("div");
+      line.className = "console-line console-line-trace hcp-log-trace sev-error tag-error";
+      if (trace.type === "at") {
+        const bullet = document.createElement("span");
+        bullet.className = "console-trace-bullet hcp-trace-bullet";
+        bullet.textContent = "↳";
+        bullet.setAttribute("aria-hidden", "true");
 
-      const bullet = document.createElement("span");
-      bullet.className = "console-trace-bullet";
-      bullet.textContent = "↳";
-      bullet.setAttribute("aria-hidden", "true");
+        const atSpan = document.createElement("span");
+        atSpan.className = "console-trace-at hcp-trace-at";
+        atSpan.textContent = "at";
 
-      const msg = document.createElement("span");
-      msg.className = "console-line-msg console-trace-msg";
-      msg.textContent = l.text.trim();
-      line.append(spacer, bullet, msg);
+        const callSpan = document.createElement("span");
+        callSpan.className = "console-trace-call hcp-trace-call";
+        callSpan.textContent = trace.call;
+
+        line.append(bullet, atSpan, " ", callSpan);
+        if (trace.loc) {
+          const locSpan = document.createElement("span");
+          locSpan.className = "console-trace-loc hcp-trace-loc";
+          locSpan.textContent = trace.loc;
+          line.append(" ", locSpan);
+        }
+      } else if (trace.type === "caused") {
+        const badge = document.createElement("span");
+        badge.className = "console-trace-caused-badge hcp-trace-caused-badge";
+        badge.textContent = "CAUSED BY";
+
+        const msg = document.createElement("span");
+        msg.className = "console-trace-caused-msg hcp-trace-caused-msg";
+        msg.textContent = trace.message;
+
+        line.append(badge, " ", msg);
+      } else if (trace.type === "suppressed") {
+        const badge = document.createElement("span");
+        badge.className = "console-trace-suppressed-badge hcp-trace-suppressed-badge";
+        badge.textContent = "SUPPRESSED";
+
+        const msg = document.createElement("span");
+        msg.className = "console-trace-caused-msg hcp-trace-caused-msg";
+        msg.textContent = trace.message;
+
+        line.append(badge, " ", msg);
+      } else {
+        const more = document.createElement("span");
+        more.className = "console-trace-more hcp-trace-more";
+        more.textContent = trace.message;
+        line.append(more);
+      }
+      frag.appendChild(line);
     } else {
-      line.className = "console-line";
+      let timeStr = (l.ts ? new Date(l.ts) : new Date()).toTimeString().split(" ")[0];
+      const tm = rest.match(/^\[(\d{2}:\d{2}:\d{2})\]\s*/);
+      if (tm) {
+        timeStr = tm[1];
+        rest = rest.slice(tm[0].length);
+      }
+      if (!timeStr) {
+        timeStr = new Date().toTimeString().split(" ")[0];
+      }
+
+      let thread = "";
+      let kind = "game";
+      if (lvl === "MILESTONE") {
+        kind = "milestone";
+      } else if (rest.startsWith("[Launcher] ")) {
+        kind = "launcher";
+        rest = rest.slice("[Launcher] ".length);
+      } else {
+        const th = rest.match(/^\[([^\]\/]+)\/([A-Z]+)\]:?\s*/);
+        if (th) {
+          thread = th[1];
+          if (!lvl) lvl = th[2];
+          rest = rest.slice(th[0].length);
+        }
+      }
+
+      if (!lvl) {
+        const lower = rest.toLowerCase();
+        lvl = lower.includes("exception") || lower.includes("error") ? "ERROR" : lower.includes("warn") ? "WARN" : "INFO";
+      }
+      const sev = lvl === "ERROR" || lvl === "FATAL" ? "error" : lvl === "WARN" ? "warn" : "info";
+      const isSessionTime = kind === "milestone" && rest.includes("Tiempo de ejecución");
+
+      const line = document.createElement("div");
+      line.className = `console-line kind-${kind} sev-${sev}${isSessionTime ? " is-session-time" : ""}`;
+
       const time = document.createElement("span");
       time.className = "console-line-time";
-      time.textContent = `[${(l.ts ? new Date(l.ts) : new Date()).toTimeString().split(" ")[0]}]`;
+      time.textContent = timeStr;
+
       const tag = document.createElement("span");
-      tag.className = `console-line-tag tag-${GAME_LEVEL_TAG[level] || "mc"}`;
-      tag.textContent = level === "MILESTONE"
-        ? (l.text && l.text.includes("Tiempo de ejecución") ? "TIEMPO" : "LISTO")
-        : level;
+      let tagText = "";
+      let tagClasses = "console-line-tag";
+      if (kind === "milestone") {
+        tagClasses += ` tag-milestone badge-milestone tag-sys${isSessionTime ? " tag-session-time badge-session-time" : ""}`;
+        tagText = isSessionTime ? "⏱" : "✓";
+      } else if (kind === "launcher") {
+        tagClasses += " tag-launcher badge-launcher tag-sys";
+        tagText = "IKA";
+      } else {
+        tagClasses += ` tag-${sev} badge-${sev}`;
+        tagText = HCP_LEVEL_LABEL[lvl] || lvl;
+      }
+      tag.className = tagClasses;
+      tag.textContent = tagText;
+
       const msg = document.createElement("span");
       msg.className = "console-line-msg";
-      msg.textContent = l.text;
-      line.append(time, tag, msg);
+      renderBreakableLogMessage(msg, rest.trimStart());
+
+      if (thread) {
+        const threadSpan = document.createElement("span");
+        threadSpan.className = "console-line-thread hcp-thread";
+        threadSpan.textContent = thread;
+        line.append(time, tag, threadSpan, msg);
+      } else {
+        line.append(time, tag, msg);
+      }
+      frag.appendChild(line);
     }
-    frag.appendChild(line);
   }
   box.appendChild(frag);
 
@@ -27606,13 +28081,8 @@ listen("mc-game-log", (event) => {
   appendGameLinesToConsole(lines);
   detectGameMilestones(p.instance, lines);
 
-  // Forward each line in real time to the dedicated glass window
-  for (const l of lines) {
-    consoleWindowChannel.postMessage({
-      type: "log",
-      line: l,
-    });
-  }
+  // Preserve the backend batch: one message and one DOM update in the glass window.
+  consoleWindowChannel.postMessage({ type: "log", lines });
 });
 
 listen("mc-game-exit", (event) => {
@@ -28214,15 +28684,8 @@ window.addEventListener("DOMContentLoaded", async () => {
   init();
 });
 
-// Sync Wallpaper Engine underlay position on window move, resize, focus or tab visibility
-window.addEventListener("resize", () => {
-  if (document.body.classList.contains("has-we-active")) {
-    invoke("sync_we_window_rect", {
-      visible: viewShowsBackground(),
-    }).catch(() => {});
-  }
-});
-
+// The native window handler tracks Wallpaper Engine during move/resize; this listener only
+// handles activation and visibility changes, avoiding a second stale geometry update per resize.
 document.addEventListener("visibilitychange", () => {
   onLauncherActivityChange();
   if (document.body.classList.contains("has-we-active")) {
@@ -28389,9 +28852,11 @@ const cx = (() => {
   // ---- Current instance ----
   const detailsCache = new Map();
   let instPath = "";
+  let consoleGeneration = 0;
   const currentInst = () => (homeInstancesList && homeInstancesList[homeCurrentInstanceIndex]) || null;
 
   async function refreshInstance() {
+    const generation = ++consoleGeneration;
     const inst = currentInst();
     if (!inst || !inst.path) return;
     instPath = inst.path;
@@ -28406,33 +28871,52 @@ const cx = (() => {
         d = null;
       }
     }
+    if (generation !== consoleGeneration || instPath !== inst.path) return;
     $("console-inst-badge").textContent = d
       ? `Minecraft ${d.mc_version} · ${d.loader === "Vanilla" || !d.loader_version ? d.loader : `${d.loader} ${d.loader_version}`}`
       : `Minecraft ${inst.mc_version || "-"}`;
+    renderInstanceIcon(inst);
     renderState();
     refreshFiles();
     pollStats();
   }
 
-  // ---- State (LED + sprite), shared with the home console window ----
-  let lastSprite = "";
+  function renderInstanceIcon(inst) {
+    const el2 = $("cx-sprite");
+    if (!el2 || !inst) return;
+    const customIcons = getCustomInstanceIconsMap();
+    const customIcon = customIcons[inst.path] || customIcons[inst.folder_name] || customIcons[inst.name];
+    const blockFace = getUniqueBlockFaceForInstance(inst.path, inst.name);
+    const src = customIcon || (inst.icon_path ? convertFileSrc(inst.icon_path) : blockFace);
+    const isBlock = !customIcon && !inst.icon_path;
+
+    el2.innerHTML = `<img class="cx-inst-img ${isBlock ? "is-block-face" : ""}" src="${escapeHtml(src)}" alt="${escapeHtml(inst.name || "")}" />`;
+    const img = el2.querySelector("img");
+    if (img && inst.icon_path && !customIcon) {
+      img.onerror = () => {
+        img.src = blockFace;
+        img.classList.add("is-block-face");
+      };
+    }
+  }
+
+  // ---- State (LED), shared with the home console window ----
   function renderState() {
     const key = normInstancePath(instPath);
     const st = gameStates.get(key);
     const state = st?.state || "idle";
-    const text = st?.detail ? `${HCP_STATE_TEXT[state]} · ${st.detail}` : HCP_STATE_TEXT[state];
-    $("cx-state").dataset.state = state;
-    $("cx-state-text").textContent = text;
-    const sprite = STATE_SPRITE[state] || "grass";
-    if (sprite !== lastSprite) {
-      lastSprite = sprite;
-      const el2 = $("cx-sprite");
-      el2.innerHTML = pixelSvg(sprite);
-      el2.dataset.state = state;
-      el2.classList.remove("cx-pop");
-      void el2.offsetWidth;
-      el2.classList.add("cx-pop");
+    const isIdle = (state === "idle" || !state);
+    const text = isIdle ? "" : (st?.detail ? `${HCP_STATE_TEXT[state]} · ${st.detail}` : (HCP_STATE_TEXT[state] || ""));
+    const elState = $("cx-state");
+    if (elState) {
+      elState.dataset.state = state;
+      elState.classList.toggle("hidden", isIdle);
+      elState.style.display = isIdle ? "none" : "";
     }
+    const elText = $("cx-state-text");
+    if (elText) elText.textContent = text;
+    const elSprite = $("cx-sprite");
+    if (elSprite) elSprite.dataset.state = state;
   }
   // Every state change also updates the console section.
   setGameStateHook = (instance, st) => {
@@ -28470,14 +28954,27 @@ const cx = (() => {
   // ---- Live stats (only while this view is open and a game runs) ----
   let statsTimer = null;
   let statsTicks = 0;
+  let statsRequest = null;
+  let statsPollId = 0;
   async function pollStats() {
+    const pollId = ++statsPollId;
     clearTimeout(statsTimer);
     if (state.currentView !== "consola" || !instPath) return;
+    const path = instPath;
+    const generation = consoleGeneration;
     let s = null;
     try {
-      s = await invoke("game_stats", { instancePath: instPath });
+      // Rapid returns share the outstanding query, rather than spawning polls
+      // that each start their own timer after the section has been hidden.
+      if (!statsRequest || statsRequest.path !== path) {
+        statsRequest = { path, promise: invoke("game_stats", { instancePath: path }) };
+      }
+      const request = statsRequest;
+      try { s = await request.promise; }
+      finally { if (statsRequest === request) statsRequest = null; }
     } catch {}
-    const d = detailsCache.get(instPath);
+    if (pollId !== statsPollId || generation !== consoleGeneration || state.currentView !== "consola" || path !== instPath) return;
+    const d = detailsCache.get(path);
     if (s && s.running) {
       const maxMb = (d && d.max_mem_mb) || 8192;
       $("cx-ram-text").textContent = `${(s.memory_mb / 1024).toFixed(1)} / ${(maxMb / 1024).toFixed(maxMb % 1024 ? 1 : 0)} GB`;
@@ -28618,19 +29115,53 @@ const cx = (() => {
   // ---- Crash reports & logs ----
   let files = [];
   const fmtDate = (secs) => {
+    if (!secs) return "";
     const d = new Date(secs * 1000);
-    const today = new Date();
-    const sameDay = d.toDateString() === today.toDateString();
-    const time = d.toTimeString().slice(0, 5);
-    return sameDay ? `Hoy ${time}` : `${d.toLocaleDateString()} ${time}`;
+    if (isNaN(d.getTime())) return "";
+    const monthsEs = [
+      "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+      "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
+    ];
+    const monthsEn = [
+      "January", "February", "March", "April", "May", "June",
+      "July", "August", "September", "October", "November", "December"
+    ];
+    const isEn = typeof getLang === "function" && getLang() === "en";
+    const month = (isEn ? monthsEn : monthsEs)[d.getMonth()];
+    return `${month} ${d.getDate()}, ${d.getFullYear()}`;
+  };
+  const fileDate = (f) => {
+    if (!f) return "";
+    let secs = f.modified;
+    if (!secs && f.name) {
+      const m = f.name.match(/(\d{4})-(\d{2})-(\d{2})[_ ](\d{2})\.(\d{2})\.(\d{2})/);
+      if (m) {
+        const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6]));
+        if (!isNaN(d.getTime())) secs = Math.floor(d.getTime() / 1000);
+      }
+    }
+    return fmtDate(secs);
   };
   const fmtSize = (b) => (b > 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`);
 
+  let filesRequest = null;
   async function refreshFiles() {
-    if (!instPath) return;
+    if (!instPath || state.currentView !== "consola") return;
+    const path = instPath;
+    const generation = consoleGeneration;
+    const current = () => generation === consoleGeneration && path === instPath && state.currentView === "consola";
     try {
-      files = await invoke("list_instance_logs", { instancePath: instPath });
+      if (!filesRequest || filesRequest.path !== path) {
+        filesRequest = { path, promise: invoke("list_instance_logs", { instancePath: path }) };
+      }
+      const request = filesRequest;
+      let nextFiles;
+      try { nextFiles = await request.promise; }
+      finally { if (filesRequest === request) filesRequest = null; }
+      if (!current()) return;
+      files = nextFiles;
     } catch {
+      if (!current()) return;
       files = [];
     }
     const crashes = files.filter((f) => f.kind === "crash");
@@ -28638,7 +29169,7 @@ const cx = (() => {
     const card = $("cx-crash-card");
     if (crashes.length) {
       card.dataset.hasCrash = "true";
-      $("cx-crash-date").textContent = fmtDate(crashes[0].modified);
+      $("cx-crash-date").textContent = fileDate(crashes[0]);
       $("cx-crash-text").textContent = (crashes[0].summary || crashes[0].name).split("\n").slice(-1)[0];
     } else {
       card.dataset.hasCrash = "false";
@@ -28655,7 +29186,7 @@ const cx = (() => {
     if (crashKey !== sideShown.crash) {
       sideShown.crash = crashKey;
       $("cx-side-crash").dataset.hasCrash = crash ? "true" : "false";
-      $("cx-side-crash-date").textContent = crash ? fmtDate(crash.modified) : "";
+      $("cx-side-crash-date").textContent = crash ? fileDate(crash) : "";
       if (crash) openFile(crash.path, "crash", $("cx-side-crash-body"));
       else $("cx-side-crash-body").innerHTML = `<div class="cx-side-empty"><div class="cx-side-empty-icon">${pixelSvg("grass")}</div>Sin crasheos registrados. Todo en orden.</div>`;
     }
@@ -28663,7 +29194,7 @@ const cx = (() => {
     if (logKey !== sideShown.log) {
       const refresh = !!log && sideShown.log.startsWith(`${instPath}|${log.path}|`);
       sideShown.log = logKey;
-      $("cx-side-log-date").textContent = log ? `${fmtDate(log.modified)} · ${fmtSize(log.size)}` : "";
+      $("cx-side-log-date").textContent = log ? fileDate(log) : "";
       if (log) openFile(log.path, "logs", $("cx-side-log-body"), { tailKb: 384, maxLines: 2500, refresh });
       else $("cx-side-log-body").innerHTML = `<div class="cx-side-empty">Todavía no hay log: juega una vez.</div>`;
     }
@@ -28727,24 +29258,16 @@ const cx = (() => {
     const MAX = opts.maxLines || 6000;
     const cut = lines.length > MAX ? lines.length - MAX : 0;
     if (cut) lines = lines.slice(cut);
-    const head =
-      pane === "crash" && f && f.summary
-        ? `<div class="cx-crash-head"><span class="cx-kicker">Qué pasó</span>${f.summary
-            .split("\n")
-            .map((l, i) => `<div class="${i ? "cx-crash-exc" : "cx-crash-desc"}">${escapeHtml(l)}</div>`)
-            .join("")}</div>`
-        : "";
     viewer.innerHTML = `
       <div class="cx-viewer-bar">
         <span class="cx-viewer-title">${escapeHtml(f ? f.name : path.split(/[\\\\/]/).pop())}</span>
         <input type="text" class="cx-search cx-viewer-search" placeholder="Buscar en el archivo..." spellcheck="false" />
-        <button type="button" class="cx-icon-btn" data-act="copy" title="Copiar todo"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button>
-        <button type="button" class="cx-icon-btn" data-act="open" title="Abrir el archivo"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg></button>
-        <button type="button" class="cx-icon-btn" data-act="folder" title="Abrir la carpeta"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg></button>
+        <button type="button" class="cx-icon-btn" data-act="copy" title="Copiar todo"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 8V7a3 3 0 0 1 3-3h6a3 3 0 0 1 3 3v6a3 3 0 0 1-3 3h-1"></path><rect x="4" y="8" width="12" height="12" rx="3"></rect></svg></button>
+        <button type="button" class="cx-icon-btn" data-act="open" title="Abrir el archivo"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg></button>
+        <button type="button" class="cx-icon-btn" data-act="folder" title="Abrir la carpeta"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg></button>
       </div>
-      ${head}
       ${cut ? `<div class="cx-viewer-note">Se muestran las últimas ${MAX} líneas de ${cut + MAX}.</div>` : ""}
-      <div class="cx-code">${lines.map((l) => `<div class="cx-l ${LINE_CLASS(l, pane)}">${escapeHtml(l) || " "}</div>`).join("")}</div>`;
+      <div class="cx-code-wrap ${pane === "crash" ? "is-crash" : (pane === "logs" || pane === "log" ? "is-log" : "")}"><div class="cx-code">${lines.map((l) => `<div class="cx-l ${LINE_CLASS(l, pane)}">${escapeHtml(l) || " "}</div>`).join("")}</div></div>`;
     const code = viewer.querySelector(".cx-code");
     if (prevScroll && !prevScroll.atBottom) code.scrollTop = prevScroll.top;
     else if (pane === "logs") code.scrollTop = code.scrollHeight;
@@ -28771,9 +29294,17 @@ const cx = (() => {
   }
 
   // ---- HUD buttons ----
-  $("cx-btn-edit")?.addEventListener("click", () => openEditActiveInstance());
-  $("cx-btn-folder")?.addEventListener("click", () => {
-    if (instPath) invoke("open_browser", { url: instPath }).catch(() => {});
+  $("cx-btn-prev")?.addEventListener("click", () => {
+    if (!homeInstancesList || homeInstancesList.length === 0) return;
+    const prevIdx = (homeCurrentInstanceIndex - 1 + homeInstancesList.length) % homeInstancesList.length;
+    switchHomeInstance(prevIdx, "prev");
+    refreshInstance();
+  });
+  $("cx-btn-next")?.addEventListener("click", () => {
+    if (!homeInstancesList || homeInstancesList.length === 0) return;
+    const nextIdx = (homeCurrentInstanceIndex + 1) % homeInstancesList.length;
+    switchHomeInstance(nextIdx, "next");
+    refreshInstance();
   });
   $("cx-btn-crash-open")?.addEventListener("click", () => {
     stage.querySelector('.cx-tab[data-pane="crash"]')?.click();
@@ -28872,14 +29403,11 @@ const cx = (() => {
 
   return {
     onShow() {
-      stage.classList.remove("cx-enter");
-      void stage.offsetWidth;
-      stage.classList.add("cx-enter");
-      setTimeout(() => stage.classList.remove("cx-enter"), 900);
       refreshInstance();
       renderCounters();
     },
     onHide() {
+      ++consoleGeneration;
       clearTimeout(statsTimer);
     },
     refresh() {
@@ -28978,36 +29506,45 @@ const cmp = (() => {
   // ---- Header stage (cards, orb, stat panels) ----
   const keoHost = $("cmp-keo");
   const keo = createKeoStage(keoHost);
-  function fitStage() {
+  let keoViewport = "";
+  function fitStage(reuse = false) {
+    const viewport = [window.innerWidth, window.innerHeight, window.devicePixelRatio].join("|");
+    if (reuse === true && viewport === keoViewport) return;
     const w = keoHost.clientWidth;
     if (!w) return;
     const sc = keo.fit(w);
     keoHost.style.setProperty("--ks", sc.toFixed(4));
     keoHost.style.height = `${Math.round(keo.H * sc)}px`;
     stage.style.setProperty("--ks", sc.toFixed(4));
+    keoViewport = viewport;
   }
   new ResizeObserver(() => {
     if (state.currentView === "comparador") fitStage();
   }).observe(keoHost);
 
+  const panStates = new Map();
   function renderPan(side) {
     const inst = sides[side];
     const k = side === "a" ? "1" : "2";
     const loading = !!inst && pendingScan.has(inst.mods_path);
+    const cover = inst ? getInstanceCoverUrl(inst) : "./instance_covers/thumbs/shader_complementary_unbound_25.jpg";
+    const n = modCountOf(side);
+    const signature = JSON.stringify([!!inst, inst && nameOf(inst), inst && metaOf(inst),
+      cover, inst?.remote?.friend, inst?.mod_count, inst?.loader, inst?.mc_version, n, loading]);
+    if (panStates.get(side) === signature) return;
     $(`cmp-pan-${side}`).classList.toggle("is-empty", !inst);
     $(`cmp-pan-${side}`).title = inst ? `${nameOf(inst)} · ${metaOf(inst)} (clic para cambiar)` : "Elegir instancia";
     const name = $(`kx-name${k}`);
     name.textContent = inst ? nameOf(inst) : "Elige una instancia";
     name.classList.toggle("is-empty", !inst);
     const thumb = $(`kx-thumb${k}`);
-    const cover = inst ? getInstanceCoverUrl(inst) : "./instance_covers/thumbs/shader_complementary_unbound_25.jpg";
     if (thumb.getAttribute("href") !== cover) thumb.setAttribute("href", cover);
     thumb.style.opacity = inst ? "1" : "0.35";
     $(`kx-chips${k}`).innerHTML = inst
       ? `<span class="kx-chip kx-chip-main">${inst.remote ? `DE ${escapeHtml(inst.remote.friend.toUpperCase())}` : (inst.mod_count ?? 0) > 0 ? "MODPACK" : "VANILLA"}</span><span class="kx-chip">${escapeHtml(inst.loader || "Vanilla")}</span><span class="kx-chip kx-chip-ver">${escapeHtml(inst.mc_version || "?")}</span>`
       : `<span class="kx-chip kx-chip-main">Toca para elegir</span>`;
-    const n = modCountOf(side);
     $(`kx-count${k}`).textContent = loading ? "…" : n ?? "–";
+    panStates.set(side, signature);
   }
 
   function dropPan(side) {
@@ -29035,9 +29572,13 @@ const cmp = (() => {
     if (inst.remote) return Promise.resolve(scans.get(key)?.mods || []);
     if (!force && scans.has(key)) return Promise.resolve(scans.get(key).mods);
     if (pendingScan.has(key)) return pendingScan.get(key);
-    const p = invoke("scan_directory", { path: key })
+    const p = scanInstanceDirectory(key, force && scans.has(key))
       .then((res) => {
-        const mods = (res && res.mods) || [];
+        const fresh = (res && res.mods) || [];
+        const previous = scans.get(key)?.mods;
+        // Keep identity when a disk recheck found exactly the same metadata.
+        // Navigation can then retain its comparison and already built rows.
+        const mods = previous && JSON.stringify(previous) === JSON.stringify(fresh) ? previous : fresh;
         scans.set(key, { mods, at: Date.now() });
         return mods;
       })
@@ -29050,7 +29591,19 @@ const cmp = (() => {
     return p;
   }
 
-  async function run({ force = false, quiet = false } = {}) {
+  let pendingRun = null;
+  function run(options = {}) {
+    const pair = pairKey();
+    if (options.quiet && pendingRun?.pair === pair) return pendingRun.promise;
+    const promise = comparePair(options);
+    const pending = { pair, promise };
+    pendingRun = pending;
+    const settled = () => { if (pendingRun === pending) pendingRun = null; };
+    promise.then(settled, settled);
+    return promise;
+  }
+
+  async function comparePair({ force = false, quiet = false } = {}) {
     const my = ++runId;
     if (!sides.a || !sides.b) {
       result = null;
@@ -29067,6 +29620,10 @@ const cmp = (() => {
     try {
       const [mods1, mods2] = await Promise.all([pa, pb]);
       if (my !== runId) return;
+      if (quiet && result?.pair === pairKey() && result.mods1 === mods1 && result.mods2 === mods2) {
+        weighing = false;
+        return;
+      }
       const comparison = await invoke("compare_instances", { mods1, mods2 });
       if (my !== runId) return;
       result = { pair: pairKey(), comparison, mods1, mods2 };
@@ -29349,17 +29906,19 @@ const cmp = (() => {
   }
 
   // ---- Summary (default): only-in-1 | center summary | only-in-2 ----
+  // Enough rows for even a maximized window; full lists stay available through "Ver más".
+  const summaryRowBudget = () => Math.max(12, Math.ceil(Math.max(window.innerHeight, window.screen?.height || 0) / 36) + 2);
   function summaryHtml(d) {
     const panel = (kind, list, target, side) => `
       <section class="cmp-panel cmp-panel-${kind}" data-kind="${kind}">
         ${panelHead(kind === "only1" ? "Mods Unicos en instancia 1" : "Mods solo en Instancia 2", d ? list.length : "–", kind)}
-        <div class="cmp-panel-list" data-fit="1">${
+        <div class="cmp-panel-list" data-fit="1" data-total="${list.length}">${
           !d
             ? weighing
               ? weighingHtml()
               : message(!sides.a || !sides.b ? "Elige las dos instancias" : "Sin datos", "Toca las tarjetas de arriba para elegir la instancia 1 y la instancia 2.")
             : list.length
-              ? list.map((m) => soloRow(m, target, side)).join("")
+              ? list.slice(0, summaryRowBudget()).map((m) => soloRow(m, target, side)).join("")
               : message(kind === "only1" ? "La instancia 2 ya tiene todo" : "La instancia 1 ya tiene todo", "No hay mods exclusivos de este lado.")
         }</div>
         <button type="button" class="cmp-more" data-goto="${kind}" hidden></button>
@@ -29431,25 +29990,31 @@ const cmp = (() => {
   }
 
   // Summary panels show as many rows as fit; the rest go behind "Ver N más".
-  function fitPanels() {
-    stage.querySelectorAll('.cmp-panel-list[data-fit="1"]').forEach((list) => {
-      const rowsEls = [...list.querySelectorAll(":scope > .cmp-row")];
-      const more = list.parentElement.querySelector(".cmp-more");
+  function fitPanels(reuse = false) {
+    const viewport = [window.innerWidth, window.innerHeight, window.devicePixelRatio].join("|");
+    if (reuse && fitPanels.viewport === viewport) return;
+    const panels = [...stage.querySelectorAll('.cmp-panel-list[data-fit="1"]')].map((list) => ({
+      list,
+      rowsEls: [...list.querySelectorAll(":scope > .cmp-row")],
+      more: list.parentElement.querySelector(".cmp-more"),
+    }));
+    // Reveal all, measure all, then hide overflow. Interleaving these steps per
+    // panel forced a complete layout for each panel on every section opening.
+    panels.forEach(({ rowsEls, more }) => {
       rowsEls.forEach((r) => (r.hidden = false));
-      if (!rowsEls.length) {
-        more.hidden = true;
-        return;
-      }
-      more.hidden = false;
-      const avail = list.clientHeight;
-      const rowH = rowsEls[0].offsetHeight || 54;
-      let fit = Math.max(1, Math.floor(avail / rowH));
-      if (fit >= rowsEls.length) fit = rowsEls.length;
+      more.hidden = !rowsEls.length;
+    });
+    const fits = panels.map(({ list, rowsEls }) => rowsEls.length
+      ? Math.min(rowsEls.length, Math.max(1, Math.floor(list.clientHeight / (rowsEls[0].offsetHeight || 54))))
+      : 0);
+    panels.forEach(({ list, rowsEls, more }, n) => {
+      const fit = fits[n];
       rowsEls.forEach((r, i) => (r.hidden = i >= fit));
-      const rest = rowsEls.length - fit;
+      const rest = Number(list.dataset.total || rowsEls.length) - fit;
       more.hidden = rest <= 0;
       more.innerHTML = `Ver ${rest} más ${CHEVRON_DOWN}`;
     });
+    fitPanels.viewport = viewport;
   }
 
   function loadIcons(root) {
@@ -29458,9 +30023,12 @@ const cmp = (() => {
     });
   }
 
+  let renderedCenterState = null;
   function renderCenter() {
     const center = $("cmp-center");
     const d = current();
+    const inputs = [d, filter, query, weighing, sides.a, sides.b, downloading];
+    if (renderedCenterState && inputs.every((value, n) => value === renderedCenterState[n])) return;
     rows = [];
     const prevScroll = center.querySelector(".cmp-panel-scroll")?.scrollTop || 0;
     const hadFocus = document.activeElement?.id === "cmp-search";
@@ -29486,6 +30054,7 @@ const cmp = (() => {
     }
     $("cmp-copy")?.addEventListener("click", copyList);
     $("cmp-rescan")?.addEventListener("click", () => run({ force: true }));
+    renderedCenterState = inputs;
   }
   let searchDebounce = null;
 
@@ -29502,22 +30071,31 @@ const cmp = (() => {
     stage.querySelectorAll(".kx-hit-stat").forEach((b) => b.classList.toggle("is-active", b.dataset.goto === filter));
   }
 
-  function renderRight() {
+  let rightRows = null;
+  let rightQuickHtml = null;
+  function renderRight(reuse = false) {
     const d = current();
     const list = $("cmp-vdiff-list");
     $("cmp-vdiff-count").textContent = d ? d.versions.length : "–";
-    const start = rows.length;
-    if (!d) list.innerHTML = weighing ? weighingHtml() : message("Sin comparación todavía");
-    else if (!d.versions.length) list.innerHTML = message("Ningún mod cambia de versión");
-    else {
-      list.innerHTML = d.versions.map((p) => pairRow(p, true)).join("");
+    const rebuild = !rightRows || rightRows.rows !== rows || rightRows.data !== d || rightRows.weighing !== weighing;
+    if (rebuild) {
+      if (rightRows?.rows === rows) rows.length = rightRows.start;
+      const start = rows.length;
+      rightRows = { rows, start, data: d, weighing };
+      if (!d) list.innerHTML = weighing ? weighingHtml() : message("Sin comparación todavía");
+      else if (!d.versions.length) list.innerHTML = message("Ningún mod cambia de versión");
+      else list.innerHTML = d.versions.slice(0, summaryRowBudget()).map((p) => pairRow(p, true)).join("");
+      if (rows.length > start) loadIcons(list);
+    }
+    const viewport = [window.innerWidth, window.innerHeight, window.devicePixelRatio].join("|");
+    if (d?.versions.length && (rebuild || !reuse || rightRows.viewport !== viewport)) {
       // Only the rows that fit; the card's head opens the full list.
       const els = [...list.querySelectorAll(".cmp-row")];
       const rowH = els[0].offsetHeight || 46;
       const fit = Math.max(1, Math.floor(list.clientHeight / rowH));
       els.forEach((r, i) => (r.hidden = i >= fit));
+      rightRows.viewport = viewport;
     }
-    if (rows.length > start) loadIcons(list);
 
     const q = [];
     if (sides.a && sides.b) {
@@ -29542,7 +30120,11 @@ const cmp = (() => {
     } else {
       q.push(["c1", "Elige la instancia 1 y la instancia 2"]);
     }
-    $("cmp-quick-list").innerHTML = q.map(([k, t]) => `<li class="cmp-quick-item is-${k}"><span class="cmp-quick-dot"></span><span>${escapeHtml(t)}</span></li>`).join("");
+    const quickHtml = q.map(([k, t]) => `<li class="cmp-quick-item is-${k}"><span class="cmp-quick-dot"></span><span>${escapeHtml(t)}</span></li>`).join("");
+    if (quickHtml !== rightQuickHtml) {
+      $("cmp-quick-list").innerHTML = quickHtml;
+      rightQuickHtml = quickHtml;
+    }
   }
 
   // Java the instance uses: its configured major version, else what its Minecraft needs.
@@ -29714,25 +30296,33 @@ const cmp = (() => {
   });
 
   let showRetries = 0;
+  let showRetry = 0;
   return {
     onShow() {
-      stage.classList.remove("cmp-enter");
-      void stage.offsetWidth;
-      stage.classList.add("cmp-enter");
-      setTimeout(() => stage.classList.remove("cmp-enter"), 900);
-      fitStage();
+      clearTimeout(showRetry);
+      showRetry = 0;
+      fitStage(true);
       keo.setRunning(true);
       restorePair();
       if (!allInstances().length && showRetries++ < 10) {
         renderAll();
-        setTimeout(() => state.currentView === "comparador" && this.onShow(), 700);
+        showRetry = setTimeout(() => state.currentView === "comparador" && this.onShow(), 700);
         return;
       }
       const stale = [sides.a, sides.b].some((s) => s && !s.remote && (!scans.has(s.mods_path) || Date.now() - scans.get(s.mods_path).at > 20000));
-      if (result && result.pair === pairKey() && !stale) renderAll();
+      if (result && result.pair === pairKey() && !stale) {
+        // Results and their DOM survived onHide. Keep rows, icons, search and
+        // scroll intact; only instance metadata and available size can change.
+        renderPan("a");
+        renderPan("b");
+        renderRight(true);
+        if (filter === "summary") fitPanels(true);
+      }
       else return run({ force: stale, quiet: true });
     },
     onHide() {
+      clearTimeout(showRetry);
+      showRetry = 0;
       closePicker();
       keo.setRunning(false);
     },
@@ -29967,10 +30557,11 @@ const mgr = (() => {
   // ---- Data loading ----
   async function ensureMeta() {
     const missing = all().filter((i) => !metaCache.has(i.path));
-    if (!missing.length) return;
+    if (!missing.length) return false;
     // One call for all of them (one per instance queued ~70 calls behind each other).
     const metas = await invoke("instance_metas", { instancePaths: missing.map((i) => i.path) }).catch(() => []);
     missing.forEach((i, k) => metaCache.set(i.path, metas[k] || { managed: false, notes: "" }));
+    return true;
   }
   const modsSig = (p) => (modsCache.get(p)?.mods || []).map((m) => m.filepath + (m.is_disabled ? "0" : "1") + m.sha1).join("|");
   const packsSig = (p) => JSON.stringify(packsCache.get(p) || null);
@@ -29995,19 +30586,45 @@ const mgr = (() => {
       if (activeCardMods) activeCardMods.textContent = `${i.mod_count} mods`;
     }
   }
-  async function loadInstance(i, force = false) {
+  const instanceLoads = new Map();
+  function loadInstance(i, force = false, reusePending = false) {
+    const pending = instanceLoads.get(i.path);
+    if (pending) {
+      if (reusePending) return pending;
+      // An explicit refresh after a file edit must read after the older scan,
+      // rather than letting the older response overwrite the edit's result.
+      return pending.then(() => loadInstance(i, force), () => loadInstance(i, force));
+    }
+    const promise = readInstance(i, force, force && !reusePending);
+    instanceLoads.set(i.path, promise);
+    const settled = () => { if (instanceLoads.get(i.path) === promise) instanceLoads.delete(i.path); };
+    promise.then(settled, settled);
+    return promise;
+  }
+  function retainInstanceData(cache, key, next) {
+    const previous = cache.get(key);
+    if (previous !== undefined && JSON.stringify(previous) === JSON.stringify(next)) return previous;
+    cache.set(key, next);
+    return next;
+  }
+  async function readInstance(i, force = false, fresh = false) {
     const p = i.path;
     const before = modsCache.has(p) ? modsSig(p) + packsSig(p) : null;
     const jobs = [];
     if (!detailsCache.has(p)) jobs.push(invoke("get_instance_details", { instancePath: p }).then((d) => detailsCache.set(p, d)).catch(() => detailsCache.set(p, null)));
-    if (force || !modsCache.has(p)) jobs.push(invoke("scan_directory", { path: i.mods_path }).then((r) => modsCache.set(p, { mods: (r && r.mods) || [], at: Date.now() })).catch(() => modsCache.set(p, { mods: [], at: Date.now() })));
-    if (force || !packsCache.has(p)) jobs.push(invoke("list_instance_packs", { instancePath: p }).then((r) => packsCache.set(p, packsFrom(r))).catch(() => packsCache.set(p, null)));
-    if (force || !configsCache.has(p)) jobs.push(invoke("list_instance_configs", { instancePath: p }).then((r) => configsCache.set(p, r || [])).catch(() => configsCache.set(p, [])));
-    if (force || !cfgFilesCache.has(p)) jobs.push(invoke("list_instance_config_files", { instancePath: p }).then((r) => cfgFilesCache.set(p, r || [])).catch(() => cfgFilesCache.set(p, [])));
+    if (force || !modsCache.has(p)) jobs.push(scanInstanceDirectory(i.mods_path, fresh).then((r) => {
+      const next = (r && r.mods) || [];
+      const previous = modsCache.get(p)?.mods;
+      const mods = previous && JSON.stringify(previous) === JSON.stringify(next) ? previous : next;
+      modsCache.set(p, { mods, at: Date.now() });
+    }).catch(() => { if (!modsCache.has(p)) modsCache.set(p, { mods: [], at: 0 }); }));
+    if (force || !packsCache.has(p)) jobs.push(invoke("list_instance_packs", { instancePath: p }).then((r) => retainInstanceData(packsCache, p, packsFrom(r))).catch(() => { if (!packsCache.has(p)) packsCache.set(p, null); }));
+    if (force || !configsCache.has(p)) jobs.push(invoke("list_instance_configs", { instancePath: p }).then((r) => retainInstanceData(configsCache, p, r || [])).catch(() => { if (!configsCache.has(p)) configsCache.set(p, []); }));
+    if (force || !cfgFilesCache.has(p)) jobs.push(invoke("list_instance_config_files", { instancePath: p }).then((r) => retainInstanceData(cfgFilesCache, p, r || [])).catch(() => { if (!cfgFilesCache.has(p)) cfgFilesCache.set(p, []); }));
     await Promise.all(jobs);
     syncInstanceLiveCounts(i);
     // a re-scan that found the same files doesn't rebuild the list (no jump while scrolling)
-    if (S.sel === p && state.currentView === "manager") {
+    if (S.sel === p && (state.currentView === "manager" || view.classList.contains("is-prewarming"))) {
       if (before !== null && before === modsSig(p) + packsSig(p)) renderShell();
       else render();
     }
@@ -30047,7 +30664,7 @@ const mgr = (() => {
       updatesCache.set(p, map);
       const n = Object.keys(map).length;
       if (S.sel === p && state.currentView === "manager" && S.tab === "mods" && S.mode === "installed") {
-        for (const m of mods) if (map[m.sha1]) refreshCard(i, m.filepath);
+        syncModUpdateDots(i, $("mgr-body"));
         refreshModsChrome(i);
       }
     } catch {
@@ -30399,7 +31016,11 @@ const mgr = (() => {
     // the API doesn't page beyond 10 000 results
     return { hits, total: Math.min(data.pagination?.totalCount || hits.length, 10000) };
   }
+  const catalogPages = new Map();
+  let catalogSearchGeneration = 0;
   async function search(i, more = false) {
+    if (more && dl.loading) return;
+    const generation = ++catalogSearchGeneration;
     const key = dlKey(i);
     if (!more) dl = { key, hits: [], total: 0, loading: true, error: "" };
     else dl.loading = true;
@@ -30407,13 +31028,22 @@ const mgr = (() => {
     const q = S.dq.trim();
     const offset = more ? dl.hits.length : 0;
     try {
-      const page = S.src === "curseforge" ? await searchCurseforge(i, q, offset) : await searchModrinth(i, q, offset);
-      if (dl.key !== key) return;
+      const pageKey = `${key}|${i.mc_version}|${i.loader}|${offset}`;
+      let cached = catalogPages.get(pageKey);
+      if (!cached || Date.now() - cached.at > 60000) {
+        const promise = S.src === "curseforge" ? searchCurseforge(i, q, offset) : searchModrinth(i, q, offset);
+        cached = { at: Date.now(), promise };
+        catalogPages.set(pageKey, cached);
+        promise.catch(() => { if (catalogPages.get(pageKey) === cached) catalogPages.delete(pageKey); });
+        if (catalogPages.size > 24) catalogPages.delete(catalogPages.keys().next().value);
+      }
+      const page = await cached.promise;
+      if (dl.key !== key || generation !== catalogSearchGeneration) return;
       dl.hits = more ? dl.hits.concat(page.hits) : page.hits;
       dl.total = page.total;
       dl.loading = false;
     } catch (err) {
-      if (dl.key !== key) return;
+      if (dl.key !== key || generation !== catalogSearchGeneration) return;
       dl.loading = false;
       dl.error = String(err.message || err);
     }
@@ -30534,12 +31164,20 @@ const mgr = (() => {
   // them the same size. Going to
   // another one slides the cards one place (they are kept and moved, not drawn again), and the
   // rest of the section follows once the carousel settles. ----
-  const INST_FILTERS = [["all", "Todas"], ["modpack", "Modpacks"], ["custom", "Custom"], ["fav", "Favoritas"]];
+  const INST_FILTERS = [
+    ["all", "Todos", `<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>`],
+    ["recent", "Recientes", `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>`],
+    ["fav", "Favoritos", `<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" aria-hidden="true"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>`],
+  ];
   const INST_GAP = 10;
   const INST_MIN_H = 78; // cards lower than this: fewer of them are shown
   const visibleInstances = () => {
     const q = S.q.trim().toLowerCase();
-    return all().filter((i) => (S.filter === "all" || (S.filter === "fav" ? isFav(i) : typeOf(i) === S.filter)) && (!q || nameOf(i).toLowerCase().includes(q)));
+    return all().filter((i) => {
+      if (S.filter === "fav" && !isFav(i)) return false;
+      if (S.filter === "recent" && !recentInstances.has(i.path)) return false;
+      return !q || nameOf(i).toLowerCase().includes(q);
+    });
   };
   const instName = (inst) => {
     const rawCustom = getCustomInstanceNamesMap()[inst.path];
@@ -30557,7 +31195,7 @@ const mgr = (() => {
     const iconSrc = customIcon || (inst.icon_path ? convertFileSrc(inst.icon_path) : getUniqueBlockFaceForInstance(inst.path, inst.name));
     const fav = isFav(inst);
     return `<div class="mgr-inst-card-in ${fav ? "is-fav" : ""}">
-        <img class="mgr-inst-cover" src="${escapeHtml(getInstanceCoverUrl(inst, coverIdx))}" alt="" decoding="async" />
+        <img class="mgr-inst-cover" src="${escapeHtml(getInstanceCoverUrl(inst, coverIdx))}" data-fallback-src="${escapeHtml(COZY_COVERS_POOL[Math.max(0, homeInstancesAll.indexOf(inst)) % COZY_COVERS_POOL.length])}" alt="" decoding="async" />
         <button type="button" class="mgr-inst-fav" data-act="fav" data-path="${path}" aria-pressed="${fav}" title="${fav ? "Quitar de favoritas" : "Marcar como favorita"}">
           <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
         </button>
@@ -30580,31 +31218,92 @@ const mgr = (() => {
   // `els` / `htmls`: the cards on screen and what they show, by instance path
   const instView = { cur: null, commit: 0, els: new Map(), htmls: new Map(), filtersHtml: "", pending: false };
 
-  // Height of a card and how many show at each side of the middle one (2, or fewer in a low window)
-  function instGeometry() {
+  // Vertical coverflow geometry: the selected instance in the middle has the exact same size
+  // as the selected instance in the horizontal carousel of Inicio (364px x 218px).
+  // Near cards (immediately above and below) look just like the selected card but in smaller size (280px x 172px).
+  // Far cards (further away) are even smaller (224px x 144px).
+  let instanceGeometry = null;
+  let instanceViewport = "";
+  function instGeometry(reuse = true) {
+    const viewport = [window.innerWidth, window.innerHeight].join("|");
+    if (reuse && instanceGeometry && viewport === instanceViewport) return instanceGeometry;
     const zone = $("mgr-inst-zone");
-    const room = zone.clientHeight - 24;
+    const room = zone.clientHeight;
     if (room <= 0) return null;
-    let reach = 2;
-    let h = 0;
-    for (; reach >= 0; reach--) {
-      h = (room - 2 * reach * INST_GAP) / (1 + 2 * reach);
-      if (h >= INST_MIN_H) break;
+    const maxW = Math.max(260, zone.clientWidth - 20);
+
+    // Proportional scaling when vertical room is tight to preserve exact aspect ratio
+    const vScale = Math.min(1, Math.max(0.74, room / 560));
+
+    // Center card: 364px x 218px (matching Inicio active card)
+    const w0 = Math.round(Math.min(364, maxW) * vScale);
+    const h0 = Math.round(w0 * (218 / 364));
+
+    // Near cards (k = ±1): 280px x 172px (matching Inicio near side cards)
+    const w1 = Math.round(w0 * (280 / 364));
+    const h1 = Math.round(w1 * (172 / 280));
+
+    // Far cards (k = ±2): 224px x 144px (matching Inicio far side cards)
+    const w2 = Math.round(w0 * (224 / 364));
+    const h2 = Math.round(w2 * (144 / 224));
+
+    // Step distances along Y with comfortable separation so near cards are fully visible
+    const gap1 = Math.round(12 * vScale);
+    const gap2 = Math.round(10 * vScale);
+    let step1 = Math.round(h0 / 2 + gap1 + h1 / 2);
+    let step2 = Math.round(h1 / 2 + gap2 + h2 / 2);
+
+    // If room is tight, ensure near card fits comfortably within the visible zone
+    const maxHalf = room / 2 - 8;
+    if (maxHalf > 0 && step1 + h1 / 2 > maxHalf) {
+      const diff = (step1 + h1 / 2) - maxHalf;
+      step1 = Math.max(Math.round(h0 / 2 + h1 / 2), step1 - diff);
     }
-    reach = Math.max(0, reach);
-    // not taller than its cover can fill well
-    return { h: Math.round(Math.max(60, Math.min(h, (zone.clientWidth - 20) * 0.6))), reach };
+
+    instanceViewport = viewport;
+    return (instanceGeometry = { w0, h0, w1, h1, w2, h2, step1, step2 });
   }
-  // Where the middle of the card `k` places from the centre is, with cards `h` high
-  const instY = (k, h) => k * (h + INST_GAP);
-  function placeInstCard(el, k, h, shown = true) {
-    const far = Math.min(3, Math.abs(k));
+
+  function placeInstCard(el, k, geom, shown = true) {
+    const absK = Math.abs(k);
     el.dataset.k = k;
-    el.style.setProperty("--y", `${Math.round(instY(k, h))}px`);
-    // only the ones coming in or going out are unseen
-    el.style.setProperty("--o", shown && far < 3 ? "1" : "0");
-    el.style.zIndex = String(5 - far);
-    el.classList.toggle("is-active", k === 0);
+
+    let y = 0;
+    let w = geom.w0;
+    let h = geom.h0;
+
+    if (absK === 0) {
+      y = 0;
+      w = geom.w0;
+      h = geom.h0;
+    } else if (absK === 1) {
+      y = Math.sign(k) * geom.step1;
+      w = geom.w1;
+      h = geom.h1;
+    } else if (absK === 2) {
+      y = Math.sign(k) * (geom.step1 + geom.step2);
+      w = geom.w2;
+      h = geom.h2;
+    } else {
+      y = Math.sign(k) * (geom.step1 + geom.step2 + geom.step2 * (absK - 2));
+      w = Math.round(geom.w2 * 0.82);
+      h = Math.round(geom.h2 * 0.82);
+    }
+
+    el.style.setProperty("--y", `${y}px`);
+    el.style.setProperty("--w", `${w}px`);
+    el.style.setProperty("--h", `${h}px`);
+
+    // Layering: center card is on top (5), near cards (4), far cards (3)
+    el.style.zIndex = String(5 - Math.min(3, absK));
+
+    // Opacity: center card is 1, near cards 0.88, far cards 0.55, beyond 0
+    const op = !shown || absK >= 3 ? "0" : absK === 2 ? "0.55" : absK === 1 ? "0.88" : "1";
+    el.style.setProperty("--o", op);
+
+    el.classList.toggle("is-active", absK === 0);
+    el.classList.toggle("is-near", absK === 1);
+    el.classList.toggle("is-far", absK >= 2);
     el.setAttribute("aria-selected", k === 0);
   }
 
@@ -30632,11 +31331,12 @@ const mgr = (() => {
       return;
     }
     cards.querySelector(".mgr-empty")?.remove();
-    zone.style.setProperty("--h", `${geom.h}px`);
+    zone.style.setProperty("--active-w", `${geom.w0}px`);
+    zone.style.setProperty("--active-h", `${geom.h0}px`);
     const total = visible.length;
     let curIdx = visible.findIndex((i) => i.path === instView.cur);
     if (curIdx < 0) curIdx = 0;
-    const offsets = (total === 1 ? [0] : total === 2 ? [-1, 0] : total <= 4 ? [-1, 0, 1] : [-2, -1, 0, 1, 2]).filter((k) => Math.abs(k) <= geom.reach);
+    const offsets = total === 1 ? [0] : total === 2 ? [-1, 0] : total <= 4 ? [-1, 0, 1] : [-2, -1, 0, 1, 2];
     const win = offsets.map((k) => ({ k, inst: visible[(curIdx + k + total) % total] }));
     // how many places everything moves: the new middle card tells, if it was already in sight
     const was = instView.els.get(visible[curIdx].path);
@@ -30653,7 +31353,7 @@ const mgr = (() => {
         continue;
       }
       el.classList.add("is-leaving");
-      placeInstCard(el, +el.dataset.k - shift, geom.h, false);
+      placeInstCard(el, +el.dataset.k - shift, geom, false);
       setTimeout(() => el.remove(), 520);
     }
     for (const { k, inst } of win) {
@@ -30666,7 +31366,7 @@ const mgr = (() => {
         el.dataset.path = inst.path;
         el.innerHTML = inner;
         // it starts where it comes from, unseen
-        placeInstCard(el, k + shift, geom.h, false);
+        placeInstCard(el, k + shift, geom, false);
         cards.appendChild(el);
         void el.offsetHeight;
         el.classList.remove("no-anim");
@@ -30676,7 +31376,7 @@ const mgr = (() => {
         el.innerHTML = inner;
         instView.htmls.set(inst.path, inner);
       }
-      placeInstCard(el, k, geom.h);
+      placeInstCard(el, k, geom);
     }
     ring.hidden = false;
     if (shift) {
@@ -30710,15 +31410,73 @@ const mgr = (() => {
     }, 180);
   }
 
+  function updateMgrFilterGlider(animate = true) {
+    const container = $("mgr-filters");
+    const glider = $("mgr-filter-glider");
+    if (!container || !glider) return;
+    const activeChip = container.querySelector(`.mgr-chip-btn[data-v="${S.filter}"]`) || container.querySelector(".mgr-chip-btn.is-on");
+    if (!activeChip) {
+      glider.style.opacity = "0";
+      return;
+    }
+    const x = activeChip.offsetLeft;
+    const y = activeChip.offsetTop;
+    const w = activeChip.offsetWidth;
+    const h = activeChip.offsetHeight;
+    if (w <= 0 || h <= 0) {
+      glider.style.opacity = "0";
+      return;
+    }
+    if (!animate) {
+      glider.style.transition = "none";
+    } else {
+      glider.style.transition = "transform 0.32s cubic-bezier(0.34, 1.56, 0.64, 1), width 0.32s cubic-bezier(0.34, 1.56, 0.64, 1), height 0.32s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.2s ease";
+    }
+    glider.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+    glider.style.width = `${w}px`;
+    glider.style.height = `${h}px`;
+    glider.style.opacity = "1";
+  }
+
   function renderInstances() {
     const list = all();
-    const counts = { all: list.length, modpack: list.filter((i) => typeOf(i) === "modpack").length, custom: list.filter((i) => typeOf(i) === "custom").length, fav: list.filter(isFav).length };
-    $("mgr-inst-count").textContent = list.length ? ` · ${list.length}` : "";
+    const counts = {
+      all: list.length,
+      recent: list.filter((i) => recentInstances.has(i.path)).length,
+      fav: list.filter(isFav).length,
+    };
+    $("mgr-inst-count").textContent = list.length ? ` ${list.length}` : "";
     // the badge of the window when it is minimized (it may start that way)
     const minBadge = $("mgr-min-inst-badge");
     if (minBadge) minBadge.textContent = String(all().length);
-    const filtersHtml = INST_FILTERS.map(([k, l]) => `<button type="button" role="tab" class="mgr-chip-btn ${S.filter === k ? "is-on" : ""}" data-act="filter" data-v="${k}" aria-selected="${S.filter === k}">${l}<b>${counts[k]}</b></button>`).join("");
-    if (instView.filtersHtml !== filtersHtml) $("mgr-filters").innerHTML = instView.filtersHtml = filtersHtml;
+
+    const filtersEl = $("mgr-filters");
+    if (filtersEl) {
+      if (!filtersEl.querySelector("#mgr-filter-glider")) {
+        filtersEl.insertAdjacentHTML("afterbegin", '<div class="mgr-filter-glider" id="mgr-filter-glider" aria-hidden="true"></div>');
+      }
+      INST_FILTERS.forEach(([k, l, ico]) => {
+        let btn = filtersEl.querySelector(`.mgr-chip-btn[data-v="${k}"]`);
+        if (!btn) {
+          const btnEl = document.createElement("button");
+          btnEl.type = "button";
+          btnEl.role = "tab";
+          btnEl.className = `mgr-chip-btn ${S.filter === k ? "is-on" : ""}`;
+          btnEl.dataset.act = "filter";
+          btnEl.dataset.v = k;
+          btnEl.setAttribute("aria-selected", S.filter === k ? "true" : "false");
+          btnEl.innerHTML = `${ico}<span>${l}</span><b>${counts[k]}</b>`;
+          filtersEl.appendChild(btnEl);
+        } else {
+          btn.classList.toggle("is-on", S.filter === k);
+          btn.setAttribute("aria-selected", S.filter === k ? "true" : "false");
+          const bEl = btn.querySelector("b");
+          if (bEl && bEl.textContent !== String(counts[k])) bEl.textContent = String(counts[k]);
+        }
+      });
+      requestAnimationFrame(() => updateMgrFilterGlider(true));
+    }
+
     // while the wheel is still turning, the carousel is ahead of the chosen instance
     if (!instView.commit) instView.cur = sel()?.path || null;
     layoutInstances();
@@ -30774,6 +31532,7 @@ const mgr = (() => {
     LAYER_ICONS[k]
       ? `<svg class="mgr-ico mgr-layer-ico-anim li-${k}" viewBox="0 0 24 24" width="44" height="44" aria-hidden="true">${LAYER_ICONS[k]}</svg>`
       : svg(fallback, 44);
+  let renderedPlateLabels = "";
   function renderPlates(i) {
     const labels = $("mgr-plate-labels");
     if (!labels) return;
@@ -30784,7 +31543,8 @@ const mgr = (() => {
       const isHover = S.hover === idx;
       const y = layerY(idx);
       return `<button type="button" class="mgr-layer mgr-layer-${k} ${isOn ? "is-on" : ""} ${isHover ? "is-hover" : ""}" data-act="tab" data-v="${k}" data-idx="${idx}" aria-selected="${isOn}" style="--y:${y}">
-        <svg class="mgr-layer-c-svg" viewBox="0 0 260 64" preserveAspectRatio="none" aria-hidden="true">
+        <span class="mgr-layer-in">
+          <svg class="mgr-layer-c-svg" viewBox="0 0 260 64" preserveAspectRatio="none" aria-hidden="true">
           <defs>
             <!-- Tight crisp neon bloom filter matching reference exactly -->
             <filter id="cNeonGlow_${k}" x="-25%" y="-25%" width="150%" height="150%">
@@ -30824,9 +31584,14 @@ const mgr = (() => {
           <span class="mgr-layer-name">${escapeHtml(name)}</span>
           <span class="mgr-layer-sub">${escapeHtml(sub || "Leyendo...")}</span>
         </span>
+        </span>
       </button>`;
     };
-    labels.innerHTML = ORDER.map((k, idx) => layer(k, idx, SECTIONS[k].icon, SECTIONS[k].title, n[k])).join("");
+    const html = ORDER.map((k, idx) => layer(k, idx, SECTIONS[k].icon, SECTIONS[k].title, n[k])).join("");
+    if (html !== renderedPlateLabels) {
+      labels.innerHTML = html;
+      renderedPlateLabels = html;
+    }
     plates?.setActive(ORDER.indexOf(S.tab));
     plates?.setHover(S.hover);
   }
@@ -30850,16 +31615,18 @@ const mgr = (() => {
     if (S.tab === "config") return cfgFilesCache.has(i.path) ? String(cfgFilesCache.get(i.path).length) : "";
     return "";
   }
+  let panelHeadHtml = "";
+  let panelIconTab = null;
   function renderTabs(i) {
     const s = SECTIONS[S.tab] || SECTIONS.base;
     const head = $("mgr-panel-head");
     const tools = $("mgr-tools");
     const isConfig = S.tab === "config" || S.tab === "base";
     const n = i ? panelCount(i) : "";
-    head.innerHTML = `
+    const html = `
       <div class="mgr-panel-title">
         <span class="mgr-panel-icon mgr-panel-icon-${S.tab}">${svg(s.icon, 15)}</span>
-        <h2>${s.title}${n ? `<span class="mgr-panel-n"> · ${escapeHtml(n)}</span>` : ""}</h2>
+        <h2>${s.title}${n ? `<span class="mgr-panel-n"> ${escapeHtml(n)}</span>` : ""}</h2>
         ${
           isConfig
             ? ""
@@ -30874,8 +31641,15 @@ const mgr = (() => {
           </button>
         </div>
       </div>`;
+    if (html !== panelHeadHtml) {
+      head.innerHTML = html;
+      panelHeadHtml = html;
+    }
     const minIconSvg = $("mgr-min-panel-icon-svg");
-    if (minIconSvg) minIconSvg.innerHTML = svg(s.icon, 22);
+    if (minIconSvg && panelIconTab !== S.tab) {
+      minIconSvg.innerHTML = svg(s.icon, 22);
+      panelIconTab = S.tab;
+    }
     const minBadge = $("mgr-min-panel-badge");
     if (minBadge) minBadge.textContent = n ? `${n}` : "";
     tools.hidden = S.tab === "base";
@@ -31305,11 +32079,18 @@ const mgr = (() => {
             : emptyHtml("Ningún mod coincide", "Prueba con otra búsqueda.", `<button type="button" class="mgr-ghost-btn" data-act="clearfilters">Quitar filtros</button>`));
     } else {
       const unfoldAll = mods.length <= MODS_UNFOLDED_MAX;
+      const byCategory = new Map();
+      for (const mod of mods) {
+        const category = catOf(mod);
+        if (!byCategory.has(category)) byCategory.set(category, []);
+        byCategory.get(category).push(mod);
+      }
       listHtml = catList(mods)
         .filter((c) => c.id !== "all")
         .map((c) => {
-          const list = mods.filter((m) => catOf(m) === c.id).sort(modsByName);
+          const list = byCategory.get(c.id) || [];
           const open = unfoldAll || openCats.has(`${i.path}|${c.id}`);
+          if (open) list.sort(modsByName);
           return `<section class="mgr-group ${open ? "is-open" : ""}" data-cat="${escapeHtml(c.id)}">
             <button type="button" class="mgr-group-head" data-act="group" data-v="${escapeHtml(c.id)}" aria-expanded="${open}">${svg("chevDown", 14, "mgr-group-chev")}<span class="mgr-group-name mgr-grow">${escapeHtml(c.name)}</span><span class="mgr-group-n">${list.length}</span></button>
             ${open ? `<div class="mgr-list-view">${list.map((m) => modCard(i, m, upd, false)).join("")}</div>` : ""}
@@ -31671,7 +32452,7 @@ const mgr = (() => {
     const prev = body.querySelector(".mgr-dl-main .mgr-scroll");
     const keep = prev && body.dataset.listKey === dl.key ? prev.scrollTop : 0;
     const keepFilters = body.querySelector(".mgr-dl-filters")?.scrollTop || 0;
-    body.innerHTML = `<div class="mgr-dl"><div class="mgr-dl-main">${head}${main}</div><aside class="mgr-dl-filters mgr-noscrollbar" aria-label="Filtros de ${source.name}">${filtersHtml(i)}</aside></div>`;
+    body.innerHTML = `<div class="mgr-dl"><div class="mgr-dl-main">${head}${main}</div><div class="mgr-dl-splitter" id="mgr-dl-splitter" title="Ajustar ancho de lista" aria-hidden="true"></div><aside class="mgr-dl-filters mgr-noscrollbar" aria-label="Filtros de ${source.name}">${filtersHtml(i)}</aside></div>`;
     body.dataset.listKey = dl.key;
     dlSeen = { key: dl.key, n: dl.hits.length };
     body.querySelector(".mgr-dl-filters").scrollTop = keepFilters;
@@ -32181,8 +32962,48 @@ const mgr = (() => {
     closeCfgEditor();
   }
 
-  function renderBody(i) {
+  function syncModUpdateDots(i, body) {
+    const updates = updatesCache.get(i.path) || {};
+    const hashes = new Map(modsOf(i).map((m) => [m.filepath, m.sha1]));
+    for (const row of body.querySelectorAll(".mgr-mod-row[data-k]")) {
+      const dot = row.querySelector(".mgr-upd-dot");
+      if (updates[hashes.get(row.dataset.k)]) {
+        if (!dot) {
+          const name = row.querySelector(".mgr-mod-name");
+          if (!name) continue;
+          const indicator = document.createElement("span");
+          indicator.className = "mgr-upd-dot";
+          indicator.title = "Actualización disponible";
+          name.after(indicator);
+        }
+      } else dot?.remove();
+    }
+  }
+
+  let bodyResumeState = null;
+  function renderBody(i, reuse = false) {
     const body = $("mgr-body");
+    const inputs = [i, JSON.stringify(S), i ? modsOf(i) : null,
+      JSON.stringify(updatesCache.get(i?.path) || {}),
+      S.tab === "mods" ? null : configsCache.get(i?.path),
+      S.focus ? JSON.stringify(issuesCache.get(i?.path)?.missing || []) : null,
+      i && S.tab !== "mods" ? JSON.stringify([packsCache.get(i.path), detailsCache.get(i.path),
+        metaCache.get(i.path), packInfoCache.get(i.path), [...busy],
+        i.loader, i.mc_version, i.java_version]) : null];
+    // Preserve static installed lists and instance facts across returns. File
+    // editors and live download results keep their own refresh rules.
+    const reusable = S.tab === "base" || (S.mode === "installed" && ["mods", "shaders", "packs"].includes(S.tab));
+    if (reuse && reusable && bodyResumeState) {
+      if (inputs.every((value, n) => value === bodyResumeState[n])) return;
+      // Update checks only affect dots. Keep list nodes, icons and scroll intact.
+      if (i && S.tab === "mods" && S.mode === "installed" &&
+          inputs.every((value, n) => n === 3 || value === bodyResumeState[n])) {
+        syncModUpdateDots(i, body);
+        bodyResumeState = inputs;
+        return;
+      }
+    }
+    bodyResumeState = null;
     if (!i) {
       body.innerHTML = emptyHtml("Sin instancias", "Crea una instancia para empezar.");
       return;
@@ -32193,17 +33014,18 @@ const mgr = (() => {
     else if (S.tab === "mods") renderMods(i, body);
     else if (S.tab === "shaders") renderShaders(i, body);
     else renderPacks(i, body);
+    bodyResumeState = inputs;
   }
 
-  function render() {
-    if (state.currentView !== "manager") return;
+  function render({ reuseBody = false } = {}) {
+    if (state.currentView !== "manager" && !view.classList.contains("is-prewarming")) return;
     const i = sel();
     if (i && S.sel !== i.path) S.sel = i.path;
     renderList();
     renderCurrent(i);
     renderPlates(i);
     renderTabs(i);
-    renderBody(i);
+    renderBody(i, reuseBody);
   }
 
   // ---- Full mod description (Modrinth by file hash, CurseForge by jar fingerprint; name search as fallback) ----
@@ -32481,7 +33303,11 @@ const mgr = (() => {
 
   // ---- Plates: the scene is created the first time the section opens ----
   let plates = null;
-  function fitPlates() {
+  let platesLayout = "";
+  let platesViewport = "";
+  function fitPlates(reuse = false) {
+    const viewport = [window.innerWidth, window.innerHeight, window.devicePixelRatio].join("|");
+    if (reuse === true && viewport === platesViewport) return;
     const center = $("mgr-center");
     const box = $("mgr-plates");
     if (!center || !box) return;
@@ -32496,22 +33322,27 @@ const mgr = (() => {
     // different widths, so the middle column's centre is not the window's). The layer labels sit to
     // the left of the rhombi: the plates shrink if the labels or the right panel would not fit.
     const lift = 0.12;
+    const offsetY = 50;
     const compact = c.width < 760;
     box.classList.toggle("is-compact", compact);
     const labelW = compact ? 178 : 250;
     const axis = v.left + v.width / 2 - c.left; // window centre, in the column's coordinates
     const byLeft = (axis - labelW) / 0.392; // rhombus half-width is 39.2% of the square
     const byRight = (c.width - axis) / 0.392;
-    const byHeight = (v.bottom - 196 - c.top) / (0.85 - lift);
+    const byHeight = (v.bottom - 196 - c.top - offsetY) / (0.85 - lift);
     const size = Math.round(Math.max(260, Math.min(byLeft, byRight, byHeight, 1100)));
+    const layout = [size, axis, c.left - v.left, c.top - v.top, compact, window.devicePixelRatio].join("|");
+    platesViewport = viewport;
+    if (layout === platesLayout) return;
+    platesLayout = layout;
     box.style.width = box.style.height = `${size}px`;
-    box.style.top = `${Math.round(-size * lift)}px`;
+    box.style.top = `${Math.round(-size * lift + offsetY)}px`;
     box.style.left = `${Math.round(axis - size / 2)}px`;
     // the atmosphere follows the plates: centred on them and the island's top, at half strength
     // some 15% beyond them (74% of its reach) and gone at the end of it
     const reach = Math.round(size * 0.44 * 1.55);
     view.style.setProperty("--atmo-x", `${Math.round(c.left - v.left + axis)}px`);
-    view.style.setProperty("--atmo-y", `${Math.round(c.top - v.top + size * 0.4)}px`);
+    view.style.setProperty("--atmo-y", `${Math.round(c.top - v.top + size * 0.4 + offsetY)}px`);
     view.style.setProperty("--atmo-rx", `${reach}px`);
     view.style.setProperty("--atmo-ry", `${reach}px`);
     plates?.resize();
@@ -32792,10 +33623,7 @@ const mgr = (() => {
     if (r.top > area.bottom - 60) y -= r.top - (area.bottom - 60);
     else if (r.top < area.top + 8) y += (area.top + 8) - r.top;
     if (x !== place.x || y !== place.y) {
-      place.x = Math.round(x);
-      place.y = Math.round(y);
-      setPanelOffset(panel, place.x, place.y);
-      savePanelPlace(panel, true);
+      setPanelOffset(panel, Math.round(x), Math.round(y));
     }
   }
   for (const id of Object.keys(PANEL_PLACE_KEYS)) {
@@ -32986,6 +33814,15 @@ const mgr = (() => {
       apply();
     } catch {}
 
+    if (panel.id === "mgr-panel") {
+      try {
+        const savedFiltersW = parseFloat(localStorage.getItem("ika_mgr_filters_w"));
+        if (savedFiltersW && savedFiltersW >= 140 && savedFiltersW <= 600) {
+          panel.style.setProperty("--filters-w", `${Math.round(savedFiltersW)}px`);
+        }
+      } catch (_) {}
+    }
+
     for (const dir of ["n", "s", "e", "w", "ne", "nw", "se", "sw"]) {
       const handle = document.createElement("div");
       handle.className = `mgr-resize mgr-resize-${dir}`;
@@ -32997,24 +33834,49 @@ const mgr = (() => {
         const rect = panel.getBoundingClientRect();
         const area = view.getBoundingClientRect();
         const columns = panel.parentElement.getBoundingClientRect();
+        const hasFilters = panel.classList.contains("has-filters");
         // the filters column of Descargar is added to the width the user chose, it is not part of it
-        const extra = panel.classList.contains("has-filters") ? parseFloat(getComputedStyle(panel).getPropertyValue("--filters-w")) || 0 : 0;
-        const start = { x: e.clientX, y: e.clientY, w: rect.width - extra, h: rect.height, dragX: parseFloat(panel.dataset.dragX) || 0, dragY: parseFloat(panel.dataset.dragY) || 0 };
+        const currentFiltersW = hasFilters ? (parseFloat(getComputedStyle(panel).getPropertyValue("--filters-w")) || 196) : 0;
+        const extra = currentFiltersW;
+        const start = {
+          x: e.clientX,
+          y: e.clientY,
+          w: rect.width - extra,
+          h: rect.height,
+          filtersW: currentFiltersW,
+          dragX: parseFloat(panel.dataset.dragX) || 0,
+          dragY: parseFloat(panel.dataset.dragY) || 0
+        };
         // how far each edge may go: the section's area, and down only to where the columns end
         // (below that is the dock)
-        const room = { e: area.right - rect.left - 8 - extra, w: rect.right - area.left - 8 - extra, s: Math.min(columns.height, columns.bottom - rect.top), n: Math.min(columns.height, rect.bottom - area.top - 8) };
+        const room = {
+          e: area.right - rect.left - 8 - extra,
+          w: rect.right - area.left - 8 - extra,
+          s: Math.min(columns.height, columns.bottom - rect.top),
+          n: Math.min(columns.height, rect.bottom - area.top - 8)
+        };
         const fit = (value, min, max) => Math.round(Math.max(min, Math.min(value, Math.max(min, max))));
         panel.classList.add("is-resizing");
         try {
           handle.setPointerCapture(e.pointerId);
         } catch (_) {}
 
+        let lastFiltersW = start.filtersW;
         const onMove = (ev) => {
           const mx = ev.clientX - start.x;
           const my = ev.clientY - start.y;
           let dragX = start.dragX;
           let dragY = start.dragY;
-          if (dir.includes("e")) size.w = fit(start.w + mx, MIN_W, room.e);
+          if (dir.includes("e")) {
+            if (hasFilters) {
+              // El borde externo redimensiona exclusivamente la zona de filtros sin mover el separador interno
+              const maxFlt = Math.max(160, area.right - (rect.left + start.w) - 16);
+              lastFiltersW = fit(start.filtersW + mx, 140, maxFlt);
+              panel.style.setProperty("--filters-w", `${lastFiltersW}px`);
+            } else {
+              size.w = fit(start.w + mx, MIN_W, room.e);
+            }
+          }
           if (dir.includes("w")) {
             size.w = fit(start.w - mx, MIN_W, room.w);
             dragX += start.w - size.w;
@@ -33041,6 +33903,9 @@ const mgr = (() => {
           window.removeEventListener("pointercancel", onUp);
           try {
             localStorage.setItem(KEY, JSON.stringify(size));
+            if (hasFilters && dir.includes("e")) {
+              localStorage.setItem("ika_mgr_filters_w", `${lastFiltersW}`);
+            }
           } catch {}
           // dragging the left or top edge also moves the window
           savePanelPlace(panel, true);
@@ -33051,12 +33916,73 @@ const mgr = (() => {
       });
       panel.appendChild(handle);
     }
+
+    // Splitter interno: permite controlar el ancho de la lista arrastrando la línea vertical interna
+    if (panel.id === "mgr-panel") {
+      panel.addEventListener("pointerdown", (e) => {
+        const splitter = e.target.closest(".mgr-dl-splitter");
+        if (!splitter || e.button !== 0 || panel.classList.contains("is-minimized")) return;
+        e.preventDefault();
+        e.stopPropagation();
+        closeMenus();
+
+        const rect = panel.getBoundingClientRect();
+        const area = view.getBoundingClientRect();
+        const filtersEl = panel.querySelector(".mgr-dl-filters");
+        const currentFiltersW = filtersEl ? filtersEl.getBoundingClientRect().width : (parseFloat(getComputedStyle(panel).getPropertyValue("--filters-w")) || 196);
+        const startX = e.clientX;
+        const startW = size.w || (rect.width - currentFiltersW);
+        const maxPanelW = Math.max(MIN_W, area.right - rect.left - currentFiltersW - 16);
+
+        splitter.classList.add("is-resizing");
+        panel.classList.add("is-resizing");
+        document.body.style.cursor = "ew-resize";
+        try { splitter.setPointerCapture(e.pointerId); } catch (_) {}
+
+        let lastW = startW;
+        const onMove = (ev) => {
+          const mx = ev.clientX - startX;
+          lastW = Math.round(Math.max(MIN_W, Math.min(startW + mx, maxPanelW)));
+          size.w = lastW;
+          panel.style.setProperty("--panel-w", `${lastW}px`);
+          panel.dataset.sizedW = "1";
+        };
+
+        const onUp = (ev) => {
+          try { splitter.releasePointerCapture(ev.pointerId); } catch (_) {}
+          splitter.classList.remove("is-resizing");
+          panel.classList.remove("is-resizing");
+          document.body.style.cursor = "";
+          window.removeEventListener("pointermove", onMove);
+          window.removeEventListener("pointerup", onUp);
+          window.removeEventListener("pointercancel", onUp);
+          try {
+            const saved = JSON.parse(localStorage.getItem(KEY) || "{}");
+            saved.w = lastW;
+            if (size.h) saved.h = size.h;
+            localStorage.setItem(KEY, JSON.stringify(saved));
+          } catch (_) {}
+          savePanelPlace(panel, true);
+        };
+
+        window.addEventListener("pointermove", onMove);
+        window.addEventListener("pointerup", onUp);
+        window.addEventListener("pointercancel", onUp);
+      });
+    }
   }
   setupPanelResize($("mgr-panel"), "ika_mgr_panel_size", 300, 220);
   setupPanelResize($("mgr-carousel-col"), "ika_mgr_inst_size", 250, 260);
 
   // the cards take their height from the window (and get one when the section is shown)
-  new ResizeObserver(() => layoutInstances(false)).observe($("mgr-inst-zone"));
+  new ResizeObserver(() => {
+    instanceGeometry = null;
+    layoutInstances(false);
+  }).observe($("mgr-inst-zone"));
+  if ($("mgr-filters")) new ResizeObserver(() => updateMgrFilterGlider(false)).observe($("mgr-filters"));
+  window.addEventListener("resize", () => {
+    if (state.currentView === "manager") updateMgrFilterGlider(false);
+  });
   // the wheel goes through the instances, one per notch (a touchpad adds up to a notch)
   const instWheel = { sum: 0, at: 0, stepAt: 0 };
   $("mgr-inst-zone").addEventListener(
@@ -33083,7 +34009,8 @@ const mgr = (() => {
       const img = e.target;
       if (img.tagName !== "IMG" || img.dataset.fallback) return;
       img.dataset.fallback = "1";
-      img.src = COZY_COVERS_POOL[0];
+      const fallback = img.dataset.fallbackSrc || COZY_COVERS_POOL[0];
+      if (img.getAttribute("src") !== fallback) img.src = fallback;
     },
     true,
   );
@@ -33250,6 +34177,9 @@ const mgr = (() => {
       bri: (1 - 0.2 * bright + 0.1 * dark).toFixed(3),
     };
     for (const name of ATMO_VARS) view.style.setProperty(`--atmo-${name}`, values[name]);
+    // Only this empty layer interpolates colour. Interpolating inherited custom
+    // properties on the section restyled every mod/card for 1.4s on first entry.
+    view.querySelector(".mgr-atmo-veil")?.style.setProperty("--atmo-tone", values.tone);
   }
   async function atmoRefresh() {
     const source = atmoSource();
@@ -33298,19 +34228,20 @@ const mgr = (() => {
     if (state.currentView === "manager") renderShell();
   };
 
+  let showRetry = 0;
+  let showGeneration = 0;
   return {
     async onShow() {
+      const generation = ++showGeneration;
+      clearTimeout(showRetry);
+      showRetry = 0;
       ensurePlates();
-      fitPlates();
+      fitPlates(true);
       atmoWatch(state.currentView === "manager");
       plates.start();
-      stage.classList.remove("mgr-enter");
-      void stage.offsetWidth;
-      stage.classList.add("mgr-enter");
-      setTimeout(() => stage.classList.remove("mgr-enter"), 900);
       if (!all().length) {
         render();
-        setTimeout(() => state.currentView === "manager" && this.onShow(), 700);
+        showRetry = setTimeout(() => state.currentView === "manager" && this.onShow(), 700);
         return;
       }
       const activeHome = homeInstancesList && homeInstancesList[homeCurrentInstanceIndex];
@@ -33322,13 +34253,17 @@ const mgr = (() => {
       instView.cur = S.sel;
       syncHomeInstanceByPath(S.sel);
       $("mgr-q").value = S.mode === "download" && S.tab !== "config" ? S.dq : S.mq;
-      render();
-      await ensureMeta();
-      renderShell();
+      render({ reuseBody: true });
+      const metaChanged = await ensureMeta();
+      if (generation !== showGeneration) return;
+      if (state.currentView === "manager" || view.classList.contains("is-prewarming")) {
+        if (metaChanged) renderShell();
+        requestAnimationFrame(() => state.currentView === "manager" && updateMgrFilterGlider(false));
+      }
       const i = sel();
       if (i) {
         const stale = !modsCache.has(i.path) || Date.now() - modsCache.get(i.path).at > 20000;
-        if (stale) loadInstance(i, true);
+        if (stale) return loadInstance(i, true, true);
         else {
           syncInstanceLiveCounts(i);
           checkUpdates(i);
@@ -33336,6 +34271,9 @@ const mgr = (() => {
       }
     },
     onHide() {
+      ++showGeneration;
+      clearTimeout(showRetry);
+      showRetry = 0;
       closeMenus();
       atmoWatch(false);
       plates?.stop();
@@ -33373,13 +34311,19 @@ const mgr = (() => {
     // the Comparador.
     async prewarm() {
       const hadSel = !!S.sel;
-      await this.onShow();
+      await Promise.all([this.onShow(), atmoRefresh()]);
       if (!hadSel && state.currentView !== "manager") S.sel = null;
     },
     activeInstance() {
       const p = instView.cur || S.sel;
       return (p && all().find((i) => i.path === p)) || sel() || null;
     },
+    setInstancesForTesting(list) {
+      homeInstancesAll = list;
+      homeInstancesList = list;
+      render();
+    },
+    updateGlider: updateMgrFilterGlider,
     render,
   };
 })();

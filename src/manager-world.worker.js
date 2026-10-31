@@ -33,6 +33,22 @@ function rng(a) {
   };
 }
 
+// The water shader fades to zero beyond lateral ±24.5 blocks. Retain the
+// original grid and triangles inside that strip, plus 0.5 blocks for wave
+// displacement (<0.15 at uAmp=.3). No visible geometry or detail changes.
+function trimWaterGeometry(geometry) {
+  const position = geometry.attributes.position, index = geometry.index.array;
+  const kept = [];
+  const lateral = (i) => (position.getX(i) + position.getY(i)) * Math.SQRT1_2;
+  for (let n = 0; n < index.length; n += 3) {
+    const a = lateral(index[n]), b = lateral(index[n + 1]), c = lateral(index[n + 2]);
+    if (Math.min(a, b, c) > 25 || Math.max(a, b, c) < -25) continue;
+    kept.push(index[n], index[n + 1], index[n + 2]);
+  }
+  geometry.setIndex(kept);
+  return geometry;
+}
+
 
 /* =========================================================
    MUNDO DE MINECRAFT bajo las placas — estilo "Complementary":
@@ -692,6 +708,12 @@ function buildWorld(T, cv) {
       float rip(vec2 p){vec2 q=vec2(dot(p,LAT),dot(p,DEP)*.38)*1.6;
         return ns(q+vec2(uTime*.18,uTime*.25))*.55+ns(q*2.1-vec2(uTime*.22,-uTime*.15))*.3+ns(q*4.3+uTime*.3)*.15;}
       void main(){
+        // Reject transparent sea before noise, reflection and eight lights.
+        // This is an upper bound on the final alpha, including foam.
+        float fg=pow(smoothstep(uR1,uR2,length(vPos.xz)),.6);
+        float xScreen=(vPos.x-vPos.z)*.70710678;
+        float sideMask=smoothstep(24.5,23.3,abs(xScreen));
+        if((1.-fg)*sideMask<=.002) discard;
         float e=.06,h0=rip(vPos.xz);
         vec2 gr=vec2(rip(vPos.xz+vec2(e,0))-h0,rip(vPos.xz+vec2(0,e))-h0)/e;
         vec3 n=normalize(mix(normalize(vN),vec3(0.,1.,0.),.55)+vec3(-gr.x,0.,-gr.y)*.05);
@@ -719,11 +741,12 @@ function buildWorld(T, cv) {
         float band=smoothstep(.6,1.,sin(m*22.-uTime*1.4+br*4.));
         float foam=smoothstep(.45,.95,m)*(band*.7+smoothstep(.85,.98,m))*smoothstep(.35,.7,ns(vPos.xz*6.+vec2(uTime*.25,0.))+.25);
         col=mix(col,vec3(.6,.72,.85),clamp(foam,0.,1.)*.85);
-        float fg=pow(smoothstep(uR1,uR2,length(vPos.xz)),.6);
         float baseA=mix(.84,.92,smoothstep(.0,.6,m))+foam*.1;
-        gl_FragColor=vec4(col,clamp(baseA,0.,1.)*(1.-fg));}`
+        float alpha=clamp(baseA,0.,1.)*(1.-fg)*sideMask;
+        if(alpha<=.002) discard;
+        gl_FragColor=vec4(col,alpha);}`
   });
-  const sea=new T.Mesh(new T.PlaneGeometry(180,180,360,360),waterMat);
+  const sea=new T.Mesh(trimWaterGeometry(new T.PlaneGeometry(180,180,360,360)),waterMat);
   waterMat.uniforms.uAmp.value=.3; sea.rotation.x=-Math.PI/2; sea.position.y=SEA-.12; sea.renderOrder=2; scene.add(sea);
   const SMALLW=[];
   // agua de río, canal y pozo: tranquila, con la misma superficie
@@ -882,6 +905,8 @@ function frame() {
   if (bitmaps && canvas.width > 2) {
     const bitmap = canvas.transferToImageBitmap();
     self.postMessage({ type: "frame", bitmap }, [bitmap]);
+  } else {
+    self.postMessage({ type: "drawn" });
   }
 }
 

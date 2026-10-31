@@ -3,7 +3,7 @@
 use super::wallpaper_glass::{HEIGHT, WIDTH};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use windows::Foundation::TimeSpan;
+use windows::Foundation::{TimeSpan, TypedEventHandler};
 use windows::Graphics::Capture::{Direct3D11CaptureFrame, Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession};
 use windows::Graphics::DirectX::{Direct3D11::IDirect3DDevice, DirectXPixelFormat};
 use windows::Graphics::SizeInt32;
@@ -19,6 +19,8 @@ use windows::Win32::UI::WindowsAndMessaging::{IsWindow, IsWindowVisible};
 use windows_core::{factory, Interface, Result};
 
 struct Capture {
+    source_hwnd: isize,
+    layout_notification_pending: bool,
     pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
     winrt_device: IDirect3DDevice,
@@ -26,6 +28,8 @@ struct Capture {
     context: ID3D11DeviceContext,
     size: SizeInt32,
     textures: Option<Textures>,
+    arrived: std::sync::mpsc::Receiver<()>,
+    arrived_token: i64,
 }
 
 struct Textures {
@@ -63,11 +67,21 @@ impl Capture {
         let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
             &winrt_device, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size)?;
         let session = pool.CreateCaptureSession(&item)?;
-        let capture = Self { pool, session, winrt_device, device, context, size, textures: None };
+        // Wake on completed GPU frames instead of polling with thread::sleep.
+        // Windows timer rounding and two independent 60 Hz clocks caused repeats
+        // and uneven updates even when the scene itself was rendering smoothly.
+        let (sender, arrived) = std::sync::mpsc::sync_channel(1);
+        let arrived_token = pool.FrameArrived(&TypedEventHandler::new(move |_, _| {
+            let _ = sender.try_send(());
+            Ok(())
+        }))?;
+        let capture = Self { source_hwnd: hwnd, layout_notification_pending: true,
+            pool, session, winrt_device, device, context, size, textures: None,
+            arrived, arrived_token };
         capture.session.SetIsCursorCaptureEnabled(false)?;
         capture.session.SetIsBorderRequired(false)?;
         let _ = capture.session.SetIncludeSecondaryWindows(false);
-        let _ = capture.session.SetMinUpdateInterval(TimeSpan { Duration: 333_333 });
+        let _ = capture.session.SetMinUpdateInterval(TimeSpan { Duration: 166_667 });
         capture.session.StartCapture()?;
         Ok(capture)
     }
@@ -95,10 +109,17 @@ impl Capture {
             self.pool.Recreate(&self.winrt_device, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size)?;
             self.size = size;
             self.textures = None;
+            self.layout_notification_pending = true;
             return Ok(None);
         }
         let result = self.read_frame(&frame);
         let _ = frame.Close();
+        if matches!(&result, Ok(Some(_))) && self.layout_notification_pending {
+            self.layout_notification_pending = false;
+            // The resize request and the external window's location event can both
+            // precede its new GPU surface. Refresh DWM once that surface is real.
+            super::we_source_layout_changed(self.source_hwnd);
+        }
         result
     }
 
@@ -164,6 +185,7 @@ impl Capture {
 
 impl Drop for Capture {
     fn drop(&mut self) {
+        let _ = self.pool.RemoveFrameArrived(self.arrived_token);
         let _ = self.session.Close();
         let _ = self.pool.Close();
     }
@@ -340,8 +362,14 @@ fn run(state: Arc<Mutex<SharedState>>) {
                 }
             }
         }
-        let interval = if source.is_some() { 33 } else { 100 };
-        std::thread::sleep(Duration::from_millis(interval).saturating_sub(tick.elapsed()));
+        if let Some(active) = capture.as_ref() {
+            // A single notification is retained while readback is in progress;
+            // next() drains to the newest frame. Timeout keeps source changes,
+            // minimize and idle cleanup responsive even if rendering stops.
+            let _ = active.arrived.recv_timeout(Duration::from_millis(100));
+        } else {
+            std::thread::sleep(Duration::from_millis(100).saturating_sub(tick.elapsed()));
+        }
     }
 }
 

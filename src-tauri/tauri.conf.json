@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Ika Launcher",
-  "version": "1.5.6",
+  "version": "1.5.7",
   "identifier": "com.modcomparer.desktop",
   "build": {
     "frontendDist": "../dist",
@@ -14,11 +14,13 @@
       {
         "label": "main",
         "title": "Ika Launcher",
-        "width": 1240,
-        "height": 780,
+        "width": 1536,
+        "height": 865,
         "minWidth": 960,
         "minHeight": 600,
-        "resizable": true,
+        "resizable": false,
+        "maximizable": true,
+        "maximized": true,
         "fullscreen": false,
         "decorations": false,
         "transparent": true,
