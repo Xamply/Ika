@@ -1,0 +1,6 @@
+Minecraftia, version 1.0
+Copyright Andrew Tyler (http://www.andrewtyler.net).
+Licensed under Creative Commons Attribution-ShareAlike 3.0 Unported:
+https://creativecommons.org/licenses/by-sa/3.0/
+
+This file is the unmodified font used for the Minecraft clock in the legacy WebView2 launcher.

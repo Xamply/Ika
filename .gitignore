@@ -1,77 +1,30 @@
-# Dependencies
-node_modules/
-dist/
-dist-ssr/
-
-# Tauri & Rust build artifacts
-src-tauri/target/
-src-tauri/WixTools/
-*.exe
-*.msi
-
-# Temporary & debug files
-*.log
-err.log
-out.log
-run_debug.log
-log.txt
-tmp_edge/
-tmp_edge_cdp/
-scratch/
-test_dl_*/
+/target/
+/scratch/
 __pycache__/
+*.pyc
 
-# Screenshots and visual bug captures
-*.png
-*.jpg
-*.jpeg
-*.mp4
-app_dist_screenshot.png
-bug visual1.png
-cdp_screenshot.png
-curr.png
-goal*.png
-orig_*.png
-prev_*.png
-ref_*.png
-rendered_*.png
-test_*.png
-test_*.html
-extracted_stops.txt
-
-# ---------------------------------------------------------------------------
-# Never published: secrets, internal notes, prototypes and local tooling
-# ---------------------------------------------------------------------------
-# secrets (API keys, signing keys): only .env.example goes in the repository
+# secrets: only .env.example is published
 .env
 .env.*
 !.env.example
 *.key
 *.pem
 *.pfx
+*.local
 
-# internal notes and service documentation
-RENDIMIENTO-ESTADO.md
-ideas posibles.txt
-# the server (Cloudflare Worker) lives only on this PC: its code is not published
-skins-service/
+# build artifacts
+*.obj
+*.exe
+*.dll
+*.pdb
+*.lib
+*.exp
+*.7z
+*.log
+tools/ika-boost/build/
 
-# HTML prototypes, scripts and design files used while building the launcher
-circ_*.html
-comparador-keo.html
-gestor-instancias.html
-placas*.html
-app.py
-mod_scanner.py
-requirements.txt
-run.bat
-debug_cdp.cjs
-*.grd
-*.asl
-*.psd
+# stray file from a broken redirect (name contains CR/LF)
+nul*
 
-# local tools, downloads and original assets
-tools/
-src-tauri/tools/
-_assets_originales/
-META-INF/
+# local Workshop fixtures for development (large)
+/media/

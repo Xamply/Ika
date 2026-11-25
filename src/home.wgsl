@@ -1,0 +1,381 @@
+struct HomeText {
+    words: array<vec4<u32>, 4>,
+    starts: array<vec4<u32>, 4>,
+    metrics: vec4<u32>,
+};
+
+@group(0) @binding(9) var home_atlas: texture_2d<f32>;
+
+fn home_byte(a: array<vec4<u32>, 4>, i: u32) -> u32 {
+    return (a[i / 16u][(i / 4u) % 4u] >> ((i % 4u) * 8u)) & 255u;
+}
+
+fn home_label(ui: vec4<f32>, q: vec2<f32>, idx: u32, tint: vec3<f32>, center: bool) -> vec4<f32> {
+    let metrics = p.home_text[idx].metrics;
+    let x = q.x + select(0.0, f32(metrics.x) * 0.5, center);
+    if x < 0.0 || x >= f32(metrics.x) || abs(q.y) >= 9.0 { return ui; }
+    var lo = 0u;
+    var hi = metrics.y;
+    while hi > lo + 1u {
+        let mid = (lo + hi) / 2u;
+        if f32(home_byte(p.home_text[idx].starts, mid)) > x { hi = mid; } else { lo = mid; }
+    }
+    let code = home_byte(p.home_text[idx].words, lo);
+    let glyph = vec2(x - f32(home_byte(p.home_text[idx].starts, lo)) + 1.0, q.y + 9.0);
+    return over(ui, tint, wp_glyph(code, glyph));
+}
+
+fn home_sample(origin: vec2<f32>, size: vec2<f32>, uv: vec2<f32>) -> vec4<f32> {
+    let at = origin + clamp(uv * size, vec2(0.5), size - 0.5);
+    return textureSampleLevel(home_atlas, smooth_sampler, at / vec2<f32>(textureDimensions(home_atlas)), 0.0);
+}
+
+fn home_line(pt: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
+    let ba = b - a;
+    let h = clamp(dot(pt - a, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0);
+    return length(pt - (a + ba * h));
+}
+
+fn sd_star5(p: vec2<f32>, r: f32, rf: f32) -> f32 {
+    let k1 = vec2(0.809016994375, -0.587785252292);
+    let k2 = vec2(-k1.x, k1.y);
+    var pt = vec2(abs(p.x), -p.y);
+    pt -= 2.0 * max(dot(k1, pt), 0.0) * k1;
+    pt -= 2.0 * max(dot(k2, pt), 0.0) * k2;
+    pt.x = abs(pt.x);
+    pt.y -= r;
+    let ba = rf * vec2(-k1.y, k1.x) - vec2(0.0, 1.0);
+    let h = clamp(dot(pt, ba) / dot(ba, ba), 0.0, r);
+    return length(pt - ba * h) * sign(pt.y * ba.x - pt.x * ba.y);
+}
+
+fn create_inst_border_color(t: f32) -> vec3<f32> {
+    let u = fract(t);
+    if u < 0.18 {
+        return mix(vec3(0.027, 0.396, 0.451), vec3(0.000, 0.659, 0.710), u / 0.18);
+    } else if u < 0.36 {
+        return mix(vec3(0.000, 0.659, 0.710), vec3(0.000, 0.941, 0.902), (u - 0.18) / 0.18);
+    } else if u < 0.50 {
+        return mix(vec3(0.000, 0.941, 0.902), vec3(0.494, 0.988, 0.965), (u - 0.36) / 0.14);
+    } else if u < 0.64 {
+        return mix(vec3(0.494, 0.988, 0.965), vec3(0.000, 0.898, 0.875), (u - 0.50) / 0.14);
+    } else if u < 0.82 {
+        return mix(vec3(0.000, 0.898, 0.875), vec3(0.031, 0.569, 0.698), (u - 0.64) / 0.18);
+    } else {
+        return mix(vec3(0.031, 0.569, 0.698), vec3(0.027, 0.396, 0.451), (u - 0.82) / 0.18);
+    }
+}
+
+fn home_box_glow(d: f32, sigma: f32) -> f32 {
+    // Approximate the Gaussian blur of the button's silhouette near its edge.
+    let t = abs(d) / sigma;
+    let tail = 0.5 * exp(-0.5 * t * t - 0.8 * t);
+    return select(1.0 - tail, tail, d >= 0.0);
+}
+
+fn home_create_button(ui: vec4<f32>, q: vec2<f32>, size: vec2<f32>, d: f32, mask: f32, aa: f32) -> vec4<f32> {
+    let hover = p.home_toolbar.w;
+    let shadow_d = rounded_distance(q - vec2(0.0, 2.0), size, size.y * 0.5);
+    let rest = (1.0 - hover) * 0.20 * home_box_glow(shadow_d, 4.0);
+    let hot = hover * 0.35 * home_box_glow(d, 8.0);
+    var out = over(ui, vec3(16.0, 185.0, 129.0) / 255.0, rest * (1.0 - mask));
+    out = over(out, vec3(52.0, 211.0, 153.0) / 255.0, hot * (1.0 - mask));
+
+    let fill_t = clamp((q.x + q.y) / (size.x + size.y), 0.0, 1.0);
+    let fill = mix(vec3(11.0, 59.0, 44.0), vec3(7.0, 58.0, 46.0), fill_t) / 255.0;
+    out = over(out, fill, mask * mix(0.90, 0.94, fill_t));
+
+    // The SVG has a 1.2 px core over a 2.2 px stroke with two blur layers.
+    let inset_size = size - vec2(1.5);
+    let stroke_d = abs(rounded_distance(q - vec2(0.75), inset_size, min(17.0, inset_size.y * 0.5)));
+    let stroke = create_inst_border_color(q.x / 260.0 + p.home_phase.y);
+    let dist_sq = stroke_d * stroke_d;
+    let wide = 1.0 - smoothstep(1.1 - aa, 1.1 + aa, stroke_d);
+    let narrow_blur = 0.585 * exp(-dist_sq / 4.5);
+    let wide_blur = 0.251 * exp(-dist_sq / 24.5);
+    let bloom = mix(0.5, 0.68, hover) * (1.0 - (1.0 - wide) * (1.0 - narrow_blur) * (1.0 - wide_blur));
+    out = over(out, stroke, bloom);
+    let core = 1.0 - smoothstep(0.6 - aa, 0.6 + aa, stroke_d);
+    return over(out, stroke, core);
+}
+
+fn home_toolbar_icon(ui: vec4<f32>, center: vec2<f32>, kind: u32, tint: vec3<f32>, aa: f32) -> vec4<f32> {
+    let q = center;
+    if any(abs(q) > vec2(10.0)) { return ui; }
+    var d = 100.0;
+    if kind == 0u {
+        let h_line = home_line(q, vec2(-5.5, 0.0), vec2(5.5, 0.0)) - 1.25;
+        let v_line = home_line(q, vec2(0.0, -5.5), vec2(0.0, 5.5)) - 1.25;
+        d = min(h_line, v_line);
+    } else if kind == 1u {
+        let pq = abs(q) - vec2(3.6);
+        let bq = abs(pq) - vec2(2.1);
+        d = length(max(bq, vec2(0.0))) + min(max(bq.x, bq.y), 0.0) - 1.2;
+    } else if kind == 2u {
+        let ring = abs(length(q) - 5.8) - 1.0;
+        let h_hand = home_line(q, vec2(0.0, 0.0), vec2(0.0, -3.8)) - 1.0;
+        let m_hand = home_line(q, vec2(0.0, 0.0), vec2(3.0, 1.4)) - 1.0;
+        d = min(ring, min(h_hand, m_hand));
+    } else if kind == 3u {
+        d = sd_star5(q, 7.2, 0.44);
+    } else {
+        let ring = abs(length(q - vec2(-1.8, -1.8)) - 4.6) - 1.05;
+        let handle = home_line(q, vec2(1.8, 1.8), vec2(6.2, 6.2)) - 1.15;
+        d = min(ring, handle);
+    }
+    let mask = 1.0 - smoothstep(-aa, aa, d);
+    return over(ui, tint, mask);
+}
+
+fn home_toolbar_text(ui: vec4<f32>, pt: vec2<f32>, label: vec4<f32>, tint: vec3<f32>) -> vec4<f32> {
+    let at = pt * HOME_LABEL_RASTER_SCALE;
+    if any(at < vec2(0.0)) || any(at >= label.zw) { return ui; }
+    let dims = vec2<f32>(textureDimensions(home_atlas));
+    let origin = label.xy + vec2(0.0, dims.y - HOME_LABEL_STRIP_HEIGHT);
+    let uv = (origin + clamp(at, vec2(0.5), label.zw - 0.5)) / dims;
+    let spread = max(0.0, 0.25 * (HOME_LABEL_RASTER_SCALE / p.home_toolbar_view.z - 1.0));
+    var ink = textureSampleLevel(home_atlas, smooth_sampler, uv, 0.0).a;
+    if spread > 0.0 {
+        let d = vec2(spread) / dims;
+        let diag = vec2(d.x, -d.y);
+        ink = 0.25 * (textureSampleLevel(home_atlas, smooth_sampler, uv - d, 0.0).a +
+                      textureSampleLevel(home_atlas, smooth_sampler, uv + d, 0.0).a +
+                      textureSampleLevel(home_atlas, smooth_sampler, uv - diag, 0.0).a +
+                      textureSampleLevel(home_atlas, smooth_sampler, uv + diag, 0.0).a);
+    }
+    return over(ui, tint, ink);
+}
+
+fn home_toolbar_button(ui: vec4<f32>, q: vec2<f32>, rect: vec4<f32>, kind: u32,
+                      aa: f32) -> vec4<f32> {
+    let radius = rect.w * 0.5;
+    let d = rounded_distance(q - rect.xy, rect.zw, radius);
+    if d > select(aa, p.home_toolbar_view.w, kind == 0u) { return ui; }
+
+    var out = ui;
+    if kind == 0u {
+        let mask = 1.0 - smoothstep(-aa, aa, d);
+        out = home_create_button(out, q - rect.xy, rect.zw, d, mask, aa);
+    }
+
+    // Center the icon and label together in the button or search field.
+    var label_index = 0u;
+    if kind == 4u {
+        label_index = 7u;
+    } else if kind > 0u {
+        let tab = kind - 1u;
+        label_index = 1u + 2u * tab + u32(f32(tab) == p.home_phase.z);
+    }
+    let label = HOME_TOOLBAR_LABELS[label_index];
+    let text_size = label.zw / HOME_LABEL_RASTER_SCALE;
+    let icon_scale = select(1.08, 1.02, kind == 0u);
+    let icon_w = 15.0 * icon_scale;
+    let gap = 7.0;
+    let content_w = icon_w + gap + text_size.x;
+    let content_x = rect.x + (rect.z - content_w) * 0.5;
+    let mid_y = rect.y + rect.w * 0.5;
+
+    let icon_center = vec2(content_x + icon_w * 0.5, mid_y);
+    let create_tint = mix(vec3(0.431, 0.906, 0.718), vec3(1.0), p.home_toolbar.w);
+    let button_tint = select(vec3(1.0), create_tint, kind == 0u);
+    let icon_tint = select(button_tint, vec3(0.580, 0.639, 0.722), kind == 4u);
+    var icon_q = q - icon_center;
+    var scale = icon_scale;
+    if kind == 0u {
+        let motion = p.home_toolbar.z;
+        let angle = radians(-90.0 * motion);
+        let c = cos(angle);
+        let s = sin(angle);
+        icon_q = vec2(c * icon_q.x - s * icon_q.y, s * icon_q.x + c * icon_q.y);
+        scale *= 1.0 + 0.12 * motion;
+    }
+    out = home_toolbar_icon(out, icon_q / scale, kind, icon_tint, aa / scale);
+
+    let text_tint = select(button_tint, vec3(0.392, 0.455, 0.545), kind == 4u);
+    let text_origin = vec2(content_x + icon_w + gap, mid_y - text_size.y * 0.5);
+    return home_toolbar_text(out, q - text_origin, label, text_tint);
+}
+
+fn home_toolbar(ui: vec4<f32>, q: vec2<f32>, aa: f32) -> vec4<f32> {
+    let group = p.home_toolbar_rects[0];
+    let search = p.home_toolbar_rects[5];
+    let group_d = rounded_distance(q - group.xy, group.zw, group.w * 0.5);
+    let search_d = rounded_distance(q - search.xy, search.zw, search.w * 0.5);
+
+    // Group glass background
+    let group_mask = 1.0 - smoothstep(-aa, aa, group_d);
+    let group_bg = mix(vec3(0.078, 0.055, 0.157), vec3(0.047, 0.031, 0.098),
+                       clamp((q.y - group.y) / group.w, 0.0, 1.0));
+    var out = over(ui, group_bg, group_mask * 0.72);
+
+    // Group 1px border and top highlight
+    let group_edge = 1.0 - smoothstep(-1.2, 0.0, abs(group_d));
+    let top_highlight = 1.0 - smoothstep(group.y, group.y + 12.0, q.y);
+    let group_border_color = mix(vec3(0.35, 0.38, 0.58) * 0.35, vec3(0.70, 0.75, 0.95) * 0.45, top_highlight);
+    out = over(out, group_border_color, group_edge * group_mask * 0.65);
+
+    // Search dark capsule background
+    let search_mask = 1.0 - smoothstep(-aa, aa, search_d);
+    out = over(out, vec3(0.045, 0.035, 0.09), search_mask * 0.88);
+
+    // Search 1px border
+    let search_edge = 1.0 - smoothstep(-1.2, 0.0, abs(search_d));
+    out = over(out, vec3(0.35, 0.38, 0.55) * 0.35, search_edge * search_mask * 0.65);
+
+    // Move one highlight under the fixed filter labels, including across their gaps.
+    let pill_template = p.home_toolbar_rects[2];
+    let pill_pt = q - vec2(p.home_toolbar.x, pill_template.y);
+    let pill_size = vec2(p.home_toolbar.y, pill_template.w);
+    let pill_d = rounded_distance(pill_pt, pill_size, pill_size.y * 0.5);
+    let pill_mask = 1.0 - smoothstep(-aa, aa, pill_d);
+    let pill_bg = mix(vec3(0.486, 0.227, 0.929), vec3(0.388, 0.133, 0.859),
+                     clamp(pill_pt.x / pill_size.x, 0.0, 1.0));
+    out = over(out, pill_bg, pill_mask * group_mask * 0.98);
+
+    out = home_toolbar_button(out, q, p.home_toolbar_rects[1], 0u, aa);
+    out = home_toolbar_button(out, q, p.home_toolbar_rects[2], 1u, aa);
+    out = home_toolbar_button(out, q, p.home_toolbar_rects[3], 2u, aa);
+    out = home_toolbar_button(out, q, p.home_toolbar_rects[4], 3u, aa);
+    out = home_toolbar_button(out, q, search, 4u, aa);
+    return out;
+}
+
+fn home_card(ui: vec4<f32>, pt: vec2<f32>, slot: u32, aa: f32) -> vec4<f32> {
+    let rect = p.home_rects[slot];
+    if rect.z <= 0.0 { return ui; }
+    let scale = p.home_view.z;
+    let margin = 24.0 * scale;
+    if pt.x < rect.x - margin || pt.x > rect.x + rect.z + margin || pt.y < rect.y - margin || pt.y > rect.y + rect.w + margin {
+        return ui;
+    }
+    let q = (pt - rect.xy) / scale;
+    let size = rect.zw / scale;
+    if any(q < vec2(-24.0)) || any(q > size + 24.0) { return ui; }
+    let selected = slot == 2u;
+    let far = slot == 0u || slot == 4u;
+    let hot = u32(p.home_state.y) == slot + 1u;
+    let radius = select(select(14.0, 12.0, far), 16.0, selected);
+    let d = rounded_distance(q, size, radius);
+    let inside = 1.0 - smoothstep(-aa, aa, d);
+    let info = p.home_images[slot];
+    if info.x == 0u {
+        var ghost = over(ui, vec3(0.055, 0.04, 0.11), inside * 0.38);
+        let dash = step(0.45, fract((q.x + q.y) / 11.0));
+        ghost = over(ghost, vec3(0.78, 0.80, 0.92), inside * smoothstep(-2.0, 0.0, d) * 0.22 * dash);
+        let c = abs(q - size * 0.5);
+        let plus = min(max(c.x - 8.0, c.y - 0.8), max(c.y - 8.0, c.x - 0.8));
+        return over(ghost, vec3(0.64, 0.67, 0.80), 0.57 * (1.0 - smoothstep(-aa, aa, plus)));
+    }
+    var out = over(ui, vec3(0.006, 0.008, 0.03), 0.5 * (1.0 - smoothstep(-1.0, 16.0, d)));
+    if selected {
+        let halo = exp(-max(d + 1.0, 0.0) * 0.30);
+        out = over(out, vec3(0.0, 0.14, 0.80), halo * 0.52);
+    }
+    if inside <= 0.0 { return out; }
+    let custom = info.w > 0u;
+    let index = select(info.x, info.w, custom) - 1u;
+    let origin = vec2(f32(index % 5u) * 320.0, f32(index / 5u) * 192.0 + select(0.0, 2352.0, custom));
+    let crop = cover_scale(size.x / size.y, 320.0 / 192.0);
+    let uv = (q / size - 0.5) * crop / select(1.0, 1.04, hot) + 0.5;
+    let image = home_sample(origin, vec2(320.0, 192.0), uv).rgb;
+    let y = q.y / size.y;
+    let fade = 0.45 * smoothstep(0.24, 0.55, y) + 0.49 * smoothstep(0.55, 1.0, y);
+    var card = vec4(mix(image, vec3(0.016, 0.016, 0.086), fade), 1.0);
+
+    let factor = select(select(0.88, 0.78, far), 1.0, selected);
+    let icon = select(select(38.0, 32.0, far), 44.0, selected);
+    let icon_pos = vec2(12.0 * factor, size.y - icon - 10.0 * factor);
+    let icon_q = q - icon_pos;
+    if all(icon_q >= vec2(-aa)) && all(icon_q <= vec2(icon + aa)) {
+        let icon_d = rounded_distance(icon_q, vec2(icon), 10.0 * factor);
+        let mask = 1.0 - smoothstep(-aa, aa, icon_d);
+        let io = vec2(f32(info.y % 33u) * 48.0, 1536.0 + f32(info.y / 33u) * 48.0);
+        let avatar = home_sample(io, vec2(48.0), icon_q / icon);
+        card = over(card, vec3(0.035, 0.04, 0.08), mask);
+        card = overlay_over(card, avatar * mask);
+        card = over(card, vec3(0.8, 0.85, 1.0), mask * smoothstep(-1.8, 0.0, icon_d) * 0.23);
+    }
+    let text_x = icon_pos.x + icon + 10.0 * factor;
+    card = home_label(card, (q - vec2(text_x, size.y - 41.0 * factor)) / factor, slot * 2u, vec3(0.99), false);
+    card = home_label(card, (q - vec2(text_x, size.y - 23.0 * factor)) / (factor * 0.81), slot * 2u + 1u,
+        vec3(0.72, 0.78, 0.90), false);
+    if info.z != 0u {
+        let dot = length(q - vec2(size.x - 17.0, 17.0));
+        card = over(card, vec3(0.30, 0.95, 0.63), 1.0 - smoothstep(4.0 - aa, 4.0 + aa, dot));
+    }
+    if selected {
+        card = over(card, vec3(0.012, 0.29, 0.84), smoothstep(-10.0, -0.1, d) * 0.76);
+        card = over(card, vec3(0.28, 0.52, 1.0), smoothstep(-1.8, 0.0, d) * 0.9);
+        // Exact WebView2 TopRosao gradient: the native atlas contains its
+        // original 293 stops, and this reproduces animateTransform's
+        // -139 -> 221 degree rotation around (160,96) every 10 seconds.
+        let edge = 1.0 - smoothstep(0.2, 2.4, abs(d));
+        let angle = radians(-139.0 + 36.0 * p.home_phase.x);
+        let centered = q - vec2(160.0, 96.0);
+        let rotated_x = cos(angle) * centered.x - sin(angle) * centered.y + 160.0;
+        let gradient_t = clamp(rotated_x / 320.0, 0.0, 1.0);
+        let stroke = home_sample(vec2(0.0, 2304.0), vec2(1024.0, 1.0),
+            vec2(gradient_t, 0.5)).rgb;
+        card = over(card, stroke, edge * 0.98);
+    } else {
+        card = over(card, vec3(0.77, 0.77, 0.91), smoothstep(-1.8, 0.0, d) * select(0.18, 0.54, hot));
+    }
+    return over(out, card.rgb, inside);
+}
+
+fn home_arrow(ui: vec4<f32>, pos: vec2<f32>, i: u32, aa: f32) -> vec4<f32> {
+    let rect = p.home_controls[i];
+    let center = rect.xy + rect.zw * 0.5;
+    let scale = p.home_view.z;
+    let max_dist = 20.0 * scale;
+    if abs(pos.x - center.x) > max_dist || abs(pos.y - center.y) > max_dist {
+        return ui;
+    }
+    let q = (pos - center) / scale;
+    let d = length(q) - 19.0;
+    if d > aa { return ui; }
+    let hot = p.home_state.y == f32(i + 6u);
+    let mask = 1.0 - smoothstep(-aa, aa, d);
+    var out = over(ui, select(vec3(0.055, 0.035, 0.11), vec3(0.31, 0.14, 0.47), hot), mask * 0.84);
+    out = over(out, vec3(0.73, 0.59, 0.98), mask * smoothstep(-2.0, 0.0, d) * select(0.3, 0.85, hot));
+    let x = q.x * select(-1.0, 1.0, i == 1u);
+    let l = max(abs(q.y) - 7.0, abs(x - (3.0 - abs(q.y) * 0.8)) - 1.2);
+    return over(out, vec3(0.95, 0.94, 1.0), 1.0 - smoothstep(-aa, aa, l));
+}
+
+fn draw_home_carousel(pos: vec2<f32>) -> vec4<f32> {
+    let s = p.home_view.z;
+    if s <= 0.0 { return vec4(0.0); }
+    let q = (pos - p.home_view.xy) / s;
+    let aa = max(0.65, 0.75 / s);
+    let total = p.home_state.x;
+    if abs(q.x) > select(565.0, 810.0, total >= 5.0) || abs(q.y) >= 134.0 {
+        return vec4(0.0);
+    }
+    var ui = vec4(0.0);
+    if total == 0.0 {
+        let d = rounded_distance(q + vec2(166.0, 28.0), vec2(332.0, 56.0), 13.0);
+        let pill = over(ui, vec3(0.035, 0.032, 0.08), 0.86 * (1.0 - smoothstep(-aa, aa, d)));
+        return home_label(pill, q, 10u, vec3(0.89, 0.91, 1.0), true) * p.home_view.w;
+    }
+    for (var slot = 0u; slot < 5u; slot++) {
+        ui = home_card(ui, pos, slot, aa);
+    }
+    if total > 1.0 {
+        ui = home_arrow(ui, pos, 0u, aa);
+        ui = home_arrow(ui, pos, 1u, aa);
+    }
+    return ui * p.home_view.w;
+}
+
+fn draw_home(pos: vec2<f32>) -> vec4<f32> {
+    let ui = draw_home_carousel(pos);
+    let scale = p.home_toolbar_view.z;
+    if scale <= 0.0 { return ui; }
+    let q = (pos - p.home_toolbar_view.xy) / scale;
+    let group = p.home_toolbar_rects[0];
+    let search = p.home_toolbar_rects[5];
+    let bleed = vec2(p.home_toolbar_view.w);
+    if any(q < group.xy - bleed) || any(q > search.xy + search.zw + bleed) { return ui; }
+    return home_toolbar(ui, q, max(0.65, 0.75 / scale));
+}
