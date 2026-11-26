@@ -243,6 +243,9 @@ pub(super) struct Data {
     pub clock_style: crate::home_widgets::Style,
     pub clock_24h: bool,
     pub favorites: Vec<String>,
+    /// WebView2 `modcomparer_custom_instance_icons`: instance path, folder or
+    /// name to an icon URL (an asset file, a data URL or a web image).
+    pub instance_icons: BTreeMap<String, String>,
     pub friends_autoaccept: bool,
     pub preferences_geometry: PreferencesGeometry,
     pub error: Option<String>,
@@ -441,6 +444,7 @@ fn decode_local(k: &[u8], v: &[u8]) -> Option<(String, String, String)> {
             | "ika_removed_accounts"
             | "ika_custom_cover_bg"
             | "ika_custom_cover_pos"
+            | "modcomparer_custom_instance_icons"
     ) && !key.starts_with("ika_minotar_skin_")
         && !key.starts_with("modcomparer_custom_skins_")
     {
@@ -889,6 +893,10 @@ pub(super) fn load() -> Data {
         clock_24h: keys.get("ika_clock_24h").is_some_and(|s| s == "true"),
         favorites: keys
             .get("modcomparer_favorites")
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default(),
+        instance_icons: keys
+            .get("modcomparer_custom_instance_icons")
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or_default(),
         preferences_geometry: PreferencesGeometry::load(&keys),

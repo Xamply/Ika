@@ -115,6 +115,26 @@ fn dock_play_hover(below: vec4<f32>, pt: vec2<f32>, local: vec2<f32>, fill: f32)
     return ui;
 }
 
+// WebView2 #jugarBorderShimmer: a 200 px white band (x 447.5..647.5 in the
+// button's SVG space) with feathered stops, translated -360 -> 360 during the
+// first 42% of every 3 s, then held off-screen. `x` is the SVG x coordinate.
+fn play_shimmer_band(x: f32, t: f32) -> f32 {
+    let shift = mix(-360.0, 360.0, min(t / 0.42, 1.0));
+    let u = (x - shift - 447.5) / 200.0;
+    if u <= 0.0 || u >= 1.0 { return 0.0; }
+    let stops = array<vec2<f32>, 11>(
+        vec2(0.0, 0.0), vec2(0.08, 0.04), vec2(0.18, 0.18), vec2(0.30, 0.45), vec2(0.42, 0.80),
+        vec2(0.50, 1.0), vec2(0.58, 0.80), vec2(0.70, 0.45), vec2(0.82, 0.18), vec2(0.92, 0.04), vec2(1.0, 0.0));
+    for (var i = 1u; i < 11u; i++) {
+        if u <= stops[i].x {
+            let a = stops[i - 1u];
+            let b = stops[i];
+            return mix(a.y, b.y, (u - a.x) / (b.x - a.x));
+        }
+    }
+    return 0.0;
+}
+
 fn dock_play(below: vec4<f32>, xy: vec2<f32>) -> vec4<f32> {
     let center = vec2(1280.0, 201.0);
     let pt = center + (xy - center) / p.dock_scale[0].z;
@@ -123,17 +143,28 @@ fn dock_play(below: vec4<f32>, xy: vec2<f32>) -> vec4<f32> {
     if hot > 0.0 { fill = mix(fill, dock_sprite(DOCK_PLAY_HOT, pt), hot); }
     var ui = dock_over(below, fill);
     let local = (pt - center) * (148.0 / 134.0);
-    let offset = mix(-360.0, 360.0, min(p.dock_play.z / 0.42, 1.0));
-    let glint = pow(max(0.0, 1.0 - abs(local.x - offset) * 0.01), 1.7) * (1.0 - hot);
-    // Sweep the surface behind the current content. The old sheen sprite
-    // included the idle arrow and label, so it could bring them back mid-sweep.
-    ui = over(ui, vec3(1.0), fill.a * glint * 0.16);
+    // SVG x of this pixel (the button is centered at 547.5 in its viewBox).
+    let svg_x = 547.5 + local.x;
+    // The shimmer keeps sweeping on hover too.
+    let band = play_shimmer_band(svg_x, p.dock_play.z);
+    let glint = band;
     let edge = dock_sprite(DOCK_PLAY_EDGE, pt).a;
     if edge > 0.0 {
         let t = 0.5 + dot(local, p.dock_play.xy) / 389.0;
         ui = over(ui, dock_ramp(t, 6.0), edge * (1.0 - hot));
         ui = over(ui, vec3(1.0), edge * hot * 0.45);
-        ui = over(ui, vec3(1.0), edge * glint);
+        // play-base-shimmer-border: the band as the stroke color, through
+        // shimmerGlow (feGaussianBlur 1.2 merged under the source stroke).
+        if glint > 0.001 {
+            var blur = edge;
+            for (var k = 0u; k < 6u; k++) {
+                let a = f32(k) * 1.047198;
+                blur += dock_sprite(DOCK_PLAY_EDGE, pt + vec2(cos(a), sin(a)) * 1.1).a;
+            }
+            blur /= 7.0;
+            let stroke = 1.0 - (1.0 - blur) * (1.0 - edge);
+            ui = over(ui, vec3(1.0), stroke * glint);
+        }
         if p.dock_play.w > 0.0 {
             // Loading state: a fast cyan sweep travels around the same
             // outline used by the WebView2 Play button.
@@ -155,14 +186,52 @@ fn dock_play(below: vec4<f32>, xy: vec2<f32>) -> vec4<f32> {
     let slots = array(DOCK_PLAY_TEXT_PREP, DOCK_PLAY_TEXT_RUN);
     if idle.x > 0.0 {
         let q = pt - vec2(0.0, idle.y);
-        var label = dock_sprite(DOCK_PLAY_TEXT, q);
-        if hot > 0.0 { label = mix(label, dock_sprite(DOCK_PLAY_TEXT_HOT, q), hot); }
+        // WebView2 hover: letter-spacing 0.4 -> 2.2 px over 0.36 s. Both end
+        // states are the reference's own crisp rasters (DOCK_PLAY_TEXT at
+        // rest, DOCK_PLAY_TEXT_HOT spaced). In between, each letter of
+        // "Jugar" glides from its rest place to its spaced place and its
+        // pixels cross-fade between the two rasters; nothing is resampled
+        // or scaled, so the type stays sharp.
+        let lk = clamp(p.dock_label.x, 0.0, 1.0);
+        // Letter cuts in each sprite, in canvas x (sprite origin + column).
+        let rest_cut = array<f32, 4>(1267.0 + 14.0, 1267.0 + 28.0, 1267.0 + 42.5, 1267.0 + 56.0);
+        let hot_cut = array<f32, 4>(1264.0 + 14.5, 1264.0 + 30.5, 1264.0 + 48.0, 1264.0 + 64.0);
+        let rest_left = array<f32, 5>(1267.0, rest_cut[0], rest_cut[1], rest_cut[2], rest_cut[3]);
+        let hot_left = array<f32, 5>(1264.0, hot_cut[0], hot_cut[1], hot_cut[2], hot_cut[3]);
+        var letter = 0u;
+        for (var g = 0u; g < 4u; g++) {
+            if q.x >= mix(rest_cut[g], hot_cut[g], lk) { letter = g + 1u; }
+        }
+        let here = mix(rest_left[letter], hot_left[letter], lk);
+        let from_rest = dock_sprite(DOCK_PLAY_TEXT, q + vec2(rest_left[letter] - here, 0.0));
+        let from_hot = dock_sprite(DOCK_PLAY_TEXT_HOT, q + vec2(hot_left[letter] - here, 0.0));
+        var label = mix(from_rest, from_hot, lk);
         ui = dock_over(ui, label * idle.x);
         let arrow_center = vec2(1245.5946, 201.0);
         let breath = hot * p.dock_pulse.z;
         let arrow = dock_sprite(DOCK_PLAY_ICON, arrow_center + (q - arrow_center) / (1.0 + breath * 0.10));
         ui = over(ui, vec3(1.0), idle.x * hot * mix(arrow.r * 0.25, arrow.g * 0.9, breath));
         ui = over(ui, vec3(1.0), arrow.a * idle.x);
+        // play-shimmer-sweep-wrap: the same band, masked onto the arrow and
+        // the "Jugar" label, with textShimmerBloom (blur 2.8 + 1.2): a glow
+        // sampled around the glyphs, so the wave lights the type itself.
+        if band > 0.001 {
+            // feMerge(blur 2.8, blur 1.2, source): each blur is a small
+            // Gaussian estimate of the glyph coverage around this pixel.
+            let glyph = max(label.a, arrow.a);
+            var wide = glyph;
+            var near = glyph;
+            for (var k = 0u; k < 8u; k++) {
+                let a = f32(k) * 0.785398;
+                let o = vec2(cos(a), sin(a));
+                wide += max(dock_sprite(DOCK_PLAY_TEXT, q + o * 2.5).a, dock_sprite(DOCK_PLAY_ICON, q + o * 2.5).a);
+                near += max(dock_sprite(DOCK_PLAY_TEXT, q + o * 1.1).a, dock_sprite(DOCK_PLAY_ICON, q + o * 1.1).a);
+            }
+            wide /= 9.0;
+            near /= 9.0;
+            let bloom = 1.0 - (1.0 - wide) * (1.0 - near) * (1.0 - glyph);
+            ui = over(ui, vec3(1.0), bloom * band * idle.x);
+        }
     }
     for (var i = 1u; i < 3u; i++) {
         let layer = p.play.layers[i];

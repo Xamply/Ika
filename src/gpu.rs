@@ -59,6 +59,8 @@ pub struct Params {
     pub dock_scale: [[f32; 4]; 2],
     pub dock_fx: [f32; 4],
     pub dock_pulse: [f32; 4],
+    /// Play label hover (letter spacing/scale), its own eased transition.
+    pub dock_label: [f32; 4],
     pub play: crate::dock::play::Frame,
     pub wall_rect: [f32; 4],
     pub wall_crt: Layers,
@@ -79,7 +81,7 @@ pub struct Params {
     pub home_phase: [f32; 4],
     pub home_rects: [[f32; 4]; 5],
     pub home_images: [[u32; 4]; 5],
-    pub home_controls: [[f32; 4]; 3],
+    pub home_controls: [[f32; 4]; 10],
     pub home_text: [crate::home::Text; 18],
     pub wall_rows: [[u32; 4]; crate::wallpapers::LINES],
     pub wall_words: [[u32; 4]; 2 * crate::wallpapers::LINES],
@@ -1519,12 +1521,23 @@ impl Gpu {
                 ]);
             }
         }
-        if params.home_view[2] > 0.0 {
+        if params.home_controls[2][3] > 0.5 {
+            // Section change: Home slides sideways across the whole width.
+            let [_, y, scale, _] = params.home_view;
+            let [_, ty0, _, ty1] = crate::home::toolbar_bounds(params.home_toolbar_view);
+            regions.push([
+                0,
+                ((y - 134.0 * scale).min(ty0).floor().max(0.0)) as u32,
+                w,
+                ((y + 134.0 * scale).max(ty1).ceil()) as u32,
+            ]);
+        } else if params.home_view[2] > 0.0 {
             let [x, y, scale, _] = params.home_view;
             let half_w = match params.home_state[0] as u32 {
                 0 => 170.0,
-                1..=4 => 565.0,
-                _ => 810.0,
+                // Arrows slide out on hover and ripple on click.
+                1..=4 => 615.0,
+                _ => 860.0,
             };
             regions.push([
                 (x - half_w * scale).floor() as u32,
@@ -1533,7 +1546,7 @@ impl Gpu {
                 (y + 134.0 * scale).ceil() as u32,
             ]);
         }
-        if params.home_toolbar_view[2] > 0.0 {
+        if params.home_toolbar_view[2] > 0.0 && params.home_controls[2][3] <= 0.5 {
             let [x0, y0, x1, y1] = crate::home::toolbar_bounds(params.home_toolbar_view);
             regions.push([
                 x0.floor() as u32,

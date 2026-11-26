@@ -46,7 +46,26 @@ use winit::{
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
+/// Fallback frame interval when the monitor's rate is unknown.
 const COMPOSITOR_FRAME_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / 60);
+
+/// Frame interval for UI animations: a whole number of monitor refreshes,
+/// as close to 60 fps as possible (4 refreshes on a 240 Hz monitor, 1 on
+/// 60 Hz, 2 on 120/144 Hz). A fixed 16.7 ms on a 239 Hz monitor alternated
+/// 4 and 5 refreshes per frame, which reads as an uneven, stopping motion.
+fn ui_frame_interval(window: &Window) -> Duration {
+    let Some(mhz) = window
+        .current_monitor()
+        .and_then(|m| m.refresh_rate_millihertz())
+        .filter(|&r| r >= 30_000)
+    else {
+        return COMPOSITOR_FRAME_INTERVAL;
+    };
+    let refresh = 1.0e12 / f64::from(mhz); // nanoseconds
+    let refreshes = (16_666_667.0 / refresh).round().max(1.0);
+    // Wake slightly early so the frame is ready for its vblank.
+    Duration::from_nanos((refresh * refreshes - refresh * 0.25).max(1_000_000.0) as u64)
+}
 
 fn control_is_down(session: &Session) -> bool {
     session.ctrl
@@ -318,6 +337,62 @@ struct App {
     error: Option<Box<dyn Error>>,
 }
 
+/// Runs an item of the instance menus (carousel right click, dock "⋮").
+fn menu_action(session: &mut Session, action: profile::MenuAction, path: &str, now: Instant) {
+    use profile::MenuAction as A;
+    let Some(home) = &mut session.home else { return };
+    let Some(instance) = home.collection().find(|i| i.path == path).cloned() else { return };
+    let open = |folder: std::path::PathBuf, what: &str| {
+        if let Err(error) = std::process::Command::new("explorer.exe").arg(&folder).spawn() {
+            eprintln!("{what}: {error}");
+        }
+    };
+    let game = minecraft::game_folder(&instance);
+    let sub = |name: &str| {
+        let dir = game.join(name);
+        // Created on first play in WebView2 too; open the game folder meanwhile.
+        if dir.is_dir() { dir } else { game.clone() }
+    };
+    match action {
+        A::Play => {
+            home.play_path(path, session.profile.account(), now);
+            if !session.titlebar.on_home() {
+                session.titlebar.select(0, now);
+            }
+        }
+        A::Stop => {
+            if let Some(pid) = home.game_pid(path)
+                && let Err(error) = minecraft::stop(pid)
+            {
+                eprintln!("Detener instancia: {error}");
+            }
+        }
+        A::Edit => session.profile.open_instance(profile::InstanceMode::Edit, Some(instance)),
+        A::Rename => session.profile.open_instance(profile::InstanceMode::Edit, Some(instance)),
+        A::Duplicate => session.profile.open_instance(profile::InstanceMode::Copy, Some(instance)),
+        A::Explorer => open(std::path::PathBuf::from(&instance.path), "Carpeta de instancia"),
+        A::Mods => open(sub("mods"), "Carpeta de mods"),
+        A::ResourcePacks => open(sub("resourcepacks"), "Carpeta de resource packs"),
+        A::Shaders => open(sub("shaderpacks"), "Carpeta de shaders"),
+        A::Screenshots => open(sub("screenshots"), "Carpeta de capturas"),
+        A::Console => session.titlebar.select(1, now),
+        // Their screens are still being ported; show where they will live.
+        A::Manager => session.titlebar.select(3, now),
+        A::Compare => session.titlebar.select(2, now),
+        A::Delete => {
+            if home.game_pid(path).is_some() {
+                eprintln!("Cierra el juego antes de eliminar la instancia");
+            } else {
+                match minecraft::trash(&instance) {
+                    Ok(_) => home.refresh_catalog(),
+                    Err(error) => eprintln!("Eliminar instancia: {error}"),
+                }
+            }
+        }
+    }
+    session.window.request_redraw();
+}
+
 struct Session {
     window: Arc<Window>,
     gpu: Gpu,
@@ -350,6 +425,14 @@ struct Session {
     cached_aspect: Option<f32>,
     audio: Option<bridge_signal::Audio>,
     last_click: Option<(Instant, PhysicalPosition<f64>)>,
+    /// When the last frame was presented. Pointer moves arrive at the mouse's
+    /// rate (often 1000 Hz); drawing one frame per move made hovering the
+    /// carousel present ~135 frames/s. Redraws closer than one frame are
+    /// deferred to that frame instead.
+    last_present: Option<Instant>,
+    redraw_pending: bool,
+    /// UI frame interval aligned to the monitor's refresh (see ui_frame_interval).
+    frame_interval: Duration,
 }
 
 impl Session {
@@ -549,7 +632,11 @@ impl App {
             down: None,
             has_selector: self.selector.is_some(),
             fullscreen: self.fullscreen,
-            titlebar: titlebar::Titlebar::new(now),
+            titlebar: {
+                let mut titlebar = titlebar::Titlebar::new(now);
+                titlebar.frame = ui_frame_interval(&window);
+                titlebar
+            },
             dock: dock::Dock::new(now),
             dock_preview: dock_preview::Preview::default(),
             home,
@@ -579,6 +666,9 @@ impl App {
                 .as_deref()
                 .and_then(|dir| bridge_signal::Audio::open(dir, "0")),
             last_click: None,
+            last_present: None,
+            redraw_pending: false,
+            frame_interval: ui_frame_interval(&window),
         });
         self.epoch = Instant::now();
         // The original atlas has been uploaded; the process does not stream new frames.
@@ -963,7 +1053,12 @@ impl App {
             next_glyphs: glyphs("CAMBIAR FONDO"),
             ..Params::zeroed()
         };
-        if session.home_active() {
+        // Home <-> Console: Home stays drawn while it slides out (or in).
+        let section = session.titlebar.section_motion(now).filter(|m| {
+            (m.from == 0 && session.titlebar.on_console()) || (m.from == 1 && session.titlebar.on_home())
+        });
+        let home_active = session.home_active();
+        if session.home.is_some() && (home_active || section.is_some()) {
             params.button = [0.0; 4];
             params.next_button = [0.0; 4];
             params.glass = [0.0; 4];
@@ -972,11 +1067,28 @@ impl App {
                 &session.window,
                 now,
                 match hovered {
-                    Some(Button::Home(hit)) => Some(hit),
+                    Some(Button::Home(hit)) if home_active => Some(hit),
                     _ => None,
                 },
             );
+            if let Some(m) = section {
+                // Leaving Home: 0 -> 1. Coming back: 1 -> 0, from the other side.
+                let out = if session.titlebar.on_home() { 1.0 - m.progress(now) } else { m.progress(now) };
+                params.home_controls[2] = [out, m.direction, m.linear(now), 1.0];
+            }
         }
+        // The detailed Console follows the same curve, entering from the side
+        // Home leaves towards. At rest it sits in place, fully opaque.
+        let console_arrival = section
+            .filter(|_| session.titlebar.on_console())
+            .map_or((1.0, 1.0), |m| (m.progress(now), m.direction));
+        session.profile.console_slide(&session.window, console_arrival.0, console_arrival.1);
+        // The clock and the floating console travel with the carousel.
+        let home_out = section.map_or(0.0, |m| {
+            if session.titlebar.on_home() { 1.0 - m.progress(now) } else { m.progress(now) }
+        });
+        let home_direction = section.map_or(1.0, |m| m.direction);
+        session.profile.home_slide(&session.window, home_out, home_direction);
         if session.titlebar.on_console() {
             params.button = [0.0; 4];
             params.next_button = [0.0; 4];
@@ -1069,12 +1181,20 @@ impl App {
             session.audio.as_ref().map(|audio| audio.playing),
             &session.gpu,
         );
+        let shimmer = session
+            .dock
+            .shimmer_wake(session.titlebar.elapsed(), play_state, now)
+            .is_some_and(|at| at <= now);
         let active_ui = session.titlebar.animated(now)
+            || shimmer
+            || session.profile.specs_animating(now)
+            || session.profile.menu_animating(now)
             || session.dock.animated(now)
             || session.wallpapers.animating(now)
             || session.wallpapers.card_uses_main(catalog_hover, active)
             || session.home_active() && session.home.as_ref().is_some_and(|home| home.animated(now));
-        let show_clock = session.home_active();
+        let leaving_home = session.titlebar.section_motion(now).is_some_and(|m| m.from == 0);
+        let show_clock = session.home_active() || leaving_home && session.home.is_some();
         let show_panels = session.widgets_interactive();
         if let Some(widgets) = &mut session.widgets {
             if let Some((style, clock_24h)) = session.profile.webview_clock() {
@@ -1083,10 +1203,14 @@ impl App {
             if let Some(favorites) = session.profile.webview_favorites() {
                 widgets.import_favorites(favorites);
             }
+            if let (Some(icons), Some(home)) = (session.profile.webview_instance_icons(), &mut session.home) {
+                home.set_webview_icons(icons);
+            }
             if widgets.tick(show_clock, show_panels, now) {
                 session.profile.invalidate();
             }
         }
+        session.profile.set_specs(session.home.as_ref().and_then(|home| home.active_instance()), now);
         let widgets = show_clock.then(|| session.widgets.as_ref().zip(session.home.as_ref())).flatten();
         session.profile.paint(
             &session.window, &mut session.gpu.profile, show_profile, session.wallpapers.dim,
@@ -1094,6 +1218,9 @@ impl App {
             if widgets.is_some() { home_widgets::ClockOcclusion::from_scene(&params) } else { Default::default() },
             console_glass.is_some(),
         );
+        if let Some((action, path)) = session.profile.take_menu_action() {
+            menu_action(session, action, &path, now);
+        }
         if let Some(action) = session.profile.take_console_action() {
             match action {
                 profile::ConsoleAction::Detail => session.titlebar.select(1, now),
@@ -1132,6 +1259,7 @@ impl App {
                 println!("Pantalla de carga cerrada");
             }
             let presented = Instant::now();
+            session.last_present = Some(presented);
             session.dock_preview.presented(presented, &session.gpu);
             if let Some((start, frames)) = &mut session.present_stats {
                 *frames += 1;
@@ -1285,6 +1413,44 @@ impl ApplicationHandler for App {
         } else {
             session.cursor_position()
         };
+        if session.profile.menu_event(&session.window, cursor, &event) {
+            if let WindowEvent::CursorMoved { position, .. } = event {
+                session.cursor = Some(position);
+            }
+            session.down = None;
+            session.window.request_redraw();
+            return;
+        }
+        // Right click on a carousel card opens its WebView2 menu.
+        if let WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Right, .. } = &event
+            && session.home_active()
+            && session.profile.panel.is_none()
+            && let Some(p) = cursor
+            && let Some(Button::Home(home::Hit::Card(offset))) = session.hovered()
+            && let Some(home) = &session.home
+            && let Some(instance) = home.card_at(offset).cloned()
+        {
+            let running = home.game_pid(&instance.path).is_some();
+            session.profile.open_carousel_menu(&session.window, &instance, running, p);
+            session.window.request_redraw();
+            return;
+        }
+        // Ctrl + wheel over the specs strip under Play zooms its text.
+        if let WindowEvent::MouseWheel { delta, .. } = &event
+            && control_is_down(session)
+            && session.profile.panel.is_none()
+            && !session.wallpapers.visible()
+            && let Some(p) = cursor
+        {
+            let steps = match delta {
+                MouseScrollDelta::LineDelta(_, y) => *y,
+                MouseScrollDelta::PixelDelta(p) => p.y as f32,
+            };
+            if steps != 0.0 && session.profile.specs_wheel(&session.window, p, steps) {
+                session.window.request_redraw();
+                return;
+            }
+        }
         if session.profile.oneko_event(&session.window, cursor, &event) {
             if let WindowEvent::CursorMoved { position, .. } = event {
                 session.cursor = Some(position);
@@ -1443,6 +1609,10 @@ impl ApplicationHandler for App {
                 session.window.request_redraw();
             }
             WindowEvent::ScaleFactorChanged { .. } => session.window.request_redraw(),
+            WindowEvent::Moved(_) => {
+                session.frame_interval = ui_frame_interval(&session.window);
+                session.titlebar.frame = session.frame_interval;
+            }
             WindowEvent::Occluded(occluded) => {
                 session.occluded = occluded;
                 if occluded && session.shown {
@@ -1627,6 +1797,12 @@ impl ApplicationHandler for App {
                     session.window.request_redraw();
                     return;
                 }
+                if state == ElementState::Pressed
+                    && hovered != Some(Button::Home(home::Hit::Search))
+                    && let Some(home) = &mut session.home
+                {
+                    home.search_blur();
+                }
                 match state {
                     ElementState::Pressed => {
                         let now = Instant::now();
@@ -1733,6 +1909,15 @@ impl ApplicationHandler for App {
                                         eprintln!("Carpeta de Minecraft: {error}");
                                     }
                                 }
+                                Button::Dock(dock::MORE) => {
+                                    if let Some(home) = &session.home
+                                        && let Some(instance) = home.active_instance().cloned()
+                                    {
+                                        let running = home.game_pid(&instance.path).is_some();
+                                        let (x, y) = dock::button_top(&session.window, dock::MORE);
+                                        session.profile.toggle_dock_menu(&instance, running, egui::pos2(x, y));
+                                    }
+                                }
                                 Button::Dock(i) => dock::open_link(i),
                                 Button::Home(home::Hit::Create) => {
                                     session.profile.open_instance(profile::InstanceMode::Create, None);
@@ -1746,9 +1931,11 @@ impl ApplicationHandler for App {
                                 Button::Chrome(titlebar::Hit::Tab(index)) => {
                                     if index != 0
                                         && let Some(home) = &mut session.home
-                                        && home.editing()
                                     {
-                                        home.cancel();
+                                        home.search_blur();
+                                        if home.editing() {
+                                            home.cancel();
+                                        }
                                     }
                                     session.titlebar.select(index, Instant::now());
                                     session.window.request_redraw();
@@ -1851,6 +2038,34 @@ impl ApplicationHandler for App {
                 if session.home_active()
                     && session.titlebar.picker.is_none()
                     && let Some(home) = &mut session.home
+                    && home.searching()
+                {
+                    match event.logical_key {
+                        Key::Named(NamedKey::Escape) => home.search_escape(),
+                        Key::Named(NamedKey::Backspace) => home.search_backspace(),
+                        Key::Named(NamedKey::Enter) if !event.repeat => home.search_blur(),
+                        Key::Named(NamedKey::ArrowLeft) => home.activate(home::Hit::Prev, Instant::now()),
+                        Key::Named(NamedKey::ArrowRight) => home.activate(home::Hit::Next, Instant::now()),
+                        Key::Character(ref key)
+                            if session.ctrl && key.eq_ignore_ascii_case("v") =>
+                        {
+                            if let Some(text) = clipboard_text() {
+                                home.search_input(text.trim());
+                            }
+                        }
+                        _ if !session.ctrl => {
+                            if let Some(text) = &event.text {
+                                home.search_input(text);
+                            }
+                        }
+                        _ => (),
+                    }
+                    session.window.request_redraw();
+                    return;
+                }
+                if session.home_active()
+                    && session.titlebar.picker.is_none()
+                    && let Some(home) = &mut session.home
                     && home.editing()
                 {
                     match event.logical_key {
@@ -1946,6 +2161,17 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => {
+                let now = Instant::now();
+                if let Some(s) = self.session.as_mut()
+                    && s.last_present.is_some_and(|at| now < at + s.frame_interval)
+                {
+                    // Too soon after the last frame: draw at the next frame.
+                    s.redraw_pending = true;
+                    return;
+                }
+                if let Some(s) = self.session.as_mut() {
+                    s.redraw_pending = false;
+                }
                 if let Err(error) = self.draw() {
                     self.error = Some(error);
                     events.exit();
@@ -1956,6 +2182,13 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, events: &ActiveEventLoop) {
+        if let Some(s) = self.session.as_mut()
+            && s.redraw_pending
+            && s.last_present.is_none_or(|at| Instant::now() >= at + s.frame_interval)
+        {
+            s.redraw_pending = false;
+            s.window.request_redraw();
+        }
         if let Err(error) = self.poll_initial_source().and_then(|()| self.poll_switch()) {
             self.error = Some(error);
             events.exit();
@@ -2148,7 +2381,17 @@ impl ApplicationHandler for App {
         let (index, delay) = self.scene.frame_at(self.animation_elapsed());
         let now = Instant::now();
         let mut next_title = s.titlebar.next_tick(now);
+        let shimmer_at = s.home.as_ref().and_then(|home| {
+            s.dock.shimmer_wake(s.titlebar.elapsed(), home.play_state(), now)
+        });
+        if shimmer_at.is_some_and(|at| at <= now) {
+            next_title = Some(next_title.map_or(s.titlebar.interaction_tick(), |t| t.min(s.titlebar.interaction_tick())));
+        } else if let Some(at) = shimmer_at {
+            next_title = Some(next_title.map_or(at, |t| t.min(at)));
+        }
         if s.dock.animated(now)
+            || s.profile.specs_animating(now)
+            || s.profile.menu_animating(now)
             || s.dock_preview.animating(&s.gpu)
             || s.wallpapers.animating(now)
             || s.wallpaper_fade.is_some()
@@ -2215,6 +2458,12 @@ impl ApplicationHandler for App {
         let next_wake = s.profile.deadline().map_or(next_wake, |at| next_wake.min(at.max(now)));
         let next_wake = widget_tick.map_or(next_wake, |at| next_wake.min(at));
         let next_wake = trim_at.map_or(next_wake, |at| next_wake.min(at));
+        // A deferred redraw runs at the next frame.
+        // (handled at the top of about_to_wait once it is due).
+        let next_wake = match (s.redraw_pending, s.last_present) {
+            (true, Some(at)) => next_wake.min((at + s.frame_interval).max(now)),
+            _ => next_wake,
+        };
         events.set_control_flow(ControlFlow::WaitUntil(next_wake));
     }
 }

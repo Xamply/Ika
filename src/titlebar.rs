@@ -29,8 +29,6 @@ const HEIGHT: f64 = 52.0;
 const BUTTON_WIDTH: f64 = 48.0;
 const NAV_TOP: f64 = 43.0;
 const NAV_HEIGHT: f64 = 46.0;
-const DECOR_FRAME: Duration = crate::COMPOSITOR_FRAME_INTERVAL;
-const INTERACTION_FRAME: Duration = crate::COMPOSITOR_FRAME_INTERVAL;
 include!("titlebar/layout.rs");
 
 #[repr(u8)]
@@ -193,8 +191,50 @@ fn glider_rect([left, width]: [f32; 2]) -> [f32; 2] {
     [left.round(), width.round()]
 }
 
+/// Section change: from which tab, when, and to which side it moves.
+#[derive(Clone, Copy)]
+pub struct SectionMotion {
+    pub from: usize,
+    pub started: Instant,
+    /// +1 when the new section is to the right of the old one.
+    pub direction: f32,
+}
+
+pub const SECTION_MOTION: f32 = GLIDER_DURATION;
+
+/// Section change length. `IKA_SLOW_SECTION=<factor>` slows it down to
+/// inspect the frames (diagnostic only).
+fn section_duration() -> f32 {
+    static SLOW: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    SECTION_MOTION
+        * *SLOW.get_or_init(|| {
+            std::env::var("IKA_SLOW_SECTION")
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok())
+                .filter(|f| f.is_finite() && *f >= 1.0)
+                .unwrap_or(1.0)
+        })
+}
+
+impl SectionMotion {
+    /// 0..1 with the pill's overshooting curve (it passes 1 and settles).
+    pub fn progress(&self, now: Instant) -> f32 {
+        ease(self.linear(now), GLIDER_EASE)
+    }
+
+    /// Linear 0..1, for the light sweep.
+    pub fn linear(&self, now: Instant) -> f32 {
+        (now.saturating_duration_since(self.started).as_secs_f32() / section_duration()).min(1.0)
+    }
+
+    pub fn running(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.started).as_secs_f32() < section_duration()
+    }
+}
+
 pub struct Titlebar {
     selected: usize,
+    pub section: Option<SectionMotion>,
     hover: Option<Hit>,
     glider: Glider,
     labels: [Transition<1>; 5],
@@ -212,6 +252,8 @@ pub struct Titlebar {
     notification_started: Instant,
     pub picker: Option<Box<monitor::Picker>>,
     reduced_motion: bool,
+    /// Frame interval aligned to the monitor (main.rs ui_frame_interval).
+    pub frame: Duration,
 }
 
 impl Titlebar {
@@ -219,6 +261,7 @@ impl Titlebar {
         let rest = Transition::new([0.0], now);
         Self {
             selected: 0,
+            section: None,
             hover: None,
             glider: Glider::new(glider_rect(tabs(0).0[0]), now),
             labels: std::array::from_fn(|i| Transition::new([f32::from(i == 0)], now)),
@@ -233,13 +276,14 @@ impl Titlebar {
             glows: [rest; 5],
             controls: [rest; 4],
             elapsed: Duration::ZERO,
-            next_decor: now + DECOR_FRAME,
+            next_decor: now + crate::COMPOSITOR_FRAME_INTERVAL,
             last_draw: now,
             last_visible: Some(now),
             notification_open: false,
             notification_started: now,
             picker: None,
             reduced_motion: reduced_motion(),
+            frame: crate::COMPOSITOR_FRAME_INTERVAL,
         }
     }
 
@@ -287,6 +331,13 @@ impl Titlebar {
     pub fn select(&mut self, index: usize, now: Instant) {
         if self.selected == index {
             return;
+        }
+        if !self.reduced_motion {
+            self.section = Some(SectionMotion {
+                from: self.selected,
+                started: now,
+                direction: if index > self.selected { 1.0 } else { -1.0 },
+            });
         }
         self.selected = index;
         self.glider
@@ -365,14 +416,20 @@ impl Titlebar {
 
     pub fn next_tick(&self, now: Instant) -> Option<Instant> {
         if self.animated(now) {
-            Some(self.next_decor.min(self.last_draw + INTERACTION_FRAME))
+            Some(self.next_decor.min(self.last_draw + self.frame))
         } else {
             None
         }
     }
 
+    /// The section transition while it runs.
+    pub fn section_motion(&self, now: Instant) -> Option<SectionMotion> {
+        self.section.filter(|m| m.running(now))
+    }
+
     pub fn animated(&self, now: Instant) -> bool {
         self.glider.running(now)
+            || self.section.is_some_and(|m| m.running(now))
             || self.layers.running(now, 0.34)
             || self.icons.iter().any(|icon| icon.running(now, 0.32))
             || self.glows.iter().any(|glow| glow.running(now, 0.30))
@@ -391,16 +448,18 @@ impl Titlebar {
     fn update_clock(&mut self, now: Instant, hold: bool) {
         if hold {
             self.pause();
-        } else if now >= self.next_decor || self.last_visible.is_none() {
+        } else {
+            // Advance on every drawn frame: skipping a frame here froze the
+            // animated borders for one frame and read as a stutter.
             let dt = self
                 .last_visible
                 .replace(now)
                 .map_or(Duration::ZERO, |last| now - last);
             self.elapsed += dt.min(Duration::from_millis(250));
-            self.next_decor = if self.next_decor + DECOR_FRAME > now {
-                self.next_decor + DECOR_FRAME
+            self.next_decor = if self.next_decor + self.frame > now {
+                self.next_decor + self.frame
             } else {
-                now + DECOR_FRAME
+                now + self.frame
             };
         }
     }
@@ -410,7 +469,7 @@ impl Titlebar {
     }
 
     pub fn interaction_tick(&self) -> Instant {
-        self.last_draw + INTERACTION_FRAME
+        self.last_draw + self.frame
     }
 
     pub fn uniforms(

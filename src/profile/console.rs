@@ -305,6 +305,10 @@ impl Metrics {
 pub struct Console {
     settings: Settings,
     view: View,
+    /// Opacity of the detailed view while it slides in (1 when settled).
+    pub detail_opacity: f32,
+    /// Opacity of the floating console while Home slides away.
+    pub home_opacity: f32,
     instance: Option<Instance>,
     status: Status,
     milestone: Option<Status>,
@@ -353,7 +357,7 @@ impl Console {
         settings.maze_volume = settings.maze_volume.min(100);
         let game = idle::Game::new(settings.game);
         Self {
-            settings, game, view: View::Hidden, instance: None, status: Status::Idle, milestone: None,
+            settings, game, view: View::Hidden, detail_opacity: 1.0, home_opacity: 1.0, instance: None, status: Status::Idle, milestone: None,
             detail: String::new(), tail: Tail::default(), read_pending: true, next_poll: None, next_game: None, last_game: None,
             revision: 0, hit: Rect::NOTHING, follow: [true; 2], clear_count: 0,
             filter: String::new(), command: String::new(), levels: [true; 3], notes: VecDeque::new(),
@@ -673,6 +677,7 @@ impl Console {
             .default_size(r.size()).fade_in(false).movable(false).constrain(false)
             .show(&ctx, |ui| {
                 ui.set_min_size(r.size());
+                ui.multiply_opacity(self.home_opacity);
                 let p = ui.painter().with_clip_rect(r.expand(18.));
                 if self.settings.minimized {
                     p.rect(r, 14., C::from_rgb(14, 9, 32), Stroke::new(1.5, C::from_rgba_unmultiplied(168, 85, 247, 153)), egui::StrokeKind::Inside);
@@ -859,6 +864,9 @@ impl Console {
         let ready_banner = if detail { self.ready_banner.clone() } else { None };
         let out = egui::ScrollArea::vertical().id_salt("text").max_height(r.height())
             .auto_shrink([false, false]).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+            // Opening the section shows the latest lines in place; never an
+            // animated scroll through the text.
+            .animated(false)
             .stick_to_bottom(true).show(&mut pane, |ui| {
                 let response = ui.add(egui::Label::new(job).selectable(true));
                 if let Some((time, text)) = ready_banner {
@@ -901,6 +909,7 @@ impl Console {
             .fixed_pos(stage.min).default_size(stage.size()).fade_in(false).movable(false).constrain(false)
             .show(&ctx, |ui| {
                 ui.set_min_size(stage.size());
+                ui.multiply_opacity(self.detail_opacity);
 
                 let info_w = (screen.width() * 0.19).clamp(270., 330.);
                 let info = Rect::from_min_size(stage.min, vec2(info_w, stage.height()));

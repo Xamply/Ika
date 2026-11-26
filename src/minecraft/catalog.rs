@@ -15,6 +15,8 @@ pub struct LauncherInstance {
     pub total_time_played: Option<u64>,
     pub shader_count: usize,
     pub resourcepack_count: usize,
+    /// `MaxMemAlloc` from instance.cfg, 8192 MB when absent (as WebView2).
+    pub max_mem_mb: u32,
 }
 
 /// Reads custom `InstanceDir=...` from a Prism/Freesm/ElyPrism configuration file if set.
@@ -349,21 +351,12 @@ fn java_vendor(info: &str) -> &'static str {
     "OpenJDK"
 }
 
+/// The instances of the WebView2 Home: the launcher folders only. Servers the
+/// old Servers screen installed elsewhere (Cretania in `Lucerion/instancias`)
+/// were never part of that list; `scan` still accepts them for the future
+/// Servers screen.
 pub(super) fn discover() -> Vec<LauncherInstance> {
-    // The old Servers screen installed Cretania outside the regular instances folders.
-    let installed_servers = std::env::var_os("USERPROFILE")
-        .map(|profile| {
-            let profile = std::path::PathBuf::from(profile);
-            [
-                profile.join("Lucerion/instancias/cretania/luz"),
-                profile.join("Ika/Servers/Cretania"),
-            ]
-            .into_iter()
-            .filter(|p| p.join("mmc-pack.json").is_file())
-            .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    scan(&instance_base_dirs(), &installed_servers)
+    scan(&instance_base_dirs(), &[])
 }
 
 pub(super) fn scan(
@@ -468,6 +461,7 @@ pub(super) fn scan(
         let mut java_version: Option<String> = None;
         let mut java_info = String::new();
         let mut total_time_played: Option<u64> = None;
+        let mut max_mem_mb: Option<u32> = None;
         let mut external_loader_ver = String::new();
 
         if cfg_file.exists() {
@@ -495,6 +489,12 @@ pub(super) fn scan(
                         let t = trimmed["totalTimePlayed=".len()..].trim();
                         if let Ok(secs) = t.parse::<u64>() {
                             total_time_played = Some(secs);
+                        }
+                    } else if let Some(m) = trimmed.strip_prefix("MaxMemAlloc=") {
+                        if let Ok(mb) = m.trim().parse::<u32>()
+                            && mb > 0
+                        {
+                            max_mem_mb = Some(mb);
                         }
                     } else if trimmed.starts_with("IkaJavaMajor=") {
                         let jm = trimmed["IkaJavaMajor=".len()..].trim();
@@ -993,6 +993,7 @@ pub(super) fn scan(
             total_time_played,
             shader_count,
             resourcepack_count,
+            max_mem_mb: max_mem_mb.unwrap_or(8192),
         };
 
 

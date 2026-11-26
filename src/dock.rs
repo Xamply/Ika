@@ -34,6 +34,7 @@ pub const EXPORT: usize = 0;
 pub const FOLDER: usize = 1;
 pub const PLAY: usize = 2;
 pub const EDIT: usize = 3;
+pub const MORE: usize = 4;
 pub const PROFILE: usize = 5;
 pub const PREFERENCES: usize = 6;
 pub const FRIENDS: usize = 7;
@@ -111,6 +112,24 @@ pub fn profile_rect(window: &Window) -> ([f32;4], f32) {
     ([x*d,(y+g.height-340.)*d,w*d,h*d],d)
 }
 
+/// Maps the dock's 2560 px canvas to logical window points, for drawing over
+/// the chassis: returns the logical position of canvas point `(x, y)` and the
+/// logical size of one canvas pixel.
+/// Top-center of a dock button in logical points (for anchoring menus).
+pub fn button_top(window: &Window, i: usize) -> (f32, f32) {
+    let g = Geometry::new(window);
+    let [x, y, w, _] = g.rect(i);
+    let d = g.scale / window.scale_factor() as f32;
+    ((x + w * 0.5) * d, (y + g.height - 340.0) * d)
+}
+
+pub fn canvas_to_logical(window: &Window, x: f32, y: f32) -> (f32, f32, f32) {
+    let g = Geometry::new(window);
+    let d = g.scale / window.scale_factor() as f32;
+    let x = x + (g.width - 2560.0) * 0.5;
+    (x * d, (y + g.height - 340.0) * d, d)
+}
+
 pub struct Dock {
     hot: [Transition<1>; COUNT],
     scale: [Transition<1>; 5],
@@ -121,6 +140,9 @@ pub struct Dock {
     play_started: Instant,
     play_fx: [Transition<1>; 5],
     play: play::Motion,
+    /// WebView2 .play-main-label: letter-spacing 0.4 -> 2.2 px, translateX(2),
+    /// scale(1.05) over 0.36 s cubic-bezier(0.16, 1, 0.3, 1).
+    label: Transition<1>,
     reduced_motion: bool,
 }
 
@@ -136,12 +158,30 @@ impl Dock {
             play_started: now,
             play_fx: [Transition::new([0.0], now); 5],
             play: play::Motion::new(now),
+            label: Transition::new([0.0], now),
             reduced_motion: reduced_motion(),
         }
     }
 
     pub fn play_pointer_down(&mut self, now: Instant) {
         self.play.pointer_down(now);
+    }
+
+    /// Play's idle shimmer (WebView2 #jugarBorderShimmer): it sweeps during
+    /// the first 42% of every 3 s and rests the remaining 58%. While it
+    /// sweeps it needs every frame; otherwise it returns when the next sweep
+    /// starts, so the launcher sleeps through the pause.
+    pub fn shimmer_wake(&self, elapsed: Duration, play_state: play::State, now: Instant) -> Option<Instant> {
+        if self.reduced_motion || play_state != play::State::Idle {
+            return None;
+        }
+        let t = elapsed.as_secs_f64().rem_euclid(3.0);
+        // A frame of margin so the band leaves the button completely.
+        if t < 3.0 * 0.42 + 0.05 {
+            Some(now)
+        } else {
+            Some(now + Duration::from_secs_f64(3.0 - t))
+        }
     }
 
     pub fn animated(&self, now: Instant) -> bool {
@@ -151,6 +191,7 @@ impl Dock {
                 || self.play_fx.iter().any(|t| t.running(now, 0.62))))
             || self.hot.iter().any(|t| t.running(now, 0.35))
             || self.scale.iter().any(|t| t.running(now, 0.34))
+            || self.label.running(now, 0.36)
             || self.tip_alpha.running(now, 0.16)
             || self.tip_lift.running(now, 0.22)
     }
@@ -260,13 +301,26 @@ impl Dock {
             v[i] = self.play_fx[i].sample(now, duration, curve)[0];
         }
         p.dock_fx = [v[0], v[1], v[2], v[3]];
+        const LABEL_EASE: [f32; 4] = [0.16, 1.0, 0.3, 1.0];
+        // Pressing tightens it (letter-spacing 1.0, scale 0.95) in 0.06 s.
+        let pressed = hover == Some(PLAY) && down == Some(PLAY);
+        let (target, duration) = if pressed { (-1.0, 0.06) } else { (f32::from(hover == Some(PLAY) && play_state == play::State::Idle), 0.36) };
+        if immediate {
+            self.label = Transition::new([target], now);
+        } else {
+            self.label.set([target], now, duration, LABEL_EASE);
+        }
+        let [label] = self.label.sample(now, duration, LABEL_EASE);
+        p.dock_label = [label, 0.0, 0.0, 0.0];
         p.dock_pulse = [(t / 1.6).fract(), pulse(1.15), pulse(1.35), v[4]];
 
-        if let Some(i) = hover.filter(|_| hover != self.hover) {
+        // Play has no tooltip: its label already says what it does.
+        let tip_hover = hover.filter(|&i| i != PLAY);
+        if let Some(i) = tip_hover.filter(|_| hover != self.hover) {
             self.tip = Some(i);
         }
         self.hover = hover;
-        let visible = hover.is_some() && down.is_none();
+        let visible = tip_hover.is_some() && down.is_none();
         let lift = if visible { 0.0 } else { 6.0 };
         if immediate {
             self.tip_alpha = Transition::new([f32::from(visible)], now);

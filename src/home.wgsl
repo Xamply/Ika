@@ -99,32 +99,121 @@ fn home_create_button(ui: vec4<f32>, q: vec2<f32>, size: vec2<f32>, d: f32, mask
     return over(out, stroke, core);
 }
 
+// The same angle, taken the short way within a symmetry `period`: drawing is
+// unchanged, but scaling it towards 0 returns the shortest way to rest.
+fn home_wrap(angle: f32, period: f32) -> f32 {
+    return angle - period * round(angle / period);
+}
+
+fn home_rotate(q: vec2<f32>, angle: f32) -> vec2<f32> {
+    let c = cos(angle);
+    let s = sin(angle);
+    return vec2(c * q.x - s * q.y, s * q.x + c * q.y);
+}
+
+// Ease-out with a small overshoot that lands exactly on 1, so an animation
+// that ends stops on its resting pose without a jump.
+fn home_spring(t: f32) -> f32 {
+    let x = clamp(t, 0.0, 1.0) - 1.0;
+    return 1.0 + 2.70158 * x * x * x + 1.70158 * x * x;
+}
+
 fn home_toolbar_icon(ui: vec4<f32>, center: vec2<f32>, kind: u32, tint: vec3<f32>, aa: f32) -> vec4<f32> {
     let q = center;
-    if any(abs(q) > vec2(10.0)) { return ui; }
+    if any(abs(q) > vec2(select(11.0, 14.0, kind == 4u))) { return ui; }
     var d = 100.0;
+    var extra = 0.0;
+    var extra_tint = 0.0;
+    var glint = 0.0;
     if kind == 0u {
         let h_line = home_line(q, vec2(-5.5, 0.0), vec2(5.5, 0.0)) - 1.25;
         let v_line = home_line(q, vec2(0.0, -5.5), vec2(0.0, 5.5)) - 1.25;
         d = min(h_line, v_line);
     } else if kind == 1u {
-        let pq = abs(q) - vec2(3.6);
-        let bq = abs(pq) - vec2(2.1);
+        // Todas: the four tiles spread out, turn a quarter and snap back.
+        let t = p.home_controls[6].x;
+        let w = p.home_controls[7].x;
+        // Quarter turns look identical, so an interrupted turn returns the short way.
+        let turn = home_wrap(-1.5708 * home_spring(t), 1.5708) * w;
+        let burst = sin(3.14159 * clamp(t * 1.4, 0.0, 1.0)) * w;
+        let r = home_rotate(q, turn);
+        let pq = abs(r) - vec2(3.6 + 1.3 * burst);
+        let bq = abs(pq) - vec2(2.1 - 0.35 * burst);
         d = length(max(bq, vec2(0.0))) + min(max(bq.x, bq.y), 0.0) - 1.2;
     } else if kind == 2u {
-        let ring = abs(length(q) - 5.8) - 1.0;
-        let h_hand = home_line(q, vec2(0.0, 0.0), vec2(0.0, -3.8)) - 1.0;
-        let m_hand = home_line(q, vec2(0.0, 0.0), vec2(3.0, 1.4)) - 1.0;
+        // Recientes: time flies. The minute hand spins two turns leaving a
+        // fading trail, the hour hand one turn, the hour marks light up and
+        // the dial breathes; both hands land back on their resting time.
+        let t = p.home_controls[6].y;
+        let w = p.home_controls[7].y;
+        let sweep = home_spring(t);
+        let speed = sin(3.14159 * clamp(t, 0.0, 1.0)) * w;
+        let dial = 1.0 + 0.10 * speed;
+        let ring = abs(length(q) - 5.8 * dial) - 1.0;
+        let hour = home_rotate(vec2(0.0, -3.8), home_wrap(6.2832 * sweep, 6.2832) * w);
+        let minute = home_rotate(vec2(3.0, 1.4), home_wrap(12.566 * sweep, 6.2832) * w);
+        let h_hand = home_line(q, vec2(0.0, 0.0), hour) - 1.0;
+        let m_hand = home_line(q, vec2(0.0, 0.0), minute) - 1.0;
         d = min(ring, min(h_hand, m_hand));
+        if speed > 0.001 {
+            let radius = length(q);
+            let angle = atan2(q.y, q.x);
+            // Trail behind the minute hand, longer while it is fastest.
+            let behind = fract((atan2(minute.y, minute.x) - angle) / 6.2832) * 6.2832;
+            let reach = 2.6 * speed;
+            let trail = (1.0 - behind / max(reach, 0.001)) * step(behind, reach)
+                * (1.0 - smoothstep(3.0, 3.6, radius)) * smoothstep(0.6, 1.2, radius);
+            extra_tint = max(extra_tint, trail * 0.55);
+            // The twelve hour marks flash just inside the dial.
+            let snapped = round(angle / 0.5236) * 0.5236;
+            let mark_dir = vec2(cos(snapped), sin(snapped));
+            let mark = home_line(q, mark_dir * 3.9 * dial, mark_dir * 4.5 * dial) - 0.45;
+            extra_tint = max(extra_tint, (1.0 - smoothstep(-aa, aa, mark)) * speed);
+        }
     } else if kind == 3u {
-        d = sd_star5(q, 7.2, 0.44);
+        // Favoritas: the star spins, pops bigger and throws four sparkles.
+        let t = p.home_controls[6].z;
+        let w = p.home_controls[7].z;
+        let pop = 1.0 + 0.28 * sin(3.14159 * clamp(t * 1.6, 0.0, 1.0)) * w;
+        let r = home_rotate(q, home_wrap(1.2566 * home_spring(t), 1.2566) * w) / pop;
+        d = sd_star5(r, 7.2, 0.44) * pop;
+        let spark_t = clamp((t - 0.15) / 0.6, 0.0, 1.0);
+        if spark_t > 0.0 && spark_t < 1.0 && w > 0.01 {
+            let reach = 6.0 + 4.5 * spark_t;
+            let fade = (1.0 - spark_t) * w;
+            for (var i = 0u; i < 4u; i++) {
+                let dir = home_rotate(vec2(0.0, -1.0), 0.7854 + 1.5708 * f32(i));
+                let dot_d = length(q - dir * reach) - 1.1 * fade;
+                extra = max(extra, (1.0 - smoothstep(-aa, aa, dot_d)) * fade);
+            }
+        }
     } else {
-        let ring = abs(length(q - vec2(-1.8, -1.8)) - 4.6) - 1.05;
-        let handle = home_line(q, vec2(1.8, 1.8), vec2(6.2, 6.2)) - 1.15;
+        // Buscar: the lens reveals. A soft light fills the glass from the
+        // rim towards the center like an iris opening, the handle gives a
+        // small recoil, and the light fades as the iris closes again.
+        // A click zooms the lens in and out once (home_controls[4].y).
+        let t = p.home_controls[6].w;
+        let w = p.home_controls[7].w;
+        let click = p.home_controls[4].y;
+        let zoom = 1.0 + 0.32 * sin(3.14159 * clamp(click * 1.6, 0.0, 1.0)) * (1.0 - click);
+        let open = sin(3.14159 * clamp(t, 0.0, 1.0)) * w;
+        let recoil = sin(3.14159 * clamp(t * 2.2, 0.0, 1.0)) * w;
+        let m = q / zoom;
+        let lens_c = vec2(-1.8, -1.8);
+        let ring = (abs(length(m - lens_c) - 4.6) - 1.05) * zoom;
+        let handle = (home_line(m, vec2(1.8, 1.8) + vec2(0.9) * recoil, vec2(6.2, 6.2) + vec2(0.9) * recoil) - 1.15) * zoom;
         d = min(ring, handle);
+        // Iris of light inside the glass: an annulus that grows inwards.
+        // Lit between the rim (r = 3.4) and an inner edge that closes towards
+        // the center as the iris opens.
+        let r = length(m - lens_c);
+        let inner = mix(3.4, 0.0, open);
+        let iris = smoothstep(inner - 0.5, inner + 0.5, r) * (1.0 - smoothstep(3.2, 3.6, r));
+        glint = iris * open * 0.55;
     }
-    let mask = 1.0 - smoothstep(-aa, aa, d);
-    return over(ui, tint, mask);
+    let mask = max(1.0 - smoothstep(-aa, aa, d), extra_tint);
+    let lit = over(ui, tint, mask);
+    return over(over(lit, vec3(1.0, 0.93, 0.55), extra), vec3(1.0), glint);
 }
 
 fn home_toolbar_text(ui: vec4<f32>, pt: vec2<f32>, label: vec4<f32>, tint: vec3<f32>) -> vec4<f32> {
@@ -157,6 +246,20 @@ fn home_toolbar_button(ui: vec4<f32>, q: vec2<f32>, rect: vec4<f32>, kind: u32,
         let mask = 1.0 - smoothstep(-aa, aa, d);
         out = home_create_button(out, q - rect.xy, rect.zw, d, mask, aa);
     }
+    // Hover (home_controls[3]): a soft lit capsule under the filter and a
+    // lift of its icon; the search field brightens and glows.
+    var hot = 0.0;
+    if kind >= 1u && kind <= 3u {
+        hot = p.home_controls[3][kind - 1u];
+        let selected_tab = f32(kind - 1u) == p.home_phase.z;
+        let shown = clamp(hot, 0.0, 1.0) * select(1.0, 0.0, selected_tab);
+        let mask = 1.0 - smoothstep(-aa, aa, d);
+        out = over(out, vec3(0.62, 0.55, 0.95), mask * 0.16 * shown);
+        let rim = 1.0 - smoothstep(-1.2, 0.0, abs(d));
+        out = over(out, vec3(0.70, 0.62, 1.0), rim * mask * 0.45 * shown);
+    } else if kind == 4u {
+        hot = p.home_controls[3].w;
+    }
 
     // Center the icon and label together in the button or search field.
     var label_index = 0u;
@@ -178,8 +281,11 @@ fn home_toolbar_button(ui: vec4<f32>, q: vec2<f32>, rect: vec4<f32>, kind: u32,
     let icon_center = vec2(content_x + icon_w * 0.5, mid_y);
     let create_tint = mix(vec3(0.431, 0.906, 0.718), vec3(1.0), p.home_toolbar.w);
     let button_tint = select(vec3(1.0), create_tint, kind == 0u);
-    let icon_tint = select(button_tint, vec3(0.580, 0.639, 0.722), kind == 4u);
+    let search_tint = mix(vec3(0.580, 0.639, 0.722), vec3(0.82, 0.78, 1.0), clamp(hot, 0.0, 1.0));
+    let icon_tint = select(button_tint, search_tint, kind == 4u);
     var icon_q = q - icon_center;
+    // Filters animate their own icon (home_toolbar_icon); only the capsule
+    // glow is shared.
     var scale = icon_scale;
     if kind == 0u {
         let motion = p.home_toolbar.z;
@@ -189,9 +295,24 @@ fn home_toolbar_button(ui: vec4<f32>, q: vec2<f32>, rect: vec4<f32>, kind: u32,
         icon_q = vec2(c * icon_q.x - s * icon_q.y, s * icon_q.x + c * icon_q.y);
         scale *= 1.0 + 0.12 * motion;
     }
+    if kind == 4u {
+        // Opening the field slides the magnifier from the centered placeholder
+        // to the left edge while the placeholder fades into the typed text.
+        let reveal = p.home_controls[4].x;
+        let shown = clamp(reveal, 0.0, 1.0);
+        let lens = vec2(mix(icon_center.x, rect.x + 22.0, reveal), mid_y);
+        let lens_tint = mix(icon_tint, vec3(0.78, 0.82, 0.95), shown);
+        out = home_toolbar_icon(out, (q - lens) / scale, 4u, lens_tint, aa / scale);
+        let text_x = mix(content_x + icon_w + gap, rect.x + 40.0, reveal);
+        let placeholder = home_toolbar_text(out, q - vec2(text_x, mid_y - text_size.y * 0.5), label,
+            mix(vec3(0.392, 0.455, 0.545), vec3(0.70, 0.72, 0.86), clamp(hot, 0.0, 1.0)));
+        out = mix(out, placeholder, 1.0 - shown);
+        let typed = home_label(out, q - vec2(text_x, mid_y), 13u, vec3(0.93, 0.95, 1.0), false);
+        return mix(out, typed, shown);
+    }
     out = home_toolbar_icon(out, icon_q / scale, kind, icon_tint, aa / scale);
 
-    let text_tint = select(button_tint, vec3(0.392, 0.455, 0.545), kind == 4u);
+    let text_tint = button_tint;
     let text_origin = vec2(content_x + icon_w + gap, mid_y - text_size.y * 0.5);
     return home_toolbar_text(out, q - text_origin, label, text_tint);
 }
@@ -216,11 +337,22 @@ fn home_toolbar(ui: vec4<f32>, q: vec2<f32>, aa: f32) -> vec4<f32> {
 
     // Search dark capsule background
     let search_mask = 1.0 - smoothstep(-aa, aa, search_d);
-    out = over(out, vec3(0.045, 0.035, 0.09), search_mask * 0.88);
+    let search_hot = clamp(p.home_controls[3].w, 0.0, 1.0);
+    // The halo breathes in a loop while hovered (rise, fall, rise...). Leaving
+    // fades it out from wherever it was, through the eased hover level.
+    // 2.5 s divides the 10 s phase wrap, so the loop never jumps.
+    let breath = 0.5 - 0.5 * cos(6.2832 * p.home_phase.x / 2.5);
+    let halo_level = mix(0.25, 1.0, breath) * clamp(p.home_controls[3].w, 0.0, 1.0);
+    let halo = exp(-max(search_d, 0.0) / 7.0) * (1.0 - search_mask);
+    out = over(out, vec3(0.545, 0.361, 0.965), halo * 0.30 * halo_level);
+    out = over(out, mix(vec3(0.045, 0.035, 0.09), vec3(0.085, 0.065, 0.16), search_hot), search_mask * 0.88);
 
-    // Search 1px border
+    // Search 1px border, violet while the field has focus.
     let search_edge = 1.0 - smoothstep(-1.2, 0.0, abs(search_d));
-    out = over(out, vec3(0.35, 0.38, 0.55) * 0.35, search_edge * search_mask * 0.65);
+    let focused = p.home_phase.w > 1.5;
+    let idle_border = mix(vec3(0.35, 0.38, 0.55) * 0.35, vec3(0.62, 0.50, 0.95), search_hot);
+    let search_border = select(idle_border, vec3(0.545, 0.361, 0.965), focused);
+    out = over(out, search_border, search_edge * search_mask * select(0.65 + 0.35 * search_hot, 1.0, focused));
 
     // Move one highlight under the fixed filter labels, including across their gaps.
     let pill_template = p.home_toolbar_rects[2];
@@ -248,12 +380,21 @@ fn home_card(ui: vec4<f32>, pt: vec2<f32>, slot: u32, aa: f32) -> vec4<f32> {
     if pt.x < rect.x - margin || pt.x > rect.x + rect.z + margin || pt.y < rect.y - margin || pt.y > rect.y + rect.w + margin {
         return ui;
     }
-    let q = (pt - rect.xy) / scale;
-    let size = rect.zw / scale;
-    if any(q < vec2(-24.0)) || any(q > size + 24.0) { return ui; }
     let selected = slot == 2u;
     let far = slot == 0u || slot == 4u;
-    let hot = u32(p.home_state.y) == slot + 1u;
+    // Eased hover (home_controls[5]) for the side cards: the card rises a
+    // little and grows, its cover zooms and a soft light sweeps across it.
+    let hover_slot = select(select(slot, slot - 1u, slot > 2u), 0u, selected);
+    let lift = select(clamp(p.home_controls[5][hover_slot], 0.0, 1.2), 0.0, selected);
+    // The selected card has its own, bigger moment (home_controls[8]).
+    let star = select(0.0, clamp(p.home_controls[8].x, 0.0, 1.2), selected);
+    let star_shown = clamp(star, 0.0, 1.0);
+    let grow = 1.0 + 0.035 * lift + 0.045 * star;
+    let center = rect.xy + rect.zw * 0.5 - vec2(0.0, 7.0 * scale * lift + 9.0 * scale * star);
+    let q = (pt - center) / (scale * grow) + rect.zw / scale * 0.5;
+    let size = rect.zw / scale;
+    if any(q < vec2(-24.0)) || any(q > size + 24.0) { return ui; }
+    let hot = lift > 0.001;
     let radius = select(select(14.0, 12.0, far), 16.0, selected);
     let d = rounded_distance(q, size, radius);
     let inside = 1.0 - smoothstep(-aa, aa, d);
@@ -266,17 +407,20 @@ fn home_card(ui: vec4<f32>, pt: vec2<f32>, slot: u32, aa: f32) -> vec4<f32> {
         let plus = min(max(c.x - 8.0, c.y - 0.8), max(c.y - 8.0, c.x - 0.8));
         return over(ghost, vec3(0.64, 0.67, 0.80), 0.57 * (1.0 - smoothstep(-aa, aa, plus)));
     }
-    var out = over(ui, vec3(0.006, 0.008, 0.03), 0.5 * (1.0 - smoothstep(-1.0, 16.0, d)));
+    var out = ui;
     if selected {
-        let halo = exp(-max(d + 1.0, 0.0) * 0.30);
-        out = over(out, vec3(0.0, 0.14, 0.80), halo * 0.52);
+        // The halo widens and brightens towards violet while hovered.
+        let halo = exp(-max(d + 1.0, 0.0) * mix(0.30, 0.16, star_shown));
+        out = over(out, mix(vec3(0.0, 0.14, 0.80), vec3(0.42, 0.20, 0.95), star_shown), halo * mix(0.52, 0.78, star_shown));
     }
     if inside <= 0.0 { return out; }
     let custom = info.w > 0u;
     let index = select(info.x, info.w, custom) - 1u;
     let origin = vec2(f32(index % 5u) * 320.0, f32(index / 5u) * 192.0 + select(0.0, 2352.0, custom));
     let crop = cover_scale(size.x / size.y, 320.0 / 192.0);
-    let uv = (q / size - 0.5) * crop / select(1.0, 1.04, hot) + 0.5;
+    // Hovered selected card: slow zoom plus a gentle drift, like a living cover.
+    let drift = vec2(sin(p.home_controls[8].y * 0.9), cos(p.home_controls[8].y * 0.7)) * 0.012 * star_shown;
+    let uv = (q / size - 0.5) * crop / (1.0 + 0.06 * clamp(lift, 0.0, 1.0) + 0.08 * star_shown) + 0.5 + drift;
     let image = home_sample(origin, vec2(320.0, 192.0), uv).rgb;
     let y = q.y / size.y;
     let fade = 0.45 * smoothstep(0.24, 0.55, y) + 0.49 * smoothstep(0.55, 1.0, y);
@@ -284,7 +428,8 @@ fn home_card(ui: vec4<f32>, pt: vec2<f32>, slot: u32, aa: f32) -> vec4<f32> {
 
     let factor = select(select(0.88, 0.78, far), 1.0, selected);
     let icon = select(select(38.0, 32.0, far), 44.0, selected);
-    let icon_pos = vec2(12.0 * factor, size.y - icon - 10.0 * factor);
+    // The icon rises a little out of the card when the selected card is hovered.
+    let icon_pos = vec2(12.0 * factor, size.y - icon - 10.0 * factor - 5.0 * star);
     let icon_q = q - icon_pos;
     if all(icon_q >= vec2(-aa)) && all(icon_q <= vec2(icon + aa)) {
         let icon_d = rounded_distance(icon_q, vec2(icon), 10.0 * factor);
@@ -305,41 +450,87 @@ fn home_card(ui: vec4<f32>, pt: vec2<f32>, slot: u32, aa: f32) -> vec4<f32> {
     }
     if selected {
         card = over(card, vec3(0.012, 0.29, 0.84), smoothstep(-10.0, -0.1, d) * 0.76);
-        card = over(card, vec3(0.28, 0.52, 1.0), smoothstep(-1.8, 0.0, d) * 0.9);
+        card = over(card, vec3(0.28, 0.52, 1.0), smoothstep(-2.6 - 1.0 * star_shown, 0.0, d) * 0.9);
         // Exact WebView2 TopRosao gradient: the native atlas contains its
         // original 293 stops, and this reproduces animateTransform's
         // -139 -> 221 degree rotation around (160,96) every 10 seconds.
-        let edge = 1.0 - smoothstep(0.2, 2.4, abs(d));
-        let angle = radians(-139.0 + 36.0 * p.home_phase.x);
+        let edge = 1.0 - smoothstep(0.9 + 0.8 * star_shown, 3.4 + 1.8 * star_shown, abs(d));
+        // The gradient border speeds up while hovered (10 s turn -> ~3 s).
+        let angle = radians(-139.0 + 36.0 * p.home_phase.x + 120.0 * p.home_controls[8].y * star_shown);
         let centered = q - vec2(160.0, 96.0);
         let rotated_x = cos(angle) * centered.x - sin(angle) * centered.y + 160.0;
         let gradient_t = clamp(rotated_x / 320.0, 0.0, 1.0);
         let stroke = home_sample(vec2(0.0, 2304.0), vec2(1024.0, 1.0),
             vec2(gradient_t, 0.5)).rgb;
         card = over(card, stroke, edge * 0.98);
+        if star > 0.001 {
+            // Holographic sheen: a soft diagonal band loops across the cover,
+            // tinted by the border gradient, plus a bright first pass on entry.
+            let loop_x = fract(p.home_controls[8].y / 2.6);
+            let band = (q.x - q.y * 0.55) / size.x - mix(-0.5, 1.5, loop_x);
+            let sheen = exp(-band * band * 40.0) * 0.16 * star_shown;
+            let tint = home_sample(vec2(0.0, 2304.0), vec2(1024.0, 1.0), vec2(fract(loop_x + q.x / size.x), 0.5)).rgb;
+            card = over(card, mix(vec3(1.0), tint, 0.5), sheen);
+            let first = (q.x - q.y * 0.55) / size.x - mix(-0.5, 1.5, clamp(star, 0.0, 1.0));
+            card = over(card, vec3(1.0), exp(-first * first * 30.0) * 0.22 * star_shown * (1.0 - star_shown * 0.7));
+        }
     } else {
-        card = over(card, vec3(0.77, 0.77, 0.91), smoothstep(-1.8, 0.0, d) * select(0.18, 0.54, hot));
+        let shown = clamp(lift, 0.0, 1.0);
+        card = vec4(card.rgb * (1.0 + 0.10 * shown), 1.0);
+        // A diagonal band of light crosses the cover while the hover grows.
+        let band = (q.x - q.y * 0.6) / size.x - mix(-0.4, 1.3, shown);
+        card = over(card, vec3(1.0), exp(-band * band * 60.0) * 0.20 * shown * (1.0 - shown * 0.6));
     }
     return over(out, card.rgb, inside);
 }
 
 fn home_arrow(ui: vec4<f32>, pos: vec2<f32>, i: u32, aa: f32) -> vec4<f32> {
     let rect = p.home_controls[i];
-    let center = rect.xy + rect.zw * 0.5;
     let scale = p.home_view.z;
-    let max_dist = 20.0 * scale;
+    let dir = select(-1.0, 1.0, i == 1u);
+    // Hover (eased, may overshoot) and click (0..1 since the last press).
+    let hot = p.home_controls[9][i];
+    // The whole button slides outwards, towards where it points.
+    let center = rect.xy + rect.zw * 0.5 + vec2(dir * 6.0 * hot * scale, 0.0);
+    let hot_c = clamp(hot, 0.0, 1.0);
+    let click = p.home_controls[9][i + 2u];
+    let pressing = click < 1.0;
+    // Squeeze in on press, then spring back.
+    let squeeze = select(0.0, sin(3.14159 * clamp(click * 2.2, 0.0, 1.0)) * (1.0 - click), pressing);
+    let size = 19.0 * (1.0 - 0.14 * squeeze);
+    let ring_r = 19.0 + 26.0 * click;
+    let max_dist = (select(size, max(size, ring_r + 2.0), pressing) + 6.0) * scale;
     if abs(pos.x - center.x) > max_dist || abs(pos.y - center.y) > max_dist {
         return ui;
     }
     let q = (pos - center) / scale;
-    let d = length(q) - 19.0;
-    if d > aa { return ui; }
-    let hot = p.home_state.y == f32(i + 6u);
+    let d = length(q) - size;
+    var out = ui;
+    if pressing {
+        // A ring ripples out from the button and fades.
+        let ring = abs(length(q) - ring_r) - 1.4 * (1.0 - click);
+        out = over(out, vec3(0.75, 0.62, 1.0), (1.0 - smoothstep(-aa, aa, ring)) * (1.0 - click) * 0.8);
+    }
+    if d > aa { return out; }
     let mask = 1.0 - smoothstep(-aa, aa, d);
-    var out = over(ui, select(vec3(0.055, 0.035, 0.11), vec3(0.31, 0.14, 0.47), hot), mask * 0.84);
-    out = over(out, vec3(0.73, 0.59, 0.98), mask * smoothstep(-2.0, 0.0, d) * select(0.3, 0.85, hot));
-    let x = q.x * select(-1.0, 1.0, i == 1u);
-    let l = max(abs(q.y) - 7.0, abs(x - (3.0 - abs(q.y) * 0.8)) - 1.2);
+    let fill = mix(vec3(0.055, 0.035, 0.11), vec3(0.31, 0.14, 0.47), hot_c);
+    out = over(out, mix(fill, vec3(0.50, 0.30, 0.85), squeeze), mask * 0.84);
+    // Animated border: the titlebar's edge ramp wraps exactly once around the
+    // circle (2400 samples per turn, so the loop has no seam) and turns
+    // clockwise, one turn every 11 s (home_controls[4].z, 0..1).
+    let turn = atan2(q.y, q.x) / 6.2832;
+    let ring_color = ramp((turn + 1.0 - p.home_controls[4].z) * 2400.0, 0);
+    let width = 1.6;
+    let border = 1.0 - smoothstep(-aa, aa, abs(d + width) - width);
+    // A soft inner glow of the same color so the gradient reads at a glance.
+    let glow = exp(-max(-(d + 2.0 * width), 0.0) / 3.0) * step(d, 0.0) * 0.35;
+    out = over(out, ring_color, glow * mask);
+    out = over(out, ring_color, border);
+    // The chevron kicks forward on click.
+    let nudge = 4.0 * squeeze;
+    let cq = q - vec2(dir * nudge, 0.0);
+    let x = cq.x * dir;
+    let l = max(abs(cq.y) - 7.0, abs(x - (3.0 - abs(cq.y) * 0.8)) - 1.2);
     return over(out, vec3(0.95, 0.94, 1.0), 1.0 - smoothstep(-aa, aa, l));
 }
 
@@ -349,7 +540,7 @@ fn draw_home_carousel(pos: vec2<f32>) -> vec4<f32> {
     let q = (pos - p.home_view.xy) / s;
     let aa = max(0.65, 0.75 / s);
     let total = p.home_state.x;
-    if abs(q.x) > select(565.0, 810.0, total >= 5.0) || abs(q.y) >= 134.0 {
+    if abs(q.x) > select(615.0, 860.0, total >= 5.0) || abs(q.y) >= 134.0 {
         return vec4(0.0);
     }
     var ui = vec4(0.0);
@@ -368,14 +559,28 @@ fn draw_home_carousel(pos: vec2<f32>) -> vec4<f32> {
     return ui * p.home_view.w;
 }
 
-fn draw_home(pos: vec2<f32>) -> vec4<f32> {
+fn draw_home_layers(pos: vec2<f32>, toolbar_pos: vec2<f32>) -> vec4<f32> {
     let ui = draw_home_carousel(pos);
     let scale = p.home_toolbar_view.z;
     if scale <= 0.0 { return ui; }
-    let q = (pos - p.home_toolbar_view.xy) / scale;
+    let q = (toolbar_pos - p.home_toolbar_view.xy) / scale;
     let group = p.home_toolbar_rects[0];
     let search = p.home_toolbar_rects[5];
     let bleed = vec2(p.home_toolbar_view.w);
     if any(q < group.xy - bleed) || any(q > search.xy + search.zw + bleed) { return ui; }
     return home_toolbar(ui, q, max(0.65, 0.75 / scale));
+}
+
+// Section change (home_controls[2]): x = how far Home has left (0..1, may
+// overshoot like the tab pill), y = direction (+1 leaves to the left),
+// z = linear time, w = 1 while it runs.
+fn draw_home(pos: vec2<f32>) -> vec4<f32> {
+    // Section change: shift the lookups instead of branching, so the Home
+    // shader is inlined only once (FXC compile time grows with each copy).
+    let motion = p.home_controls[2];
+    let running = motion.w > 0.5;
+    // Same move as the clock and floating console (Profile::home_slide).
+    let shift = select(vec2(0.0), vec2(-motion.y * p.screen.x * 0.55 * motion.x, 0.0), running);
+    let fade = select(1.0, clamp(1.0 - motion.x, 0.0, 1.0), running);
+    return draw_home_layers(pos - shift, pos - shift) * fade;
 }

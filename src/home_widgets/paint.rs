@@ -34,7 +34,7 @@ impl Widgets {
             let bounds = r.expand(24. * r.width() / self.settings.style.size().x);
             occlusion.clips(stage.clip_rect(), bounds, area.dpi, |clip| {
                 let mut clock = stage.with_clip_rect(clip);
-                clock.set_opacity(occlusion.opacity());
+                clock.multiply_opacity(occlusion.opacity());
                 self.paint_clock(&clock, r);
             });
         }

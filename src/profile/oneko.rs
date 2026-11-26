@@ -11,6 +11,7 @@ use winit::event::MouseButton;
 const SPRITE_SIZE: f32 = 50.0;
 const TICK_INTERVAL: Duration = Duration::from_millis(100);
 const STORAGE_FILE: &str = "oneko.json";
+const RESUME_MARGIN: f32 = 16.0;
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
 pub struct OnekoConfig {
@@ -82,6 +83,13 @@ pub struct Oneko {
     pub anchor: Option<Pos2>,
     last_cursor: Pos2,
     idle_time: u32,
+    /// Offset to the target sampled at the last tick. The sprite is chosen
+    /// from it, like the WebView2 pet, never from the live cursor: deciding at
+    /// paint time made small mouse moves flip between idle and running.
+    tick_delta: Vec2,
+    /// Whether the pet rested at the last tick. It only starts running again
+    /// once the cursor is `RESUME_MARGIN` past the stop distance.
+    resting: bool,
     anim: Option<Anim>,
     anim_frame: usize,
     frame_counter: usize,
@@ -113,6 +121,8 @@ impl Oneko {
             anchor: None,
             last_cursor: pos2(64.0, 88.0),
             idle_time: 0,
+            tick_delta: Vec2::ZERO,
+            resting: true,
             anim: None,
             anim_frame: 0,
             frame_counter: 0,
@@ -145,6 +155,13 @@ impl Oneko {
         self.anim = None;
         self.anim_frame = 0;
         self.idle_time = 0;
+    }
+
+    /// Settles at the current spot: the next sprite is the resting one until
+    /// a tick sees the cursor far enough away.
+    fn settle(&mut self) {
+        self.resting = true;
+        self.tick_delta = self.pos - self.target;
     }
 
     #[allow(dead_code)]
@@ -235,6 +252,7 @@ impl Oneko {
                 self.drag_accum = 0.0;
                 self.target = self.pos;
                 self.reset_idle();
+                self.settle();
                 return true;
             }
         } else if button == MouseButton::Right && pressed && self.covers(p) {
@@ -250,9 +268,20 @@ impl Oneko {
             self.drag_accum = 0.0;
             self.target = self.pos;
             self.reset_idle();
+            self.settle();
             true
         } else {
             false
+        }
+    }
+
+    fn stop_distance(&self) -> f32 {
+        if self.anchor.is_some() {
+            4.0
+        } else if self.resting {
+            48.0 + RESUME_MARGIN
+        } else {
+            48.0
         }
     }
 
@@ -266,8 +295,7 @@ impl Oneko {
         let dx = self.pos.x - self.target.x;
         let dy = self.pos.y - self.target.y;
         let dist = dx.hypot(dy);
-        let stop_dist = if self.anchor.is_some() { 4.0 } else { 48.0 };
-        dist >= stop_dist || self.anim.is_some() || self.sleeping
+        dist >= self.stop_distance() || self.anim.is_some() || self.sleeping
     }
 
     pub fn update_minigame_perch(&mut self, perch: Option<Pos2>) -> bool {
@@ -380,14 +408,17 @@ impl Oneko {
         let dx = self.pos.x - self.target.x;
         let dy = self.pos.y - self.target.y;
         let dist = dx.hypot(dy);
+        let was_resting = self.resting;
+        self.tick_delta = vec2(dx, dy);
 
         let old_pos = self.pos;
         let old_anim = self.anim;
         let old_frame = self.anim_frame;
 
-        let stop_dist = if self.anchor.is_some() { 4.0 } else { 48.0 };
+        let stop_dist = self.stop_distance();
+        self.resting = (self.anchor.is_none() && self.sleeping) || dist < stop_dist;
 
-        if (!self.anchor.is_some() && self.sleeping) || dist < stop_dist {
+        if self.resting {
             if self.anchor.is_some() {
                 self.pos = self.target;
                 self.perched = true;
@@ -401,7 +432,7 @@ impl Oneko {
             } else {
                 self.anim_frame != old_frame
             };
-            return self.anim != old_anim || sprite_changed;
+            return self.anim != old_anim || sprite_changed || !was_resting;
         }
 
         self.anim = None;
@@ -411,6 +442,7 @@ impl Oneko {
             self.idle_time = self.idle_time.min(7).saturating_sub(1);
             return true;
         }
+        let moving_started = was_resting;
 
         let step = dist.min(10.0);
         self.pos.x -= (dx / dist) * step;
@@ -432,7 +464,7 @@ impl Oneko {
             }
         }
 
-        self.pos != old_pos || self.anim != old_anim
+        self.pos != old_pos || self.anim != old_anim || moving_started
     }
 
     fn current_sprite(&self) -> (usize, usize) {
@@ -450,12 +482,10 @@ impl Oneko {
             return Anim::Alert.frames()[0];
         }
 
-        let dx = self.pos.x - self.target.x;
-        let dy = self.pos.y - self.target.y;
+        let Vec2 { x: dx, y: dy } = self.tick_delta;
         let dist = dx.hypot(dy);
-        let stop_dist = if self.anchor.is_some() { 4.0 } else { 48.0 };
 
-        if (!self.anchor.is_some() && self.sleeping) || dist < stop_dist {
+        if self.resting {
             if let Some(anim) = self.anim {
                 if anim == Anim::Sleeping {
                     if self.anim_frame < 8 {
@@ -624,6 +654,70 @@ mod tests {
         assert!(consumed);
         assert!(redraw);
         assert_eq!(oneko.frame_counter, initial_frame + 2);
+    }
+
+    #[test]
+    fn small_moves_at_the_stop_distance_do_not_flicker() {
+        let mut oneko = Oneko::new();
+        oneko.config.enabled = true;
+        oneko.sleeping = false;
+        let start = oneko.pos;
+        // Ticks are spaced from the pet's own clock, so they always run.
+        let mut now = oneko.last_tick + Duration::from_millis(600);
+        oneko.target = start + vec2(40.0, 0.0);
+        oneko.tick(now, 1920.0, 1080.0);
+        assert!(oneko.resting);
+        assert_eq!(oneko.current_sprite(), Anim::Idle.frames()[0]);
+
+        // Wiggle the cursor across the 48 px edge between ticks and while
+        // painting, as tiny real mouse moves do.
+        let running: Vec<(usize, usize)> = [Anim::Alert, Anim::N, Anim::NE, Anim::E, Anim::SE, Anim::S, Anim::SW, Anim::W, Anim::NW]
+            .iter()
+            .flat_map(|a| a.frames().iter().copied())
+            .collect();
+        for i in 0..60 {
+            let x = if i % 2 == 0 { 47.0 } else { 52.0 };
+            oneko.on_cursor_moved(start + vec2(x, 0.0), 1920.0, 1080.0);
+            assert!(!running.contains(&oneko.current_sprite()), "paint {i}: {:?}", oneko.current_sprite());
+            now += Duration::from_millis(110);
+            oneko.tick(now, 1920.0, 1080.0);
+            assert!(oneko.resting, "tick {i}");
+            // Resting may play random idle animations, never a run or alert.
+            assert!(!running.contains(&oneko.current_sprite()), "tick {i}: {:?}", oneko.current_sprite());
+        }
+        assert_eq!(oneko.pos, start);
+
+        // A real move away still starts the run (after the alert frames).
+        oneko.on_cursor_moved(start + vec2(300.0, 0.0), 1920.0, 1080.0);
+        for _ in 0..8 {
+            now += Duration::from_millis(110);
+            oneko.tick(now, 1920.0, 1080.0);
+        }
+        assert!(oneko.pos.x > start.x + 10.0);
+    }
+
+    #[test]
+    fn dropping_after_a_drag_rests_until_the_next_tick() {
+        let mut oneko = Oneko::new();
+        oneko.config.enabled = true;
+        oneko.sleeping = false;
+        let running: Vec<(usize, usize)> = [Anim::N, Anim::NE, Anim::E, Anim::SE, Anim::S, Anim::SW, Anim::W, Anim::NW]
+            .iter()
+            .flat_map(|a| a.frames().iter().copied())
+            .collect();
+        // A run leaves a far offset behind, then the pet is grabbed and dropped.
+        oneko.resting = false;
+        oneko.tick_delta = vec2(-300.0, 0.0);
+        let start = oneko.pos;
+        oneko.on_mouse_input(true, MouseButton::Left, start);
+        oneko.on_cursor_moved(start + vec2(120.0, 0.0), 1920.0, 1080.0);
+        oneko.on_mouse_input(false, MouseButton::Left, start + vec2(120.0, 0.0));
+        assert!(!running.contains(&oneko.current_sprite()), "{:?}", oneko.current_sprite());
+        oneko.resting = false;
+        oneko.tick_delta = vec2(-300.0, 0.0);
+        oneko.on_mouse_input(true, MouseButton::Left, oneko.pos);
+        oneko.on_lost_capture();
+        assert!(!running.contains(&oneko.current_sprite()), "{:?}", oneko.current_sprite());
     }
 
     #[test]

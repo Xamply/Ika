@@ -25,8 +25,8 @@ fn gradient_pixel(index: i32, row: i32) -> vec3<f32> {
 fn ramp(x: f32, row: i32) -> vec3<f32> {
     let phase = fract(x / 2400.0) * 2400.0;
     let i = i32(phase);
-    // The nav ramp ends on a different color; keep its SVG repeat seam sharp.
-    let j = select((i + 1) % 2400, min(i + 1, 2399), row == 4);
+    // Both ramps are seamless loops, so interpolate across the wrap too.
+    let j = (i + 1) % 2400;
     return mix(gradient_pixel(i, row), gradient_pixel(j, row), fract(phase));
 }
 

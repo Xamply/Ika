@@ -3,6 +3,7 @@ use image::{ImageReader, RgbaImage, imageops};
 use serde::{Deserialize, Serialize};
 use std::{
     cell::Cell,
+    collections::BTreeMap,
     io,
     path::{Path, PathBuf},
     sync::{Mutex, mpsc},
@@ -19,6 +20,18 @@ const EASE: [f32; 4] = [0.16, 1.0, 0.3, 1.0];
 const CREATE_ICON_DURATION: f32 = 0.30;
 const CREATE_TINT_DURATION: f32 = 0.20;
 const CREATE_BORDER_PERIOD: f32 = 4.2;
+const TOOLBAR_HOVER: f32 = 0.34;
+const SEARCH_REVEAL: f32 = 0.38;
+const SEARCH_CLICK: f32 = 0.5;
+const CARD_HOVER: f32 = 0.42;
+const SELECTED_HOVER: f32 = 0.55;
+const ARROW_HOVER: f32 = 0.30;
+const ARROW_PRESS: f32 = 0.55;
+// Length of a filter icon's hover animation, in seconds.
+const ICON_PLAY: f32 = 1.1;
+// How long an interrupted icon animation takes to glide back to rest.
+const ICON_RETURN: f32 = 0.45;
+const CARD_EASE: [f32; 4] = [0.22, 1.0, 0.36, 1.0];
 const WIDTHS: [f32; 5] = [224.0, 280.0, 364.0, 280.0, 224.0];
 const HEIGHTS: [f32; 5] = [144.0, 172.0, 218.0, 172.0, 144.0];
 const CENTERS: [f32; 5] = [-614.0, -342.0, 0.0, 342.0, 614.0];
@@ -30,6 +43,8 @@ const BLOCKS: u32 = 24;
 const GRADIENT_Y: u32 = 2304;
 const CUSTOM_COVERS_Y: u32 = 2352;
 const COVER_LIMIT: usize = 40;
+// Icon rows must end before the gradient strip at GRADIENT_Y.
+const MAX_ICONS: usize = 480;
 const MIN_ZOOM: f32 = 0.65;
 const MAX_ZOOM: f32 = 1.40;
 const ZOOM_STEP: f32 = 0.05;
@@ -272,7 +287,85 @@ impl Sender {
 }
 
 fn read_icon(path: &Path) -> Option<RgbaImage> {
-    let mut reader = ImageReader::open(path).ok()?.with_guessed_format().ok()?;
+    icon_from(ImageReader::open(path).ok()?.with_guessed_format().ok()?)
+}
+
+fn read_icon_bytes(bytes: &[u8]) -> Option<RgbaImage> {
+    icon_from(ImageReader::new(io::Cursor::new(bytes)).with_guessed_format().ok()?)
+}
+
+/// A custom icon picked in the WebView2 launcher. Its URLs are an asset file
+/// (`http://asset.localhost/<percent-encoded path>`), a data URL, or a web
+/// image (CurseForge or Modrinth), downloaded once into the native cache.
+fn webview_icon(url: &str) -> Option<RgbaImage> {
+    if let Some(encoded) = url
+        .strip_prefix("http://asset.localhost/")
+        .or_else(|| url.strip_prefix("https://asset.localhost/"))
+    {
+        return read_icon(Path::new(&percent_decode(encoded)?));
+    }
+    if url.starts_with("data:image/") {
+        use base64::Engine;
+        let (_, data) = url.split_once(";base64,")?;
+        return read_icon_bytes(&base64::engine::general_purpose::STANDARD.decode(data).ok()?);
+    }
+    if !url.starts_with("https://") || url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return None;
+    }
+    let cache = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)?
+        .join("IkaNative/instance-icons");
+    let name = format!("{:016x}", {
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        url.hash(&mut hash);
+        hash.finish()
+    });
+    let file = cache.join(name);
+    if let Some(icon) = read_icon(&file) {
+        return Some(icon);
+    }
+    let response = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(6))
+        .build()
+        .get(url)
+        .call()
+        .ok()?;
+    let mut bytes = Vec::new();
+    io::Read::read_to_end(&mut io::Read::take(response.into_reader(), 4 * 1024 * 1024), &mut bytes).ok()?;
+    let icon = read_icon_bytes(&bytes)?;
+    if std::fs::create_dir_all(&cache).is_ok() {
+        let _ = std::fs::write(&file, &bytes);
+    }
+    Some(icon)
+}
+
+fn percent_decode(s: &str) -> Option<String> {
+    let mut out = Vec::with_capacity(s.len());
+    let mut bytes = s.bytes();
+    while let Some(b) = bytes.next() {
+        if b == b'%' {
+            let hex = [bytes.next()?, bytes.next()?];
+            out.push(u8::from_str_radix(std::str::from_utf8(&hex).ok()?, 16).ok()?);
+        } else {
+            out.push(b);
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// The custom icon for an instance, matched like WebView2: by path, then by
+/// folder name, then by display name.
+fn custom_icon_url<'a>(icons: &'a BTreeMap<String, String>, instance: &minecraft::Instance) -> Option<&'a str> {
+    let folder = Path::new(&instance.path).file_name().map(|f| f.to_string_lossy());
+    icons
+        .get(&instance.path)
+        .or_else(|| folder.and_then(|f| icons.get(f.as_ref())))
+        .or_else(|| icons.get(&instance.name))
+        .map(String::as_str)
+}
+
+fn icon_from<R: io::BufRead + io::Seek>(mut reader: ImageReader<R>) -> Option<RgbaImage> {
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(4096);
     limits.max_image_height = Some(4096);
@@ -293,6 +386,38 @@ fn read_icon(path: &Path) -> Option<RgbaImage> {
     Some(icon)
 }
 
+/// The WebView2 launcher gives every instance without its own icon one of the
+/// curated block faces (`instance-art/blocks.png`), without repeats until all
+/// are used. This replays `getUniqueBlockFaceForInstance` exactly, in the same
+/// call order (the instances sorted by name), so each instance keeps the block
+/// it showed in 1.5.
+fn webview_block_faces(keys: impl IntoIterator<Item = String>, count: usize) -> Vec<usize> {
+    let mut available: Vec<usize> = Vec::new();
+    let mut seen = std::collections::HashMap::<String, usize>::new();
+    keys.into_iter()
+        .map(|key| {
+            let key = key.to_lowercase();
+            if let Some(&face) = seen.get(&key) {
+                return face;
+            }
+            if available.is_empty() {
+                available = (0..count).collect();
+                // JavaScript: hash = (hash * 31 + charCodeAt) >>> 0, over UTF-16 units.
+                let hash = key
+                    .encode_utf16()
+                    .fold(0u32, |h, unit| h.wrapping_mul(31).wrapping_add(u32::from(unit)));
+                for i in (1..available.len()).rev() {
+                    let j = ((u64::from(hash) + i as u64) % (i as u64 + 1)) as usize;
+                    available.swap(i, j);
+                }
+            }
+            let face = available.remove(0) % count;
+            seen.insert(key, face);
+            face
+        })
+        .collect()
+}
+
 fn load_custom_cover(instance: &minecraft::Instance) -> Option<RgbaImage> {
     use image::imageops::FilterType;
     let path = minecraft::instances::cover_path(instance);
@@ -306,7 +431,25 @@ fn load_custom_cover(instance: &minecraft::Instance) -> Option<RgbaImage> {
     Some(reader.decode().ok()?.resize_to_fill(320, 192, FilterType::Triangle).to_rgba8())
 }
 
-fn make_catalog(instances: Vec<minecraft::Instance>) -> (Vec<Card>, Option<RgbaImage>) {
+/// The curated Minecraft block faces of the WebView2 launcher (32 px cells).
+const BLOCK_FACES: &[u8] = include_bytes!("home/instance-art/blocks.png");
+const BLOCK_FACE_NAMES: &str = include_str!("home/instance-art/blocks.txt");
+const BLOCK_FACE_COLUMNS: u32 = 24;
+const BLOCK_FACE_PX: u32 = 32;
+
+fn block_face(atlas: &RgbaImage, face: usize) -> RgbaImage {
+    let face = face as u32;
+    let x = face % BLOCK_FACE_COLUMNS * BLOCK_FACE_PX;
+    let y = face / BLOCK_FACE_COLUMNS * BLOCK_FACE_PX;
+    let cell = imageops::crop_imm(atlas, x, y, BLOCK_FACE_PX, BLOCK_FACE_PX).to_image();
+    // Pixel art: keep the texels sharp, like the WebView2 `is-block-face` image.
+    imageops::resize(&cell, ICON, ICON, imageops::FilterType::Nearest)
+}
+
+fn make_catalog(
+    instances: Vec<minecraft::Instance>,
+    custom_icons: &BTreeMap<String, String>,
+) -> (Vec<Card>, Option<RgbaImage>) {
     if instances.is_empty() {
         return (Vec::new(), None);
     }
@@ -314,26 +457,50 @@ fn make_catalog(instances: Vec<minecraft::Instance>) -> (Vec<Card>, Option<RgbaI
     let blocks = image::load_from_memory(include_bytes!("home/blocks.png")).ok();
     let gradient = image::load_from_memory(include_bytes!("home/gradient.png")).ok();
     let labels = image::load_from_memory(TOOLBAR_LABELS).ok();
-    let mut icons = Vec::new();
+    let faces = image::load_from_memory(BLOCK_FACES).ok().map(|i| i.to_rgba8());
+    let face_count = BLOCK_FACE_NAMES.lines().count();
+    // WebView2 assigns faces to every instance in its list order, also the
+    // ones that later show their own icon, so replay the whole list.
+    let assigned = webview_block_faces(
+        instances.iter().map(|i| if i.path.is_empty() { i.name.clone() } else { i.path.clone() }),
+        face_count,
+    );
+    let mut icons: Vec<RgbaImage> = Vec::new();
+    let mut face_slots = std::collections::HashMap::<usize, u32>::new();
     let mut custom = Vec::new();
+    let push_icon = |icons: &mut Vec<RgbaImage>, pixels: RgbaImage| {
+        let id = BLOCKS + icons.len() as u32;
+        icons.push(pixels);
+        id
+    };
     let cards = instances
         .into_iter()
         .enumerate()
         .map(|(i, instance)| {
-            let icon = (icons.len() < 512)
+            // Same precedence as WebView2: custom icon, the instance's own
+            // icon file, then its unique block face.
+            let own = (icons.len() < MAX_ICONS)
                 .then(|| {
-                    instance
-                        .icon_path
-                        .as_deref()
-                        .and_then(|p| read_icon(Path::new(p)))
+                    custom_icon_url(custom_icons, &instance)
+                        .and_then(webview_icon)
+                        .or_else(|| instance.icon_path.as_deref().and_then(|p| read_icon(Path::new(p))))
                 })
-                .flatten()
-                .map(|pixels| {
-                    let id = BLOCKS + icons.len() as u32;
-                    icons.push(pixels);
-                    id
-                })
-                .unwrap_or(i as u32 % BLOCKS);
+                .flatten();
+            let icon = if let Some(pixels) = own {
+                push_icon(&mut icons, pixels)
+            } else if let Some(atlas) = faces.as_ref().filter(|_| icons.len() < MAX_ICONS) {
+                let face = assigned[i];
+                match face_slots.get(&face) {
+                    Some(&id) => id,
+                    None => {
+                        let id = push_icon(&mut icons, block_face(atlas, face));
+                        face_slots.insert(face, id);
+                        id
+                    }
+                }
+            } else {
+                i as u32 % BLOCKS
+            };
             let custom_cover = (custom.len() < COVER_LIMIT)
                 .then(|| load_custom_cover(&instance)).flatten()
                 .map_or(0, |image| { custom.push(image); custom.len() as u32 });
@@ -559,6 +726,35 @@ pub struct Home {
     reduced_motion: bool,
     active_filter: u8,
     filter_glider: titlebar::Glider,
+    /// Hover of Todas, Recientes, Favoritas and Buscar (may overshoot).
+    toolbar_hover: titlebar::Transition<4>,
+    /// Hover of each carousel slot, eased so the card lifts and settles.
+    card_hover: titlebar::Transition<4>,
+    /// Hover of the two carousel arrows and when each was last clicked.
+    arrow_hover: titlebar::Transition<2>,
+    arrow_pressed: [Option<Instant>; 2],
+    /// Hover of the selected card, its own richer animation.
+    selected_hover: titlebar::Transition<1>,
+    selected_hover_since: Option<Instant>,
+    /// When each filter icon started its hover animation (Todas, Recientes, Favoritas).
+    /// Progress (0..1) of each filter icon's animation and whether it is
+    /// gliding back to rest after the cursor left mid-way.
+    icon_time: [f32; 4],
+    /// Pose an interrupted icon froze at, and how much of its return is left.
+    icon_return: [Option<(f32, f32)>; 4],
+    /// When the search field was last clicked (magnifier zoom pulse).
+    search_clicked: Option<Instant>,
+    icon_last: Option<Instant>,
+    /// Magnifier and text sliding between the placeholder and the typed text.
+    search_reveal: titlebar::Transition<1>,
+    /// Text typed in "Buscar instancia"; `Some` while the field has focus.
+    search: String,
+    search_focus: bool,
+    /// Indices into `cards` that the carousel cycles through. All cards when
+    /// the search is empty; `selection` always stays a real `cards` index.
+    view: Vec<usize>,
+    /// Icons picked per instance in WebView2, shared with the catalog thread.
+    custom_icons: std::sync::Arc<BTreeMap<String, String>>,
     tx: Sender,
     rx: mpsc::Receiver<Update>,
 }
@@ -569,7 +765,7 @@ impl Home {
         let tx = Sender { tx, wake };
         let worker = tx.clone();
         std::thread::spawn(move || {
-            let (cards, atlas) = make_catalog(minecraft::discover());
+            let (cards, atlas) = make_catalog(minecraft::discover(), &BTreeMap::new());
             worker.send(Update::Catalog(cards, atlas));
         });
         let (settings_store, settings) = SettingsStore::open(Settings::path());
@@ -598,6 +794,21 @@ impl Home {
             reduced_motion,
             active_filter: 0,
             filter_glider: titlebar::Glider::new(filter_rect(0), now),
+            toolbar_hover: titlebar::Transition::new([0.0; 4], now),
+            search_reveal: titlebar::Transition::new([0.0], now),
+            card_hover: titlebar::Transition::new([0.0; 4], now),
+            selected_hover: titlebar::Transition::new([0.0], now),
+            arrow_hover: titlebar::Transition::new([0.0; 2], now),
+            arrow_pressed: [None; 2],
+            selected_hover_since: None,
+            icon_time: [0.0; 4],
+            icon_return: [None; 4],
+            search_clicked: None,
+            icon_last: None,
+            search: String::new(),
+            search_focus: false,
+            view: Vec::new(),
+            custom_icons: Default::default(),
             tx,
             rx,
         }
@@ -620,6 +831,7 @@ impl Home {
                         .position(|c| c.instance.path == self.settings.selected)
                         .unwrap_or(0);
                     self.cards = cards;
+                    self.refilter();
                     self.ready = true;
                     self.refreshing = false;
                     if let Some(atlas) = atlas {
@@ -645,10 +857,19 @@ impl Home {
     pub fn refresh_catalog(&mut self) {
         self.refreshing = true;
         let worker = self.tx.clone();
+        let icons = self.custom_icons.clone();
         std::thread::spawn(move || {
-            let (cards, atlas) = make_catalog(minecraft::discover());
+            let (cards, atlas) = make_catalog(minecraft::discover(), &icons);
             worker.send(Update::Catalog(cards, atlas));
         });
+    }
+
+    /// Applies the icons chosen in WebView2 once its profile has been read.
+    pub fn set_webview_icons(&mut self, icons: &BTreeMap<String, String>) {
+        if *self.custom_icons != *icons {
+            self.custom_icons = std::sync::Arc::new(icons.clone());
+            self.refresh_catalog();
+        }
     }
     pub fn ready(&self) -> bool {
         self.ready
@@ -687,20 +908,123 @@ impl Home {
     }
 
     pub fn select_instance(&mut self, index: usize, now: Instant) {
-        if index < self.cards.len() && index != self.selection {
-            self.activate(Hit::Card(index as i32 - self.selection as i32), now);
+        if index < self.cards.len() && !self.view.contains(&index) {
+            // Picked from Mi Colección while hidden by the search: show all again.
+            self.search.clear();
+            self.search_focus = false;
+            self.refilter();
+        }
+        if index < self.cards.len()
+            && index != self.selection
+            && let (Some(to), Some(from)) = (
+                self.view.iter().position(|&i| i == index),
+                self.view_position(),
+            )
+        {
+            self.activate(Hit::Card(to as i32 - from as i32), now);
             if let Err(error) = self.save() {
                 eprintln!("Instancia seleccionada: {error}");
             }
         }
     }
 
+    /// The card `offset` steps from the selection in the carousel (0 = selected).
+    pub fn card_at(&self, offset: i32) -> Option<&minecraft::Instance> {
+        (!self.view.is_empty()).then(|| &self.cards[self.index(offset)].instance)
+    }
+
+    /// The game process of an instance while it loads or runs.
+    pub fn game_pid(&self, path: &str) -> Option<u32> {
+        self.cards.iter().find(|c| c.instance.path == path).and_then(|c| match c.state {
+            Game::Loading(pid) | Game::Running(pid) => Some(pid),
+            _ => None,
+        })
+    }
+
+    /// Selects the instance at `path` (if visible) and plays it.
+    pub fn play_path(&mut self, path: &str, account: Option<(String, Option<minecraft::Skin>)>, now: Instant) {
+        if let Some(index) = self.cards.iter().position(|c| c.instance.path == path) {
+            self.select_instance(index, now);
+        }
+        self.play_as(account);
+    }
+
     pub fn running_instance(&self) -> Option<&minecraft::Instance> {
         self.cards.iter().find(|c| matches!(c.state, Game::Running(_))).map(|c| &c.instance)
     }
 
+    /// Card index `offset` steps from the selection inside the visible view.
     fn index(&self, offset: i32) -> usize {
-        (self.selection as i32 + offset).rem_euclid(self.cards.len() as i32) as usize
+        let len = self.view.len() as i32;
+        let here = self.view_position().unwrap_or(0) as i32;
+        self.view[(here + offset).rem_euclid(len) as usize]
+    }
+
+    fn view_position(&self) -> Option<usize> {
+        self.view.iter().position(|&i| i == self.selection)
+    }
+
+    /// Rebuilds `view` from the search text, like the WebView2 home filter:
+    /// name, folder, Minecraft version or loader containing the query.
+    fn refilter(&mut self) {
+        let query = self.search.trim().to_lowercase();
+        self.view = self
+            .cards
+            .iter()
+            .enumerate()
+            .filter(|(_, card)| {
+                let i = &card.instance;
+                let folder = std::path::Path::new(&i.path)
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_lowercase())
+                    .unwrap_or_default();
+                query.is_empty()
+                    || i.name.to_lowercase().contains(&query)
+                    || folder.contains(&query)
+                    || i.mc_version.to_lowercase().contains(&query)
+                    || i.loader.to_lowercase().contains(&query)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if self.view_position().is_none()
+            && let Some(&first) = self.view.first()
+        {
+            self.selection = first;
+        }
+    }
+
+    pub fn searching(&self) -> bool {
+        self.search_focus
+    }
+
+    pub fn search_input(&mut self, text: &str) {
+        if !self.search_focus {
+            return;
+        }
+        let room = 40usize.saturating_sub(self.search.chars().count());
+        self.search
+            .extend(text.chars().filter(|c| !c.is_control()).take(room));
+        self.refilter();
+    }
+
+    pub fn search_backspace(&mut self) {
+        if self.search_focus && self.search.pop().is_some() {
+            self.refilter();
+        }
+    }
+
+    /// Esc clears the text first, then leaves the field.
+    pub fn search_escape(&mut self) {
+        if self.search.is_empty() {
+            self.search_focus = false;
+        } else {
+            self.search.clear();
+            self.refilter();
+        }
+    }
+
+    pub fn search_blur(&mut self) {
+        self.search_focus = false;
     }
 
     pub fn current_zoom(&self, now: Instant) -> f32 {
@@ -718,7 +1042,7 @@ impl Home {
     fn geometry(&self, window: &Window, now: Instant) -> Geometry {
         Geometry::new(
             HomeArea::new(window),
-            self.cards.len() >= 5,
+            self.view.len() >= 5,
             self.current_zoom(now),
             self.settings.layout.carousel_offset_y,
         )
@@ -726,13 +1050,19 @@ impl Home {
 
     fn toolbar_geometry(&self, window: &Window, carousel: Geometry, now: Instant) -> ToolbarGeometry {
         let [zoom] = self.toolbar_zoom.sample(now, ZOOM_DURATION, EASE);
-        ToolbarGeometry::new(
+        let mut toolbar = ToolbarGeometry::new(
             HomeArea::new(window),
             carousel,
-            !self.cards.is_empty(),
+            !self.view.is_empty(),
             zoom,
             self.settings.layout.toolbar_offset_y,
-        )
+        );
+        // Keep the bar's distance to the selected card while it rises and
+        // grows on hover (same numbers as home_card in home.wgsl).
+        let [star] = self.selected_hover.sample(now, SELECTED_HOVER, CARD_EASE);
+        let rise = 9.0 * star + 0.045 * star * HEIGHTS[2] * 0.5;
+        toolbar.view[1] -= rise * carousel.scale;
+        toolbar
     }
 
     pub fn is_over_toolbar(&self, window: &Window, cursor: PhysicalPosition<f64>, now: Instant) -> bool {
@@ -758,7 +1088,7 @@ impl Home {
                 let slide = self.shift(now).0;
                 let over_card = (0..5)
                     .any(|slot| self.has_card(slot) && contains(g.card(slot, slide), cursor));
-                let over_arrow = self.cards.len() > 1
+                let over_arrow = self.view.len() > 1
                     && [g.arrow(-1.0), g.arrow(1.0)].into_iter().any(|r| contains(r, cursor));
                 (over_card || over_arrow).then_some(LayoutTarget::Carousel)
             };
@@ -871,11 +1201,25 @@ impl Home {
     }
 
     pub fn animated(&self, now: Instant) -> bool {
-        self.slide.is_some_and(|(start, _)| now.saturating_duration_since(start).as_secs_f32() < GLIDE)
+        // The arrows' borders turn continuously, like the titlebar edge.
+        (!self.reduced_motion && self.view.len() > 1)
+            || self.slide.is_some_and(|(start, _)| now.saturating_duration_since(start).as_secs_f32() < GLIDE)
             || self.zoom_started.is_some_and(|start| now.saturating_duration_since(start).as_secs_f32() < ZOOM_DURATION)
             || self.create_icon.running(now, 0.2)
             || self.create_tint.running(now, 0.2)
             || self.toolbar_zoom.running(now, ZOOM_DURATION)
+            || self.toolbar_hover.running(now, TOOLBAR_HOVER)
+            || self.search_reveal.running(now, SEARCH_REVEAL)
+            || self.card_hover.running(now, CARD_HOVER)
+            || self.selected_hover.running(now, SELECTED_HOVER)
+            || self.arrow_hover.running(now, ARROW_HOVER)
+            || self.arrow_pressed.iter().flatten().any(|t| now.saturating_duration_since(*t).as_secs_f32() < ARROW_PRESS)
+            || self.selected_hover_since.is_some()
+            || self.icon_time.iter().any(|&t| t > 0.0 && t < 1.0)
+            || self.icon_return.iter().any(Option::is_some)
+            || self.search_clicked.is_some_and(|t| now.saturating_duration_since(t).as_secs_f32() < SEARCH_CLICK)
+            // The search halo breathes in a loop while hovered.
+            || self.toolbar_hover.sample(now, TOOLBAR_HOVER, titlebar::ICON_EASE)[3] > 0.001
             || self.refreshing
     }
 
@@ -892,7 +1236,7 @@ impl Home {
     }
 
     fn has_card(&self, slot: usize) -> bool {
-        match self.cards.len() {
+        match self.view.len() {
             0 => false,
             1 => slot == 2,
             2 => (1..=2).contains(&slot),
@@ -906,10 +1250,10 @@ impl Home {
         if let Some(hit) = self.toolbar_geometry(window, g, now).hit(p) {
             return Some(hit);
         }
-        if self.cards.is_empty() {
+        if self.view.is_empty() {
             return None;
         }
-        if self.cards.len() > 1 {
+        if self.view.len() > 1 {
             if contains(g.arrow(-1.0), p) {
                 return Some(Hit::Prev);
             }
@@ -919,7 +1263,7 @@ impl Home {
         }
         let slide = self.shift(now).0;
         (0..5)
-            .filter(|&slot| slot != 2 && self.has_card(slot))
+            .filter(|&slot| self.has_card(slot))
             .find(|&slot| contains(g.card(slot, slide), p))
             .map(|slot| Hit::Card(slot as i32 - 2))
     }
@@ -932,8 +1276,16 @@ impl Home {
             self.notice.clear();
             return;
         }
-        if matches!(hit, Hit::Create | Hit::Search) {
+        if hit == Hit::Search {
+            self.search_focus = true;
+            self.search_clicked = (!self.reduced_motion).then_some(now);
             return;
+        }
+        if hit == Hit::Create {
+            return;
+        }
+        if let Hit::Prev | Hit::Next = hit {
+            self.arrow_pressed[usize::from(hit == Hit::Next)] = (!self.reduced_motion).then_some(now);
         }
         let offset = match hit {
             Hit::Prev => -1,
@@ -941,7 +1293,7 @@ impl Home {
             Hit::Card(offset) => offset,
             Hit::Filter(_) | Hit::Create | Hit::Search => return,
         };
-        if self.cards.len() < 2 || self.editing() {
+        if offset == 0 || self.view.len() < 2 || self.editing() {
             return;
         }
         self.selection = self.index(offset);
@@ -1118,7 +1470,7 @@ impl Home {
     pub fn uniforms(&mut self, p: &mut Params, window: &Window, now: Instant, hover: Option<Hit>) {
         let g = self.geometry(window, now);
         let (slide, opacity) = self.shift(now);
-        let total = self.cards.len();
+        let total = self.view.len();
         let hovered = match hover {
             Some(Hit::Card(offset)) => offset as f32 + 3.0,
             Some(Hit::Prev) => 6.0,
@@ -1131,7 +1483,9 @@ impl Home {
         p.home_view = [g.center[0], g.center[1], g.scale, opacity];
         p.home_toolbar_view = self.toolbar_geometry(window, g, now).view;
         p.home_toolbar_rects = TOOLBAR_RECTS;
-        let status = if let Some(card) = self.cards.get(self.selection) {
+        let status = if total == 0 && !self.cards.is_empty() {
+            "Sin resultados para la búsqueda"
+        } else if let Some(card) = self.cards.get(self.selection) {
             if !self.notice.is_empty() {
                 self.notice.as_str()
             } else if self.editing() {
@@ -1170,6 +1524,109 @@ impl Home {
             let [tint] = self.create_tint.sample(now, CREATE_TINT_DURATION, EASE);
             (icon, tint)
         };
+        let hover_target = [
+            f32::from(hover == Some(Hit::Filter(0))),
+            f32::from(hover == Some(Hit::Filter(1))),
+            f32::from(hover == Some(Hit::Filter(2))),
+            f32::from(hover == Some(Hit::Search)),
+        ];
+        if self.reduced_motion {
+            self.toolbar_hover = titlebar::Transition::new(hover_target, now);
+        } else {
+            self.toolbar_hover.set(hover_target, now, TOOLBAR_HOVER, titlebar::ICON_EASE);
+        }
+        p.home_controls[3] = self.toolbar_hover.sample(now, TOOLBAR_HOVER, titlebar::ICON_EASE);
+        let open = f32::from(self.search_focus || !self.search.is_empty());
+        if self.reduced_motion {
+            self.search_reveal = titlebar::Transition::new([open], now);
+        } else {
+            self.search_reveal.set([open], now, SEARCH_REVEAL, titlebar::ICON_EASE);
+        }
+        let [reveal] = self.search_reveal.sample(now, SEARCH_REVEAL, titlebar::ICON_EASE);
+        let click = self
+            .search_clicked
+            .map_or(1.0, |t| (now.saturating_duration_since(t).as_secs_f32() / SEARCH_CLICK).min(1.0));
+        // Arrow border loop: one clockwise turn every 11 s, from the same clock
+        // as every Home animation, so it never jumps when a period wraps.
+        let ring = if self.reduced_motion { 0.0 } else { (now.saturating_duration_since(self.phase_started).as_secs_f64() / 11.0).fract() as f32 };
+        p.home_controls[4] = [reveal, click, ring, 0.0];
+        // Slots 0,1,3,4 (the selected slot 2 has its own frame).
+        let card = |slot: i32| f32::from(hover == Some(Hit::Card(slot)));
+        let targets = [card(-2), card(-1), card(1), card(2)];
+        if self.reduced_motion {
+            self.card_hover = titlebar::Transition::new(targets, now);
+        } else {
+            self.card_hover.set(targets, now, CARD_HOVER, CARD_EASE);
+        }
+        let [h0, h1, h3, h4] = self.card_hover.sample(now, CARD_HOVER, CARD_EASE);
+        p.home_controls[5] = [h0, h1, h3, h4];
+        let on_selected = hover == Some(Hit::Card(0));
+        if on_selected && self.selected_hover_since.is_none() {
+            self.selected_hover_since = Some(now);
+        }
+        if self.reduced_motion {
+            self.selected_hover = titlebar::Transition::new([f32::from(on_selected)], now);
+        } else {
+            self.selected_hover.set([f32::from(on_selected)], now, SELECTED_HOVER, CARD_EASE);
+        }
+        let [selected] = self.selected_hover.sample(now, SELECTED_HOVER, CARD_EASE);
+        if selected <= 0.0 && !on_selected {
+            self.selected_hover_since = None;
+        }
+        // y: seconds since it started, drives the looping shine while hovered.
+        let alive = self.selected_hover_since.map_or(0.0, |t| now.saturating_duration_since(t).as_secs_f32());
+        p.home_controls[8] = [selected, alive, 0.0, 0.0];
+        let arrows = [f32::from(hover == Some(Hit::Prev)), f32::from(hover == Some(Hit::Next))];
+        if self.reduced_motion {
+            self.arrow_hover = titlebar::Transition::new(arrows, now);
+        } else {
+            self.arrow_hover.set(arrows, now, ARROW_HOVER, titlebar::ICON_EASE);
+        }
+        let [prev_hot, next_hot] = self.arrow_hover.sample(now, ARROW_HOVER, titlebar::ICON_EASE);
+        let press = |t: Option<Instant>| {
+            t.map_or(1.0, |t| (now.saturating_duration_since(t).as_secs_f32() / ARROW_PRESS).min(1.0))
+        };
+        p.home_controls[9] = [prev_hot, next_hot, press(self.arrow_pressed[0]), press(self.arrow_pressed[1])];
+        // Each filter icon plays forward while the cursor is over it. Leaving
+        // before it ends doesn't cut it: the icon freezes the pose it reached
+        // and glides that pose back to rest (no reversed bounce). When it had
+        // finished, its last pose already is the resting one. Nothing pops.
+        // home_controls[6] = clock of each icon; home_controls[7] = how much
+        // of each pose is still shown (1 while playing, easing to 0 on return).
+        let dt = self.icon_last.map_or(0.0, |t| now.saturating_duration_since(t).as_secs_f32()).min(0.1);
+        self.icon_last = Some(now);
+        let mut clocks = [0.0f32; 4];
+        let mut weights = [1.0f32; 4];
+        // 0..3: Todas, Recientes, Favoritas; 3: the search magnifier.
+        for i in 0..4 {
+            let target = if i == 3 { Hit::Search } else { Hit::Filter(i as u8) };
+            let over = hover == Some(target) && !self.reduced_motion;
+            if over {
+                if self.icon_return[i].take().is_some() {
+                    self.icon_time[i] = 0.0;
+                }
+                self.icon_time[i] = (self.icon_time[i] + dt / ICON_PLAY).min(1.0);
+            } else if self.icon_return[i].is_none() && self.icon_time[i] > 0.0 && self.icon_time[i] < 1.0 {
+                self.icon_return[i] = Some((self.icon_time[i], 1.0));
+            }
+            if let Some((from, left)) = self.icon_return[i] {
+                let left = (left - dt / ICON_RETURN).max(0.0);
+                self.icon_time[i] = from;
+                if left <= 0.0 {
+                    self.icon_return[i] = None;
+                    self.icon_time[i] = 0.0;
+                } else {
+                    self.icon_return[i] = Some((from, left));
+                    // Ease-out: fast at first, gently landing at rest.
+                    weights[i] = left * left * (3.0 - 2.0 * left);
+                }
+            } else if !over && self.icon_time[i] >= 1.0 {
+                self.icon_time[i] = 0.0;
+            }
+            clocks[i] = self.icon_time[i];
+        }
+        p.home_controls[7] = weights;
+        p.home_controls[6] = clocks;
         let [filter_x, filter_width] = self.filter_glider.sample(now);
         p.home_toolbar = [filter_x, filter_width, icon, tint];
         let elapsed = now.duration_since(self.phase_started).as_secs_f32();
@@ -1181,8 +1638,16 @@ impl Home {
                 elapsed.rem_euclid(CREATE_BORDER_PERIOD) / CREATE_BORDER_PERIOD
             },
             self.active_filter as f32,
-            0.0,
+            // 0: placeholder, 1: typed text, 2: focused with a caret.
+            if self.search_focus {
+                2.0
+            } else {
+                f32::from(!self.search.is_empty())
+            },
         ];
+        // A steady caret: blinking would redraw the launcher all the time.
+        let caret = if self.search_focus { "|" } else { "" };
+        p.home_text[13].write(&format!("{}{caret}", self.search), 150.0);
         p.home_text[10].write(status, 260.0);
         if total == 0 {
             return;
@@ -1196,7 +1661,8 @@ impl Home {
             format!("Jugador: {}", self.settings.username)
         };
         p.home_text[11].write(&profile, 242.0);
-        p.home_controls = [g.arrow(-1.0), g.arrow(1.0), [0.0; 4]];
+        p.home_controls[0] = g.arrow(-1.0);
+        p.home_controls[1] = g.arrow(1.0);
         for slot in if total >= 5 { 0..5 } else { 1..4 } {
             p.home_rects[slot] = g.card(slot, slide);
             if self.has_card(slot) {
@@ -1377,6 +1843,21 @@ mod tests {
             reduced_motion: false,
             active_filter: 0,
             filter_glider: titlebar::Glider::new(filter_rect(0), now),
+            toolbar_hover: titlebar::Transition::new([0.0; 4], now),
+            search_reveal: titlebar::Transition::new([0.0], now),
+            card_hover: titlebar::Transition::new([0.0; 4], now),
+            selected_hover: titlebar::Transition::new([0.0], now),
+            arrow_hover: titlebar::Transition::new([0.0; 2], now),
+            arrow_pressed: [None; 2],
+            selected_hover_since: None,
+            icon_time: [0.0; 4],
+            icon_return: [None; 4],
+            search_clicked: None,
+            icon_last: None,
+            search: String::new(),
+            search_focus: false,
+            view: Vec::new(),
+            custom_icons: Default::default(),
             tx: dummy_sender(),
             rx: mpsc::channel().1,
         };
@@ -1426,6 +1907,21 @@ mod tests {
             reduced_motion: false,
             active_filter: 0,
             filter_glider: titlebar::Glider::new(filter_rect(0), now),
+            toolbar_hover: titlebar::Transition::new([0.0; 4], now),
+            search_reveal: titlebar::Transition::new([0.0], now),
+            card_hover: titlebar::Transition::new([0.0; 4], now),
+            selected_hover: titlebar::Transition::new([0.0], now),
+            arrow_hover: titlebar::Transition::new([0.0; 2], now),
+            arrow_pressed: [None; 2],
+            selected_hover_since: None,
+            icon_time: [0.0; 4],
+            icon_return: [None; 4],
+            search_clicked: None,
+            icon_last: None,
+            search: String::new(),
+            search_focus: false,
+            view: Vec::new(),
+            custom_icons: Default::default(),
             tx: dummy_sender(),
             rx: mpsc::channel().1,
         };
@@ -1437,4 +1933,162 @@ mod tests {
         // Resetting again when already 1.0 should return false (no change)
         assert!(!home.reset_zoom(now));
     }
+
+    fn test_home(names: &[(&str, &str, &str)]) -> Home {
+        let now = Instant::now();
+        let dir = tempfile::tempdir().unwrap();
+        let (settings_store, settings) = SettingsStore::open(Some(dir.path().join("h.json")));
+        let cards = names
+            .iter()
+            .map(|(name, mc, loader)| Card {
+                instance: minecraft::Instance {
+                    name: (*name).into(),
+                    path: format!("C:/instances/{name}"),
+                    mod_count: 0,
+                    mc_version: (*mc).into(),
+                    loader: (*loader).into(),
+                    loader_version: None,
+                    icon_path: None,
+                    java_version: None,
+                    java_vendor: "",
+                    total_time_played: None,
+                    shader_count: 0,
+                    resourcepack_count: 0,
+                    max_mem_mb: 8192,
+                },
+                icon: 0,
+                custom_cover: 0,
+                state: Game::Idle,
+            })
+            .collect();
+        let mut home = Home {
+            cards,
+            selection: 0,
+            settings,
+            settings_store,
+            edit: None,
+            edit_and_play: false,
+            notice: String::new(),
+            ready: true,
+            refreshing: false,
+            slide: None,
+            phase_started: now,
+            create_icon: titlebar::Transition::new([0.0], now),
+            create_tint: titlebar::Transition::new([0.0], now),
+            zoom_target: 1.0,
+            zoom_start: 1.0,
+            zoom_started: None,
+            toolbar_zoom: titlebar::Transition::new([1.0], now),
+            nudge_target: None,
+            reduced_motion: true,
+            active_filter: 0,
+            filter_glider: titlebar::Glider::new(filter_rect(0), now),
+            toolbar_hover: titlebar::Transition::new([0.0; 4], now),
+            search_reveal: titlebar::Transition::new([0.0], now),
+            card_hover: titlebar::Transition::new([0.0; 4], now),
+            selected_hover: titlebar::Transition::new([0.0], now),
+            arrow_hover: titlebar::Transition::new([0.0; 2], now),
+            arrow_pressed: [None; 2],
+            selected_hover_since: None,
+            icon_time: [0.0; 4],
+            icon_return: [None; 4],
+            search_clicked: None,
+            icon_last: None,
+            search: String::new(),
+            search_focus: false,
+            view: Vec::new(),
+            custom_icons: Default::default(),
+            tx: dummy_sender(),
+            rx: mpsc::channel().1,
+        };
+        home.refilter();
+        home
+    }
+
+    #[test]
+    fn search_filters_by_name_version_and_loader_and_cycles_inside_results() {
+        let mut home = test_home(&[
+            ("Keo Optimized", "1.20.1", "Forge"),
+            ("RLCraft", "1.12.2", "Forge"),
+            ("Fabulous", "1.21.1", "Fabric"),
+            ("Keo Neo", "1.21.1", "NeoForge"),
+        ]);
+        let now = Instant::now();
+        // Typing does nothing until the field is clicked.
+        home.search_input("keo");
+        assert_eq!(home.view.len(), 4);
+
+        home.activate(Hit::Search, now);
+        assert!(home.searching());
+        home.search_input("KEO");
+        assert_eq!(home.view, vec![0, 3]);
+        assert_eq!(home.selection, 0);
+        home.activate(Hit::Next, now);
+        assert_eq!(home.selection, 3);
+        home.activate(Hit::Next, now);
+        assert_eq!(home.selection, 0, "wraps inside the results");
+
+        home.search_escape();
+        home.search_input("fabric");
+        assert_eq!(home.view, vec![2]);
+        assert_eq!(home.selection, 2, "selection moves into the results");
+
+        home.search_escape();
+        home.search_input("1.21");
+        assert_eq!(home.view, vec![2, 3]);
+
+        home.search_escape();
+        home.search_input("zzz");
+        assert!(home.view.is_empty());
+        assert!(home.active_instance().is_some(), "Play keeps a real instance");
+
+        // Esc clears, a second Esc leaves the field; everything is back.
+        home.search_escape();
+        assert!(home.searching());
+        assert_eq!(home.view.len(), 4);
+        home.search_escape();
+        assert!(!home.searching());
+    }
+
+    #[test]
+    fn picking_a_hidden_instance_from_the_collection_clears_the_search() {
+        let mut home = test_home(&[("Alpha", "1.20.1", "Forge"), ("Beta", "1.20.1", "Forge"), ("Gamma", "1.21", "Fabric")]);
+        let now = Instant::now();
+        home.activate(Hit::Search, now);
+        home.search_input("alpha");
+        home.select_instance(2, now);
+        assert_eq!(home.selection, 2);
+        assert_eq!(home.view.len(), 3);
+        assert!(!home.searching());
+    }
+
+
+    #[test]
+    fn block_faces_match_the_webview2_assignment() {
+        // Expected values come from running the original JavaScript
+        // (getUniqueBlockFaceForInstance) over the same keys.
+        let names: Vec<&str> = BLOCK_FACE_NAMES.lines().collect();
+        let keys = ["C:/a/one", "C:/a/two", "C:/A/One", "C:/a/three"].map(String::from);
+        let faces = webview_block_faces(keys, names.len());
+        assert_eq!(faces[0], faces[2], "same key, case-insensitive");
+        assert_ne!(faces[0], faces[1]);
+        assert_ne!(faces[1], faces[3]);
+        let expected = std::env::var("IKA_FACES_EXPECTED").ok();
+        if let Some(path) = expected {
+            let text = std::fs::read_to_string(path).unwrap();
+            let rows: Vec<(String, String)> = text
+                .lines()
+                .map(|l| {
+                    let (k, f) = l.split_once('\t').unwrap();
+                    (k.to_owned(), f.to_owned())
+                })
+                .collect();
+            let got = webview_block_faces(rows.iter().map(|(k, _)| k.clone()), names.len());
+            for ((key, want), face) in rows.iter().zip(got) {
+                assert_eq!(names[face], want, "{key}");
+            }
+            println!("checked {} instances", rows.len());
+        }
+    }
+
 }

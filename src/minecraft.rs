@@ -30,6 +30,57 @@ pub fn game_folder(instance: &Instance) -> std::path::PathBuf {
     }
 }
 
+/// Moves the instance to the launcher's recycle folder (`IkaLauncher/papelera`),
+/// out of every list, recoverable. Same layout as WebView2's trash_instance.
+pub fn trash(instance: &Instance) -> Result<std::path::PathBuf, String> {
+    let root = std::path::Path::new(&instance.path);
+    if !root.is_dir() {
+        return Err("La carpeta de la instancia no existe".into());
+    }
+    let trash = ika_root().join("papelera");
+    std::fs::create_dir_all(&trash).map_err(|e| e.to_string())?;
+    let folder = root.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let target = trash.join(format!("{folder}-{stamp}"));
+    if std::fs::rename(root, &target).is_err() {
+        // Another drive: copy, then remove the original.
+        copy_dir(root, &target).map_err(|e| format!("No se pudo mover la instancia: {e}"))?;
+        std::fs::remove_dir_all(root)
+            .map_err(|e| format!("Se copió a la papelera, pero no se pudo borrar el original: {e}"))?;
+    }
+    Ok(target)
+}
+
+fn copy_dir(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
+/// Force-closes a running game by its process id.
+pub fn stop(pid: u32) -> Result<(), String> {
+    use windows::Win32::{
+        Foundation::CloseHandle,
+        System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess},
+    };
+    unsafe {
+        let handle = OpenProcess(PROCESS_TERMINATE, false, pid).map_err(|e| e.to_string())?;
+        let result = TerminateProcess(handle, 1).map_err(|e| e.to_string());
+        let _ = CloseHandle(handle);
+        result
+    }
+}
+
 pub fn valid_username(name: &str) -> bool {
     (2..=16).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
@@ -76,6 +127,19 @@ pub fn prewarm(instance: &Instance, username: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copy_dir_copies_nested_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("a");
+        std::fs::create_dir_all(from.join("mods")).unwrap();
+        std::fs::write(from.join("instance.cfg"), "name=A").unwrap();
+        std::fs::write(from.join("mods/x.jar"), "jar").unwrap();
+        let to = dir.path().join("b");
+        copy_dir(&from, &to).unwrap();
+        assert_eq!(std::fs::read_to_string(to.join("mods/x.jar")).unwrap(), "jar");
+        assert_eq!(std::fs::read_to_string(to.join("instance.cfg")).unwrap(), "name=A");
+    }
 
     #[test]
     fn discovers_existing_and_external_instances_without_writing_to_them() {

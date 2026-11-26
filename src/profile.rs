@@ -7,6 +7,9 @@ mod storage;
 mod tube;
 mod windows_ui;
 mod instance_ui;
+mod specs;
+mod instance_menu;
+pub use instance_menu::Action as MenuAction;
 pub use instance_ui::Mode as InstanceMode;
 pub use paint::PaintGpu;
 pub use windows_ui::{AppAction, game_window_mode};
@@ -64,6 +67,11 @@ pub struct Profile {
     ctx: egui::Context,
     input: Option<egui_winit::State>,
     dirty: bool,
+    /// Opacity of Home's clock and floating console during a section change.
+    home_opacity: f32,
+    specs: specs::Specs,
+    instance_menu: Option<instance_menu::Menu>,
+    menu_action: Option<(MenuAction, String)>,
     dock_visible: bool,
     clock_occlusion: ClockOcclusion,
     console: Option<console::Console>,
@@ -141,6 +149,10 @@ impl Profile {
             ctx,
             input: None,
             dirty: false,
+            home_opacity: 1.0,
+            specs: specs::Specs::new(reduced_motion),
+            instance_menu: None,
+            menu_action: None,
             dock_visible: false,
             clock_occlusion: ClockOcclusion::default(),
             console: enabled.then(console::Console::new),
@@ -1221,12 +1233,157 @@ impl Profile {
         self.dirty = true;
     }
 
+    /// Opens the WebView2 right-click menu of a carousel card at `at`.
+    pub fn open_carousel_menu(&mut self, window: &Window, instance: &crate::minecraft::Instance, running: bool, at: winit::dpi::PhysicalPosition<f64>) {
+        let dpi = window.scale_factor();
+        let p = pos2((at.x / dpi) as f32, (at.y / dpi) as f32);
+        self.instance_menu = Some(instance_menu::Menu::carousel(instance, running, p, Instant::now(), self.reduced_motion));
+        self.dirty = true;
+    }
+
+    /// Opens (or closes) the dock's "⋮" menu above `above` (logical point).
+    pub fn toggle_dock_menu(&mut self, instance: &crate::minecraft::Instance, running: bool, above: Pos2) {
+        let now = Instant::now();
+        match &mut self.instance_menu {
+            Some(menu) if menu.kind == instance_menu::Kind::Dock && !menu.closing() => menu.close(now),
+            _ => self.instance_menu = Some(instance_menu::Menu::dock(instance, running, above, now, self.reduced_motion)),
+        }
+        self.dirty = true;
+    }
+
+    pub fn menu_animating(&self, now: Instant) -> bool {
+        self.instance_menu.as_ref().is_some_and(|m| m.animating(now))
+    }
+
+    pub fn take_menu_action(&mut self) -> Option<(MenuAction, String)> {
+        self.menu_action.take()
+    }
+
+    /// Pointer input while a menu is open. Returns true when consumed.
+    pub fn menu_event(&mut self, window: &Window, pointer: Option<winit::dpi::PhysicalPosition<f64>>, event: &WindowEvent) -> bool {
+        let now = Instant::now();
+        if self.instance_menu.as_ref().is_some_and(|m| m.finished(now)) {
+            self.instance_menu = None;
+        }
+        let Some(menu) = &mut self.instance_menu else { return false };
+        if menu.closing() {
+            return false;
+        }
+        let dpi = window.scale_factor();
+        let size = window.inner_size();
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(size.width as f32 / dpi as f32, size.height as f32 / dpi as f32));
+        let p = pointer.map(|p| pos2((p.x / dpi) as f32, (p.y / dpi) as f32));
+        match event {
+            WindowEvent::CursorMoved { .. } => {
+                if menu.pointer(screen, p, now) {
+                    self.dirty = true;
+                }
+                p.is_some_and(|p| menu.contains(screen, p))
+            }
+            WindowEvent::MouseInput { state: winit::event::ElementState::Pressed, .. } => {
+                let inside = p.is_some_and(|p| menu.contains(screen, p));
+                if let Some(p) = p.filter(|_| inside) {
+                    if let Some(action) = menu.click(screen, p, now) {
+                        self.menu_action = Some((action, menu.path.clone()));
+                    }
+                } else {
+                    menu.close(now);
+                }
+                self.dirty = true;
+                // A press outside closes the menu without reaching what is under it.
+                true
+            }
+            WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. } => p.is_some_and(|p| menu.contains(screen, p)),
+            WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() && event.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape) => {
+                menu.close(now);
+                self.dirty = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Shows the selected instance in the specs strip under Play.
+    pub fn set_specs(&mut self, instance: Option<&crate::minecraft::Instance>, now: Instant) {
+        if self.specs.update(instance, now) {
+            self.dirty = true;
+        }
+        if self.specs.animating(now) {
+            self.dirty = true;
+        }
+    }
+
+    pub fn specs_animating(&self, now: Instant) -> bool {
+        self.specs.animating(now)
+    }
+
+    /// Ctrl + wheel over the specs strip. Returns whether it was used.
+    pub fn specs_wheel(&mut self, window: &Window, p: winit::dpi::PhysicalPosition<f64>, steps: f32) -> bool {
+        let dpi = window.scale_factor();
+        let at = pos2((p.x / dpi) as f32, (p.y / dpi) as f32);
+        if !self.specs.bounds(window).contains(at) {
+            return false;
+        }
+        self.specs.wheel(steps, Instant::now());
+        self.dirty = true;
+        true
+    }
+
+    /// Slides Home's clock and floating console with the carousel: `out` is how
+    /// far Home has left (0 in place), `direction` +1 when it leaves left.
+    pub fn home_slide(&mut self, window: &Window, out: f32, direction: f32) {
+        let width = window.inner_size().width as f32 / window.scale_factor() as f32;
+        let transform = egui::emath::TSTransform::from_translation(vec2(-direction * width * 0.55 * out, 0.0));
+        let opacity = (1.0 - out).clamp(0.0, 1.0);
+        let mut changed = false;
+        for id in [HOME_CLOCK_LAYER, "floating-instance-console"] {
+            let order = if id == HOME_CLOCK_LAYER { egui::Order::Background } else { egui::Order::Middle };
+            let layer = egui::LayerId::new(order, egui::Id::new(id));
+            if self.ctx.layer_transform_to_global(layer).unwrap_or_default() != transform {
+                self.ctx.set_transform_layer(layer, transform);
+                changed = true;
+            }
+        }
+        if self.home_opacity != opacity {
+            self.home_opacity = opacity;
+            changed = true;
+        }
+        if changed {
+            self.dirty = true;
+        }
+    }
+
+    /// Slides the detailed Console in from `direction` (+1: from the right).
+    /// `arrived` is 0 when it starts off screen and 1 when it is in place; it
+    /// may pass 1 and settle back, following the tab pill. The layer moves on
+    /// the GPU; its content is laid out as usual.
+    pub fn console_slide(&mut self, window: &Window, arrived: f32, direction: f32) {
+        let width = window.inner_size().width as f32 / window.scale_factor() as f32;
+        let offset = (1.0 - arrived) * direction * width * 0.42;
+        let layer = egui::LayerId::new(egui::Order::Middle, egui::Id::new("instance-console-detail"));
+        let transform = egui::emath::TSTransform::from_translation(vec2(offset, 0.0));
+        let opacity = arrived.clamp(0.0, 1.0).powf(0.7);
+        let current = self.ctx.layer_transform_to_global(layer).unwrap_or_default();
+        if let Some(console) = &mut self.console
+            && (current != transform || console.detail_opacity != opacity)
+        {
+            self.ctx.set_transform_layer(layer, transform);
+            console.detail_opacity = opacity;
+            self.dirty = true;
+        }
+    }
+
     pub fn webview_clock(&self) -> Option<(crate::home_widgets::Style, bool)> {
         self.data.origin_found.then_some((self.data.clock_style, self.data.clock_24h))
     }
 
     pub fn webview_favorites(&self) -> Option<&[String]> {
         self.data.origin_found.then_some(self.data.favorites.as_slice())
+    }
+
+    /// Icons chosen per instance in the WebView2 launcher, once loaded.
+    pub fn webview_instance_icons(&self) -> Option<&std::collections::BTreeMap<String, String>> {
+        (self.loaded && self.data.origin_found).then_some(&self.data.instance_icons)
     }
 
     pub fn paint(
@@ -1241,6 +1398,8 @@ impl Profile {
         clock_occlusion: ClockOcclusion,
         console_glass: bool,
     ) {
+        // The specs strip belongs to the dock; the profile card needs an account.
+        let show_specs = show_dock;
         let show_dock = show_dock && !self.data.active.is_empty();
         if self.dock_visible != show_dock {
             self.dock_visible = show_dock;
@@ -1250,12 +1409,21 @@ impl Profile {
             self.clock_occlusion = clock_occlusion;
             self.dirty = true;
         }
-        let new_pose = self.panel == Some(Panel::Profile) && self.rotation.take_frame(Instant::now());
+        let now = Instant::now();
+        // An open/closing instance menu animates every frame, not only on input.
+        if self.instance_menu.as_ref().is_some_and(|m| m.finished(now)) {
+            self.instance_menu = None;
+            self.dirty = true;
+        }
+        if self.instance_menu.as_ref().is_some_and(|m| m.animating(now)) {
+            self.dirty = true;
+        }
+        let new_pose = self.panel == Some(Panel::Profile) && self.rotation.take_frame(now);
         if !self.dirty && !new_pose {
             return;
         }
         self.dirty = false;
-        if !show_dock && self.panel.is_none() && widgets.is_none()
+        if !show_dock && !show_specs && self.panel.is_none() && widgets.is_none()
             && self.console.as_ref().is_none_or(|console| console.view() == ConsoleView::Hidden)
         {
             gpu.clear();
@@ -1331,12 +1499,23 @@ impl Profile {
         let output = ctx.run_ui(input, |ui| {
             if let Some((widgets, _home)) = widgets {
                 let now = Instant::now();
-                widgets.paint_home_clock(ui.painter(), window, now, show_panels, clock_occlusion);
+                // Own layer so the section change can slide it with the carousel.
+                let mut clock = ui.painter().clone().with_layer_id(egui::LayerId::new(
+                    egui::Order::Background,
+                    egui::Id::new(HOME_CLOCK_LAYER),
+                ));
+                clock.multiply_opacity(self.home_opacity);
+                widgets.paint_home_clock(&clock, window, now, show_panels, clock_occlusion);
             }
             if show_dock {
                 self.paint_dock(ui, window);
             }
+            if show_specs {
+                let layer = egui::LayerId::new(egui::Order::Background, egui::Id::new("instance-specs"));
+                self.specs.paint(&ui.painter().clone().with_layer_id(layer), window, Instant::now());
+            }
             if let Some(console) = &mut self.console {
+                console.home_opacity = self.home_opacity;
                 self.console_action = console.paint(ui, window, console_glass, Instant::now()).or(self.console_action.take());
             }
             if let Some((widgets, home)) = widgets {
@@ -1346,6 +1525,10 @@ impl Profile {
                     let panels_painter = ui.painter().clone().with_layer_id(panels_layer);
                     widgets.paint(&panels_painter, window, home, collection_art, now);
                 }
+            }
+            if let Some(menu) = &self.instance_menu {
+                let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("instance-menu"));
+                menu.paint(&ui.painter().clone().with_layer_id(layer), Instant::now());
             }
             if self.oneko.config.enabled {
                 let perch = self.console.as_ref().and_then(|c| c.minigame_perch(window));
@@ -1655,6 +1838,8 @@ fn send_cover(folder: &Path, token: u64) -> std::io::Result<()> {
     }
     std::fs::rename(part, dst)
 }
+const HOME_CLOCK_LAYER: &str = "home-clock";
+
 const FULL_UV: Rect = Rect {
     min: Pos2::ZERO,
     max: Pos2::new(1., 1.),

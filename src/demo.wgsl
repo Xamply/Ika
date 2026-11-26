@@ -43,6 +43,7 @@ struct Params {
     dock_scale: array<vec4<f32>, 2>,
     dock_fx: vec4<f32>,
     dock_pulse: vec4<f32>,
+    dock_label: vec4<f32>,
     play: PlayFrame,
     wall_rect: vec4<f32>,
     wall_crt: TubeLayers,
@@ -63,7 +64,7 @@ struct Params {
     home_phase: vec4<f32>, // status clock, create border phase, active filter, reserved
     home_rects: array<vec4<f32>, 5>,
     home_images: array<vec4<u32>, 5>,
-    home_controls: array<vec4<f32>, 3>,
+    home_controls: array<vec4<f32>, 10>, // arrows, section change, toolbar hover, search reveal, side card hover, icon clocks, icon pose weights, selected card hover
     home_text: array<HomeText, 18>,
     wall_rows: array<vec4<u32>, 74>,
     wall_words: array<vec4<u32>, 148>,
